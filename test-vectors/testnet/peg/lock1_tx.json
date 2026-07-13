@@ -1,0 +1,78 @@
+{
+    "id": "bc7245647bee2f242b118dae0094f594692afb7d7333967bf8d62884a07790eb",
+    "inputs": [
+        {
+            "boxId": "008e2c43788eac65b9a2899f37efd1ed3d846653e0592eb0bd7ef91b9b993469",
+            "spendingProof": {
+                "proofBytes": "130cc073ce69cb395e2f1ee45f68af81d2ed18f216300315aea53d76c27964d7fbab3e99a60c60e93ea18fbd343d3232f67b9ae91f0e3c9a",
+                "extension": {}
+            }
+        },
+        {
+            "boxId": "aa24e5cdbdec84c5c2d042da3b289d48664483bc92fdf883da9f0e062ba63ad6",
+            "spendingProof": {
+                "proofBytes": "dc384d9bd7334521eff0e087d62eab3e84fe0e6b553c0580f291402e914c8be0757b67f57f1341930ff5cfcd819537f4073acfa9206a3058",
+                "extension": {}
+            }
+        },
+        {
+            "boxId": "ab2f28b0a10ca1be1c42cf052feacf237e6ea510bf6cf346ca6dac6063ece726",
+            "spendingProof": {
+                "proofBytes": "7c3260dd192a4083948319c31b8a4cd910303c6a130c9d068ade9fb15a33b5b950e8b559a1d5221cc60638cec7647ad444b6075bf979c087",
+                "extension": {}
+            }
+        }
+    ],
+    "dataInputs": [],
+    "outputs": [
+        {
+            "boxId": "b7fde121261d67cf8522013f2c8e131a5e41ae902132d52273331f9c73756d13",
+            "value": 1000000000,
+            "ergoTree": "100a040004000e20006a33af9b295c830b1fe19422ede003da35a1c3a5f6ac56618e99ef2eaa2bab04000442040004000e20006ad21fd48bc6676dab0e7b32df80b0d29119912bf9e9022f60eed8440673070414043cd804d601db6308a7d602eded91b172017300938cb27201730100017302e6c6a7040ed603db6308b2a5730300d604e4c6a70804eb02d1eded720293b1e4c6a7040e7304ed91b172037305938cb27203730600017307ea02d1ed7202ed92a372049272049a9a8cc7a70173087309e4c6a70708",
+            "address": "4ftaxv5T31S2QUUiV15qA13B71LskmFXhghGJxD26A4qU1marXrvMTdBr5Hz8SvPUB5snokg2d5GRKvZJCNWtt5reMJKoKELrH6GPnvdiTRCU7ytSh3yH21PjAMGPmcG2rhcyaudHrvZHCB7ddVY9kJuDDU9X8g1M5QiBgv3zy8ZFkcPuMCXDegZM1pgzmyFR6EtSXDn6pYHbJ5v6CdNnkCxmTkZXbXMyJSvN5AvGcYenHqLLBbh7gT3v7TcN5LcosVmbP1X7a3NSEmig4yfN8MQ",
+            "assets": [
+                {
+                    "tokenId": "006a33af9b295c830b1fe19422ede003da35a1c3a5f6ac56618e99ef2eaa2bab",
+                    "amount": 100000
+                }
+            ],
+            "creationHeight": 443395,
+            "additionalRegisters": {
+                "R4": "0e210279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+                "R5": "0e1461656769732d746573746e65742d6c6f636b2d31",
+                "R6": "0402",
+                "R7": "08cd03b648cf969eba0499bce0d5b1247c11f0b94c878e56a2f4daf26920311ae107fd",
+                "R8": "049c9236"
+            }
+        },
+        {
+            "boxId": "d4c30b68023ef7d18ed552dd4ea3bcf47180dbc1a138b1bf84506e1e994eebd2",
+            "value": 1100000,
+            "ergoTree": "1005040004000e36100204a00b08cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ea02d192a39a8cc7a701730073011001020402d19683030193a38cc7b2a57300000193c2b2a57301007473027303830108cdeeac93b1a57304",
+            "address": "Bf1X9JgQTUtgntaer91B24n6kP8L2kqEiQqNf1z97BKo9UbnW3WRP9VXu8BXd1LsYCiYbHJEdWKxkF5YNx5n7m31wsDjbEuB3B13ZMDVBWkepGmWfGa71otpFViHDCuvbw1uNicAQnfuWfnj8fbCa4",
+            "assets": [],
+            "creationHeight": 443395,
+            "additionalRegisters": {}
+        },
+        {
+            "boxId": "870d077a207c8e912da46e788aae3c82d5cbde4e348236c78b3a4989806815a4",
+            "value": 66599900000,
+            "ergoTree": "0008cd03b648cf969eba0499bce0d5b1247c11f0b94c878e56a2f4daf26920311ae107fd",
+            "address": "3WywEV3keFs3zpXTHx9wbAxjQcWdBU9yCWud4CmEuqsDPXpwgj7M",
+            "assets": [
+                {
+                    "tokenId": "006a33af9b295c830b1fe19422ede003da35a1c3a5f6ac56618e99ef2eaa2bab",
+                    "amount": 900000
+                }
+            ],
+            "creationHeight": 443395,
+            "additionalRegisters": {}
+        }
+    ],
+    "size": 782,
+    "inclusionHeight": 443396,
+    "scans": [
+        10
+    ],
+    "numConfirmations": 13
+}

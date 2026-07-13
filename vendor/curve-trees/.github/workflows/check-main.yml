@@ -1,0 +1,48 @@
+name: Rust
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check-stable:
+
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v2
+    - name: Install the stable
+      uses: actions-rs/toolchain@v1
+      with:
+          toolchain: stable
+          override: true
+          components: rustfmt
+    - name: Cargo fmt
+      run: cargo fmt --all -- --check
+    - name: Run tests
+      run: cargo test --release --verbose
+    - name: Build benchmarks with bench_prover
+      run: cargo bench --features bench_prover --verbose DONTRUNBENCHMARKS
+    - name: Build benchmarks no default features
+      run: cargo bench --no-default-features --verbose DONTRUNBENCHMARKS 
+
+  check-nightly:
+
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v2
+    - name: Install the nightly
+      uses: actions-rs/toolchain@v1
+      with:
+          toolchain: nightly
+          override: true
+    - name: Run tests
+      run: cargo test --release --features="std" --verbose
+    - name: Build benchmarks
+      run: cargo bench --features="std" --verbose DONTRUNBENCHMARKS

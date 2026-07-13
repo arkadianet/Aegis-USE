@@ -1,0 +1,10 @@
+[package]
+name        = "aegis-spec"
+description = "Network identity and chain parameters for the Aegis sidechain: types, constants, and constructors only. No validation logic, no runtime services, no I/O."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish     = false
+
+[dependencies]

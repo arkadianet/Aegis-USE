@@ -1,0 +1,5 @@
+/target
+**/*.rs.bk
+.DS_Store
+# Cargo.lock IS committed (this is a node/app + a value bridge — reproducible
+# builds are required). Do not ignore it.

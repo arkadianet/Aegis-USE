@@ -1,0 +1,68 @@
+[workspace]
+resolver = "2"
+members  = ["aegis-crypto", "aegis-node", "aegis-spec"]
+# The vendored Curve Trees stack is its own nested workspace; aegis-crypto
+# path-depends into it (see aegis-crypto/Cargo.toml). Excluded here exactly
+# as in the upstream monorepo.
+exclude  = ["vendor/curve-trees"]
+
+[workspace.package]
+version    = "0.5.1"
+edition    = "2021"
+license    = "MIT OR Apache-2.0"
+repository = "https://github.com/arkadianet/Aegis-USE"
+
+[workspace.dependencies]
+# --- Ergo consensus crates, consumed as GIT dependencies pinned to the
+#     upstream release tag. Bumping the tag is the single edit needed to
+#     roll the whole node against a new Ergo node release. Cargo.lock pins
+#     the exact resolved commit for reproducibility (a bridge must build
+#     byte-identically). ---
+ergo-primitives = { git = "https://github.com/arkadianet/ergo.git", tag = "v0.5.2" }
+ergo-crypto     = { git = "https://github.com/arkadianet/ergo.git", tag = "v0.5.2" }
+ergo-ser        = { git = "https://github.com/arkadianet/ergo.git", tag = "v0.5.2" }
+ergo-validation = { git = "https://github.com/arkadianet/ergo.git", tag = "v0.5.2" }
+ergo-rest-json  = { git = "https://github.com/arkadianet/ergo.git", tag = "v0.5.2" }
+
+# --- arkworks (matching the vendored Curve Trees stack) ---
+ark-ec        = "0.4.2"
+ark-ff        = "0.4.2"
+ark-serialize = "0.4.2"
+ark-std       = "0.4.0"
+ark-secp256k1 = "0.4.0"
+ark-secq256k1 = "0.4.0"
+
+# --- shared utility crates ---
+hex                = "0.4"
+sha2               = "0.10"
+num-bigint         = "0.4"
+rand               = "0.8"
+thiserror          = "2"
+clap               = "4"
+tokio              = "1"
+tracing            = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
+reqwest            = { version = "0.12", default-features = false }
+serde_json         = "1"
+tempfile           = "3"
+
+# The proving stack (arkworks field/curve + Curve Trees bulletproofs) is
+# unusably slow at opt-level 0; keep it optimized even in dev/test so the
+# oracle tests run in seconds, not minutes.
+[profile.dev.package.ark-ff]
+opt-level = 3
+[profile.dev.package.ark-ec]
+opt-level = 3
+[profile.dev.package.ark-secp256k1]
+opt-level = 3
+[profile.dev.package.ark-secq256k1]
+opt-level = 3
+[profile.dev.package.bulletproofs]
+opt-level = 3
+[profile.dev.package.relations]
+opt-level = 3
+
+# opt-level 1 cuts the crypto-heavy oracle tests from minutes to ~30s while
+# keeping debug info for backtraces.
+[profile.test]
+opt-level = 1

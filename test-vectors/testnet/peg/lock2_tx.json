@@ -1,0 +1,78 @@
+{
+    "id": "527f29307372c64ea418a5eed87db4135ea906a012586f9fac100482c9555da8",
+    "inputs": [
+        {
+            "boxId": "00de035a638f76aa85e8d3a439af7887dd88971c13f302b8b05b5305ffb1a3d3",
+            "spendingProof": {
+                "proofBytes": "0a1ccc163186c0c93752bda10f3ac33aff3975b4744f3070c79ae8430c2e5ab9e8875cb0aa90159c40bb52e02b02bd3eab04b8610efc99f9",
+                "extension": {}
+            }
+        },
+        {
+            "boxId": "6ba378e8d04bb97e18ab98809533799e40ec407fd99788f8d31247f4dd6eafc7",
+            "spendingProof": {
+                "proofBytes": "bce2c51981402c29cfc9c17854257e1f3f26ebce3f126b61df3a0e3f400c3b3b352315d3a61d69435fcfa443b05e136a160fad35c21539d2",
+                "extension": {}
+            }
+        },
+        {
+            "boxId": "6d3300736047c71faefbd16c56ca79aadb3b3f8c50675d5300eec712b461324e",
+            "spendingProof": {
+                "proofBytes": "21437916a3d778702b659b8ec5d3b3813b8d54c65a8cc42fbab2b94d239f2d4e67616fe2c198f98397f60685eabb0928597bc93cafa23c25",
+                "extension": {}
+            }
+        }
+    ],
+    "dataInputs": [],
+    "outputs": [
+        {
+            "boxId": "798959c00442fc6338fa661489298f383da4dadd556cb5501869d600c2a2200a",
+            "value": 1000000000,
+            "ergoTree": "100a040004000e20006a33af9b295c830b1fe19422ede003da35a1c3a5f6ac56618e99ef2eaa2bab04000442040004000e20006ad21fd48bc6676dab0e7b32df80b0d29119912bf9e9022f60eed8440673070414043cd804d601db6308a7d602eded91b172017300938cb27201730100017302e6c6a7040ed603db6308b2a5730300d604e4c6a70804eb02d1eded720293b1e4c6a7040e7304ed91b172037305938cb27203730600017307ea02d1ed7202ed92a372049272049a9a8cc7a70173087309e4c6a70708",
+            "address": "4ftaxv5T31S2QUUiV15qA13B71LskmFXhghGJxD26A4qU1marXrvMTdBr5Hz8SvPUB5snokg2d5GRKvZJCNWtt5reMJKoKELrH6GPnvdiTRCU7ytSh3yH21PjAMGPmcG2rhcyaudHrvZHCB7ddVY9kJuDDU9X8g1M5QiBgv3zy8ZFkcPuMCXDegZM1pgzmyFR6EtSXDn6pYHbJ5v6CdNnkCxmTkZXbXMyJSvN5AvGcYenHqLLBbh7gT3v7TcN5LcosVmbP1X7a3NSEmig4yfN8MQ",
+            "assets": [
+                {
+                    "tokenId": "006a33af9b295c830b1fe19422ede003da35a1c3a5f6ac56618e99ef2eaa2bab",
+                    "amount": 100000
+                }
+            ],
+            "creationHeight": 443403,
+            "additionalRegisters": {
+                "R4": "0e210279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+                "R5": "0504",
+                "R6": "0402",
+                "R7": "08cd03b648cf969eba0499bce0d5b1247c11f0b94c878e56a2f4daf26920311ae107fd",
+                "R8": "04ae9236"
+            }
+        },
+        {
+            "boxId": "a0bd2e348c042c870464425c838c699afe82df8dbc181a2085d98b48d73566c1",
+            "value": 1100000,
+            "ergoTree": "1005040004000e36100204a00b08cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ea02d192a39a8cc7a701730073011001020402d19683030193a38cc7b2a57300000193c2b2a57301007473027303830108cdeeac93b1a57304",
+            "address": "Bf1X9JgQTUtgntaer91B24n6kP8L2kqEiQqNf1z97BKo9UbnW3WRP9VXu8BXd1LsYCiYbHJEdWKxkF5YNx5n7m31wsDjbEuB3B13ZMDVBWkepGmWfGa71otpFViHDCuvbw1uNicAQnfuWfnj8fbCa4",
+            "assets": [],
+            "creationHeight": 443403,
+            "additionalRegisters": {}
+        },
+        {
+            "boxId": "9d3657b07bb928e47026261dc22e2c0d1ae7198b2badd13d6fe8ffe969e415bc",
+            "value": 199698700000,
+            "ergoTree": "0008cd03b648cf969eba0499bce0d5b1247c11f0b94c878e56a2f4daf26920311ae107fd",
+            "address": "3WywEV3keFs3zpXTHx9wbAxjQcWdBU9yCWud4CmEuqsDPXpwgj7M",
+            "assets": [
+                {
+                    "tokenId": "006a33af9b295c830b1fe19422ede003da35a1c3a5f6ac56618e99ef2eaa2bab",
+                    "amount": 799000
+                }
+            ],
+            "creationHeight": 443403,
+            "additionalRegisters": {}
+        }
+    ],
+    "size": 762,
+    "inclusionHeight": 443404,
+    "scans": [
+        10
+    ],
+    "numConfirmations": 5
+}

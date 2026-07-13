@@ -1,0 +1,39 @@
+[package]
+name        = "aegis-node"
+description = "Aegis sidechain node library: header model, genesis, difficulty (LWMA). Consensus per dev-docs/sidechain/consensus.md."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish     = false
+
+[dependencies]
+aegis-crypto    = { path = "../aegis-crypto" }
+aegis-spec      = { path = "../aegis-spec" }
+ark-ec          = { workspace = true }
+ark-serialize   = { workspace = true }
+ergo-primitives = { workspace = true }
+ergo-crypto     = { workspace = true }
+ergo-ser        = { workspace = true }
+ergo-validation = { workspace = true }
+hex             = { workspace = true }
+num-bigint      = { workspace = true }
+rand            = { workspace = true }
+thiserror       = { workspace = true }
+
+clap               = { workspace = true, features = ["derive"] }
+tokio              = { workspace = true, features = ["rt", "macros", "time", "signal"] }
+tracing            = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# Live Ergo header feed (`ergo_follow::poll_http`): node REST JSON →
+# consensus `Header` decode + the blocking HTTP transport behind the
+# sync `HeaderSource` trait (the tokio main loop wraps `drive` in
+# `spawn_blocking` when it wires this in). `blocking` only — the
+# follower talks plain HTTP to a local node, no TLS stack needed.
+ergo-rest-json = { workspace = true }
+reqwest        = { workspace = true, features = ["blocking"] }
+serde_json     = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

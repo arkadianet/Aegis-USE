@@ -1,0 +1,28 @@
+[package]
+name        = "aegis-crypto"
+description = "Aegis note-protocol numeric core: RFC 9380 generators, note commitments, inverse-tag nullifier. Spec: dev-docs/sidechain/note-protocol.md."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish     = false
+
+[dependencies]
+curve-trees-relations    = { path = "../vendor/curve-trees/relations", package = "relations" }
+curve-trees-bulletproofs = { path = "../vendor/curve-trees/bulletproofs", package = "bulletproofs" }
+merlin = "2"
+rand   = { workspace = true }
+
+ark-ec        = { workspace = true }
+ark-ff        = { workspace = true }
+ark-serialize = { workspace = true }
+ark-std       = { workspace = true }
+ark-secp256k1 = { workspace = true }
+ark-secq256k1 = { workspace = true }
+ark-crypto-primitives = { version = "0.4", default-features = false, features = ["sponge"] }
+sha2          = { workspace = true }
+thiserror     = { workspace = true }
+
+[dev-dependencies]
+hex        = { workspace = true }
+serde_json = { workspace = true }

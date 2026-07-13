@@ -1,0 +1,75 @@
+{
+  "version": "v1",
+  "seed": "aegis:gen:v1",
+  "map": "RFC 9380 SvdW, expand_message_xmd/SHA-256, k=128, L=48, msg=empty, DST=domain tag",
+  "curves": {
+    "secp256k1": {
+      "svdw_z": "0000000000000000000000000000000000000000000000000000000000000001"
+    },
+    "secq256k1": {
+      "svdw_z": "0000000000000000000000000000000000000000000000000000000000000001"
+    }
+  },
+  "generators": [
+    {
+      "name": "G_value",
+      "curve": "secp256k1",
+      "dst": "aegis:gen:v1:G_value",
+      "x": "7c4220a540a258db67c0691fd7d715db59f6b33050ad444bc84660b0a65c7622",
+      "y": "d31980a7755d12be42393a3ab4eb867c60e4c8b0a5f0d839593e3bac7f33be53"
+    },
+    {
+      "name": "G_PRF",
+      "curve": "secp256k1",
+      "dst": "aegis:gen:v1:G_PRF",
+      "x": "70cf9b1a9462c02f94ad84c68d35df5a025b6c5c02af6ddde9cb272590e73584",
+      "y": "efd8308d5b16d6afb00a04aa0f4db95d69a74699a270ee82e0abe4fe9312d296"
+    },
+    {
+      "name": "H_even",
+      "curve": "secp256k1",
+      "dst": "aegis:gen:v1:H_even",
+      "x": "8ad952f5b8c03ef8d38b9f39b80026d5d9f757d91a51e6b971523ec91ad2e74d",
+      "y": "dddea975c62fb8aa135e3513818d60c472f269d702371673f7d18de9c28ba711"
+    },
+    {
+      "name": "G",
+      "curve": "secq256k1",
+      "dst": "aegis:gen:v1:G",
+      "x": "7128e989cf7f9b314a9089d65319d39592722fcc0f1969bbc62b730c21e7ac17",
+      "y": "b381f3e65c3839c42210dcdecb14e531d8287fdc42985027af6122c0ba2d51cf"
+    },
+    {
+      "name": "H_odd",
+      "curve": "secq256k1",
+      "dst": "aegis:gen:v1:H_odd",
+      "x": "6f1a4e4a27562a875193aefa6e31ef386181ed805784f16a7e3a65ee0de8d04b",
+      "y": "aaad35d7ca5741eee60b7456ac76577c6f3310dafd0eaf382c45b6169940374c"
+    },
+    {
+      "name": "empty_leaf",
+      "curve": "secp256k1",
+      "dst": "aegis:empty-leaf:v1",
+      "x": "a6cab162aea16ec2a336a3c8c120c4c317d541a27cc29188b7e29ea8c5628e33",
+      "y": "c45c9529917aff180ab5b51fa3deba62c89d20c59b3364160060da4238c25583"
+    }
+  ],
+  "nullifier_vector": {
+    "nk": "3333333333333333333333333333333333333333333333333333333333333333",
+    "rho": "4444444444444444444444444444444444444444444444444444444444444444",
+    "nf_x": "5cb25b053b9375f8bdea147774ca554447a3972c7eaeaff49a9d41657df7acd4",
+    "nf_y": "1118397361b7b6be99327c27e8108d6d367d25fba4a6cc08b66c59ab4443dd5d"
+  },
+  "rho_vectors": {
+    "pegmint_boxid_aa32": "a875649d08a1a62f5a4eea646db4dde21ff95c4d2d68d668123217081bfb1b3d",
+    "coinbase_h1_aegis_dev": "8cbcc3ed9bec1de8ab6dfad99bcb4ef25d1677ea7719474ad14cdde91400a04f",
+    "transfer_from_nf_x": "f24eb7184f31afccc88603f6301f087f32c956d8c6d3db857a14d8d58c903cc6"
+  },
+  "note_cm_vector": {
+    "value": 1000,
+    "tag": "1111111111111111111111111111111111111111111111111111111111111111",
+    "blinding": "2222222222222222222222222222222222222222222222222222222222222222",
+    "cm_x": "fd696af47290f76fa4d56e5b41b85b5c019119a794c4188609e7df2c029bd6f2",
+    "cm_y": "189047afcc53d7957cb53f55f09b1d5dd4e25033818bac556b4b04e46c118e47"
+  }
+}
