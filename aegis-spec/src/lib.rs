@@ -80,6 +80,12 @@ pub struct NetworkParams {
     /// Genesis note supply — always zero: no premine, every SC USE is
     /// minted against a proven Ergo lock.
     pub genesis_supply: Amount,
+    /// Bootstrap seed base URLs for the HTTP body-availability tier
+    /// (p2p.md §4.1). NON-consensus: changing this list is a software
+    /// update, not a chain break — seeds are a liveness convenience,
+    /// never a trust root (every fetched byte self-authenticates).
+    /// Empty until operator seeds exist; `--seed` CLI overrides apply.
+    pub seed_urls: &'static [&'static str],
 }
 
 impl NetworkParams {
@@ -117,6 +123,7 @@ static MAIN_PARAMS: NetworkParams = NetworkParams {
     unlock_delay_ergo_blocks: 720,
     vault_cap: 1_000_000, // 1000 USE dogfood cap; raise only under U1-strong
     genesis_supply: 0,
+    seed_urls: &[],
 };
 
 /// Dogfood parameters: same rates as mainnet, lower flat fee and floors
@@ -140,6 +147,7 @@ const fn dogfood_base(network_name: &'static str, address_hrp: &'static str) -> 
         unlock_delay_ergo_blocks: 720,
         vault_cap: 1_000_000,
         genesis_supply: 0,
+        seed_urls: &[],
     }
 }
 

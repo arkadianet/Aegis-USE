@@ -69,25 +69,21 @@ pub fn save_block(dir: &Path, block: &Block) -> Result<(), StoreError> {
     Ok(())
 }
 
-/// Rebuild a chain from the data dir by replaying the block log through
-/// [`Chain::try_extend`] (each block validated with `now_ms` pinned to
-/// its own timestamp, so the deterministic consensus checks all re-run
-/// and the future-drift bound is trivially met). A missing or empty log
-/// yields a fresh genesis chain. A partial trailing record is truncated
-/// away (crash artifact); any other malformation is an error.
-pub fn load_chain(
-    dir: &Path,
-    network: Network,
-    pow_mode: PowMode,
-    proof_mode: ProofMode,
-) -> Result<Chain, StoreError> {
-    let mut chain = Chain::new(network, pow_mode, proof_mode);
+/// Read every complete block record from the data dir's log, in log
+/// order. Decode-only — NO replay/validation: [`load_chain`] is the
+/// consensus-grade loader; this is for consumers that only index the
+/// archive by id (the seed tier serves self-authenticating bytes, so
+/// the *fetcher* re-verifies — `seed.rs`). A missing log yields an
+/// empty vec. A partial trailing record (crash artifact) is warned
+/// about and truncated away; any other malformation is an error.
+pub fn read_log(dir: &Path) -> Result<Vec<Block>, StoreError> {
     let path = dir.join(BLOCK_LOG_FILE);
     let data = match std::fs::read(&path) {
         Ok(data) => data,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(chain),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => return Err(e.into()),
     };
+    let mut blocks = Vec::new();
     let mut offset = 0usize;
     while offset < data.len() {
         if data.len() - offset < LEN_PREFIX_BYTES {
@@ -105,10 +101,7 @@ pub fn load_chain(
         }
         let block = Block::from_bytes(&data[start..start + len])
             .map_err(|source| StoreError::Decode { offset, source })?;
-        let (height, ts) = (block.header.height, block.header.timestamp_ms);
-        chain
-            .try_extend(block, ts)
-            .map_err(|source| StoreError::Replay { height, source })?;
+        blocks.push(block);
         offset = start + len;
     }
     if offset < data.len() {
@@ -119,6 +112,28 @@ pub fn load_chain(
         let file = OpenOptions::new().write(true).open(&path)?;
         file.set_len(offset as u64)?;
         file.sync_all()?;
+    }
+    Ok(blocks)
+}
+
+/// Rebuild a chain from the data dir by replaying the block log through
+/// [`Chain::try_extend`] (each block validated with `now_ms` pinned to
+/// its own timestamp, so the deterministic consensus checks all re-run
+/// and the future-drift bound is trivially met). A missing or empty log
+/// yields a fresh genesis chain. A partial trailing record is truncated
+/// away (crash artifact); any other malformation is an error.
+pub fn load_chain(
+    dir: &Path,
+    network: Network,
+    pow_mode: PowMode,
+    proof_mode: ProofMode,
+) -> Result<Chain, StoreError> {
+    let mut chain = Chain::new(network, pow_mode, proof_mode);
+    for block in read_log(dir)? {
+        let (height, ts) = (block.header.height, block.header.timestamp_ms);
+        chain
+            .try_extend(block, ts)
+            .map_err(|source| StoreError::Replay { height, source })?;
     }
     Ok(chain)
 }
