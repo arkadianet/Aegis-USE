@@ -44,8 +44,10 @@ Rust toolchain is pinned in `rust-toolchain.toml`.
 ## Design docs
 
 `dev-docs/sidechain/` — the full protocol design, security analysis, peg
-design, and the deferred/open register. Start with `consensus.md` and
-`note-protocol.md`.
+design, and the deferred/open register. **Start with
+[`architecture.md`](dev-docs/sidechain/architecture.md)** (the system map: what
+exists vs. what's next, how merge-mining / sync / privacy work), then
+`consensus.md` and `note-protocol.md` for depth.
 
 ---
 🤖 Scaffolding generated with [Claude Code](https://claude.com/claude-code)
