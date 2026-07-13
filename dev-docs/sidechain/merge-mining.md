@@ -1,514 +1,503 @@
-# Aegis merge-mining — the commitment scheme (L1 design)
+# Aegis merge-mining — Autolykos aux-PoW via the extension section (L1 design)
 
 **Date:** 2026-07-13
 **Status:** decided (design stage) — the L1 keystone of
-[`architecture.md`](./architecture.md) §4. This doc pins the v1 scheme end to
-end: what is committed, how the commitment appears on Ergo, how a node finds
-and verifies it, and the consensus rule that makes the committed sequence *be*
-the Aegis chain. Where a decision is deferred it is tagged **DECISION NEEDED**
-or **v1-accepted** explicitly.
+[`architecture.md`](./architecture.md) §4. **This document replaces the
+previous marker-lineage design in full** (git history holds it). Where a
+decision is deferred it is tagged **DECISION NEEDED** or **v1-accepted**
+explicitly.
 
-> **Supersedes [`consensus.md`](./consensus.md) §1 for v1.** §1's
-> `candidateWithTxs` scheme binds Aegis blocks to *unpublished Ergo
-> candidates* and gives Aegis its own (easier) PoW target, its own DAA (§3)
-> and its own cumulative-work fork choice (§5). That is a *higher-cadence*
-> design that requires an `aegis-mm` sidecar on every miner and
-> `candidateWithTxs` REST parity on our Rust node (still a W4 gap). The
-> scheme here is the architecture.md §4 path instead: the commitment is a
-> **confirmed, ordinary Ergo transaction**, requiring **zero modification to
-> any Ergo node or miner**, at the cost of Aegis cadence = Ergo cadence.
-> Consequences for consensus.md §3 (DAA) and §5 (fork choice) are spelled out
-> in §7 below; amending consensus.md is a follow-up commit, deliberately not
-> folded into this doc. The §1 share-based scheme remains the documented v2
-> cadence upgrade.
+> **Relation to [`consensus.md`](./consensus.md) §1.** The previous revision
+> of this doc claimed to *supersede* consensus.md §1 with a data-transaction
+> scheme. That was the error (§1 below). This revision **re-affirms
+> consensus.md §1's direction** — commitment inside the mined candidate, own
+> easier Aegis target, own DAA (§3), cumulative-real-work fork choice (§5) —
+> and upgrades the channel from an `R4` tx output to an **extension-section
+> field**, which consensus.md itself listed as the preferred long-term form.
+> consensus.md §1's "no candidate API injects custom extension fields" blocker
+> is resolved differently now: we *own* a Rust Ergo node
+> (`ergo-mining/src/extension_builder.rs` is ours to extend), so the extension
+> path no longer requires upstream Scala changes for the first miners. What
+> changes vs. consensus.md §1 is spelled out in §2.6.
 
 ---
 
-## 1. The commitment: the Aegis block id (32 bytes)
+## 1. The error being corrected: fee-purchased inclusion is not merge-mining
 
-An Aegis block commits to Ergo exactly one value: its **block id**.
+The previous design put the Aegis commitment in a **normal Ergo data
+transaction** — one output box whose `R4` carried the Aegis block id — that
+any miner would include as ordinary fee-paying cargo. Its selling point was
+"zero modification to any Ergo node or miner." That selling point is exactly
+the flaw:
 
-`Block::id()` (`aegis-node/src/block.rs`) delegates to `Header::id()`
-(`aegis-node/src/header.rs`): **blake2b256 over the canonical VLQ
-serialization of the core header fields** (`Header::bytes()`): `version`,
-`prev_id`, `height`, `timestamp_ms`, `tx_root`, `cm_tree_root`,
-`nullifier_digest`, `pot_balance`, `sc_nbits`, `reward_claim`.
+1. **The PoW never attests to the Aegis block.** The miner hashes
+   `msg = blake2b256(bytes_without_pow(ergo_header))`. A confirmed data-tx is
+   under `transactions_root`, so yes, the winning hash *transitively* commits
+   to it — but the miner did not choose to mine it, does not know it exists,
+   and would have produced the identical work without it. The work measures
+   Ergo throughput, not Aegis intent. Nothing distinguishes "a miner secured
+   this Aegis block" from "someone paid 0.001 ERG to a mempool."
+2. **Anyone can submit the tx.** "Weight" was therefore fee-purchased
+   inclusion. The design papered over this with a producer-key **lineage**
+   (only `PRODUCER_PK` could extend), which made the chain *permissioned* —
+   a single-operator sequencer with Ergo as a timestamping service. The
+   panel's Fork B fork-choice layer then had to bolt "one counting slot per
+   Ergo block, weight = Ergo difficulty" on top as an anti-amplification
+   hack, because a fee-slot has no intrinsic work of its own.
+3. **It is spoofable at the security level that matters.** An attacker who
+   can outbid tx fees (trivial) can populate Ergo with arbitrary competing
+   commitments; only the permissioned lineage prevented that, and the lineage
+   is precisely what a permissionless chain must not have.
 
-That single hash transitively commits the whole block:
+The zero-modification property and the security property are **mutually
+exclusive**: PoW cannot attest to data the prover never agreed to hash. Real
+merge-mining requires the miner's participation. That adoption cost is
+honest and unavoidable (§4, §10), and this doc takes it.
 
-- the **body** via `tx_root` (`BlockBody::tx_root()` — merkle root over
-  transfer ids, `EMPTY_TX_ROOT` for an empty body);
-- the **coinbase** via `reward_claim` (the 33-byte coinbase note commitment,
-  or the all-zero sentinel — consensus.md §5a);
-- the **parent** via `prev_id`, so committing a tip transitively commits its
-  whole ancestry;
-- the **post-state** via `cm_tree_root` / `nullifier_digest` / `pot_balance`.
+## 2. The fix: true Autolykos aux-PoW via an extension-section commitment
 
-So a 32-byte register value on Ergo is a full binding commitment to one Aegis
-block and its history. Nothing else needs to cross the boundary.
+### 2.1 One hash, two targets — the share-chain construction
 
-## 2. The commitment marker on Ergo — the crux
+The Aegis block id goes **inside the Ergo block candidate's extension
+section**. The extension's Merkle root (`extension_root`) is one of the
+header fields serialized by
+`ergo-ser/src/header.rs::write_header_without_pow`, whose output is exactly
+the preimage of the PoW message: *"the miner hashes
+`msgByHeader = Blake2b256(bytesWithoutPow(header))`"* (module doc, verified —
+`ergo-crypto/src/pow.rs::verify_pow_solution:47-50` computes
+`msg = blake2b256(serialize_header_without_pow(header))`).
 
-### 2.1 Pinned scheme: a marker box on a self-spending lineage
+So every single Autolykos attempt over that candidate **already commits to
+one specific Aegis block** before the nonce is even tried. The resulting hit
+is checked against **two** targets:
 
-The commitment rides as one output box of an **ordinary Ergo transaction**:
+- `ergo_target = get_target(ergo_header.n_bits)` — hard. Clears it → a real
+  Ergo block (and, incidentally, an on-chain Aegis anchor, §7).
+- `aegis_target = get_target(aegis_header.sc_nbits)` — **easier** (larger).
+  Clears it → a valid **Aegis block** (a *share*), gossiped on the Aegis
+  network with its witness (§2.4), never touching Ergo.
 
-**Marker ErgoTree.** A new seventh contract, `contracts/es/MmMarker.es`,
-compiled and byte-pinned exactly like the six peg contracts (the
-`aegis-contracts` crate: deploy-constant injection into `fromBase64("")`
-placeholders, pinned `ergo-compiler`, blake2b256 script-hash pins):
+`get_target(nbits) = q / decode_compact_bits(nbits)` with
+`q = secp256k1_order()` (`ergo-crypto/src/difficulty.rs:21-28`). Easier =
+numerically larger target = smaller decoded difficulty.
 
-```ergoscript
-{
-  // CHAIN_TAG: injected per-network 32-byte constant = the Aegis genesis id.
-  // Referenced so it cannot be optimized out of the tree bytes; it exists
-  // only to make the compiled tree unique per network (cheap scan filter +
-  // cross-network domain separation).
-  val chainTag = CHAIN_TAG
-  sigmaProp(chainTag.size == 32) && proveDlog(PRODUCER_PK)
-}
+**Dual-target soundness (verified in code):** the Autolykos v2 hit is
+**target-independent** — `hit_for_v2(msg, nonce, height, n)`
+(`ergo-crypto/src/autolykos/v2.rs:12`) takes no target;
+`check_pow_v2(msg, nonce, height, version, target)` (`v2.rs:97`) merely
+compares that hit against whichever target the caller passes. One solution,
+two independent threshold checks, no coupling. The only header-derived
+inputs are `height`/`version` via `calc_n` — and the verifier uses the
+**Ergo candidate header's own** `height`/`version` (it is re-deriving the
+same hit Ergo itself would compute), so there is no ambiguity about which
+`n` applies. This is the same construction as Namecoin/Dogecoin aux-PoW:
+you **cannot** produce a valid Aegis block without doing real Autolykos work
+bound to that exact block.
+
+### 2.2 The commitment field
+
+One extension field (`ergo-ser/src/extension.rs::ExtensionField`,
+`key: [u8;2]` = namespace<<8 | index, `value: Vec<u8>`):
+
+| | Pinned value | Constraint it satisfies |
+|---|---|---|
+| **key** | `AEGIS_MM_KEY = [0xAE, 0x00]` | namespace `0xAE` is unused — existing namespaces are `0x00` params, `0x01` NiPoPoW interlinks, `0x02` validation rules (`extension.rs:9-11`); unknown keys are consensus-legal (rules 400/404/405/406 cap size/duplicates/emptiness but never reject unknown keys — `ergo-validation/src/block.rs::validate_extension_structural:611-657`) |
+| **value** | `MM_COMMITMENT_VERSION (1 byte, 0x01)` ‖ `aegis_block_id (32 bytes)` = **33 bytes** | ≤ 64-byte per-field cap, rule 404 (`EXTENSION_FIELD_VALUE_MAX_SIZE = 64`, `block.rs:386`); ≤ 255-byte wire cap (`extension.rs:61`) |
+
+No height, no `prev_id` in the value: the 32-byte id (`Header::id()`,
+blake2b256 over the canonical core-header serialization,
+`aegis-node/src/header.rs`) already transitively commits `prev_id`,
+`height`, `tx_root`, `cm_tree_root`, `nullifier_digest`, `pot_balance`,
+`sc_nbits`, and `reward_claim` — the whole block and its ancestry. 33 bytes
+is the entire cross-chain surface.
+
+**Ergo consensus itself enforces at most one commitment per header.** Rule
+405 rejects any block whose extension carries two fields with the same key
+(`block.rs:642-656`). Combined with "only key `AEGIS_MM_KEY` counts" (any
+other key is not a commitment, by definition), one Ergo header commits to
+**at most one** Aegis block, and the PoW message commits to `extension_root`
+which commits to that field. This is load-bearing for §2.5.
+
+### 2.3 The verifier — exact, from existing code
+
+Inputs (the **share witness**, what Aegis gossip carries per block, ~1 KB +
+body):
+
+```text
+ergo_header_bytes        full Ergo candidate header, incl. AutolykosSolution
+extension_field          key AEGIS_MM_KEY, value 0x01 ‖ aegis_id
+extension_merkle_proof   BatchMerkleProof: field leaf → header.extension_root
+aegis_block_bytes        the full Aegis block
 ```
 
-(The exact source shape is an M2a implementation detail — what is **pinned as
-consensus** is the compiled tree *bytes*, `MM_MARKER_TREE` in `aegis-spec`,
-not the source. The two requirements on the source: the per-network
-`CHAIN_TAG` constant must survive into the tree bytes, and the spend
-condition must be `proveDlog(PRODUCER_PK)` — see "why guarded" below.)
+Checks, in order (fail-fast; every value re-derived, never trusted):
 
-**Register layout** (strict; all four present, R8/R9 absent):
+1. **Parse + solution type.** Decode the Ergo header; require
+   `AutolykosSolution::V2` (mainnet is v2 since height 417,792; v1 shares
+   are not accepted — one code path, one analysis).
+2. **Height window (consensus.md C2, kept).** `ergo_header.height ∈
+   [follower.tip_height − K_LAG, follower.tip_height + 1]` against our own
+   `ergo_follow::Follower` view, `K_LAG` provisional 6. Blocks grinding a
+   low height for a smaller Autolykos `calc_n` element count / per-hash cost
+   edge, and bounds offline share stockpiling to a ~K_LAG·2-minute horizon.
+3. **PoW message.** `msg = blake2b256(serialize_header_without_pow(h))`
+   (`ergo-ser/src/header.rs`; an unserializable header is invalid, mirroring
+   `PowError::HeaderEncode`).
+4. **Extension inclusion.** Recompute the leaf exactly as
+   `ergo_crypto::merkle::extension_root` does (`merkle/mod.rs:348`): leaf =
+   `[key.len() as u8 = 2] ‖ key ‖ value` (Scala `Extension.kvToLeaf`), then
+   `ergo_validation::popow::merkle::verify_batch_merkle_proof(proof,
+   &h.extension_root)` (`popow/merkle.rs:33`) — the same
+   leaf-prefix-0x00/internal-0x01 tree as transactions. The leaf bytes are
+   built from the *claimed* field, so a proof for a different key/value
+   cannot validate.
+5. **Field decode.** `field.key == AEGIS_MM_KEY`; `field.value.len() == 33`;
+   `field.value[0] == MM_COMMITMENT_VERSION`; `field.value[1..33] ==` the
+   **recomputed** `Header::id()` of `aegis_block_bytes` (hash the presented
+   bytes; never compare against a carried id).
+6. **Aux-PoW threshold.** `aegis_target =
+   get_target(aegis_header.sc_nbits)`; require
+   `check_pow_v2(&msg, &nonce, h.height, h.version, &aegis_target)`
+   (`ergo-crypto/src/autolykos/v2.rs:97`). `sc_nbits` itself is validated
+   against `daa.rs::next_nbits` over the block's ancestors (§3) — a miner
+   cannot self-declare an easy target.
+7. **Body validity.** The Aegis block goes through the same
+   `Chain::try_extend` path (`aegis-node/src/chain.rs:276`) every block
+   takes: state transition, proofs, coinbase `verify_mint` against
+   `reward_claim`, limits.
 
-| Register | Type | Content |
-|---|---|---|
-| `R4` | `Coll[Byte]`, exactly 32 | Aegis block id (`Header::id()`) |
-| `R5` | `Long`, `1 ..= i64::MAX` | Aegis height |
-| `R6` | `Coll[Byte]`, exactly 32 | `prev_id` of the committed block (chain-linking; redundant with the body but lets a watcher check linkage **before** fetching the body) |
-| `R7` | `Coll[Byte]`, exactly 1 | commitment version byte, `0x01` (`MM_COMMITMENT_VERSION`) |
+Steps 1–6 are pure functions over the witness + a recent Ergo header view;
+step 7 needs the parent's Aegis state. All primitives exist today; the
+verifier is composition, not new crypto.
 
-A box that matches `MM_MARKER_TREE` but violates any row above is
-**malformed** and is treated as carrying no commitment (never an error that
-stalls anything — see §5).
+**When the same solution also clears Ergo's target**, `ergo_header_bytes` is
+a real published Ergo header and the witness becomes checkable against
+Ergo's settled chain — those blocks are the **anchors** that feed
+`W_settled` (§7), verified with exactly the `pegmint_steps::check_inclusion`
+discipline (`aegis-node/src/pegmint_steps.rs`) plus a full-extension check:
+fetch the block's extension, recompute
+`extension_root(&fields)` (`merkle/mod.rs:348`), compare to the settled
+header.
 
-**The lineage rule (authentication + total order).** Marker boxes are
-trivially forgeable — anyone can create a box with any tree and any
-registers. What cannot be forged is a **spend**. So the marker validity rule
-is:
+### 2.4 What a share is, precisely
 
-> A marker box **counts** iff its creating transaction **spends the current
-> lineage tip** — the previous counting marker box — and it is the **first**
-> `MM_MARKER_TREE` output of that transaction. The lineage starts at a
-> per-network pinned outpoint `MM_LINEAGE_ORIGIN` (a marker box the operator
-> creates at chain-cut, carrying `R4 = AEGIS_GENESIS_ID, R5 = 0,
-> R6 = 0x00…00`; its content is informational — genesis is a spec constant,
-> not a committed block).
+A share's Ergo header is (usually) an **unpublished candidate** — it never
+appears on Ergo, because its hit missed Ergo's target. That is fine and is
+the point: the *work* is real and bound to the Aegis id regardless of
+whether Ergo ever sees the header. The witness is self-contained (§2.3
+steps 1–6 need no Ergo-chain lookup beyond the C2 height window). Aegis
+cadence is therefore decoupled from Ergo's ~2 min: with aux target T_a and
+opted-in hashrate H, shares arrive every `q/(T_a·H)` seconds, tuned by the
+DAA (§3) — Ergo block arrival does not gate Aegis block production.
 
-This is consensus.md §1's C6 commitment-UTXO idea promoted from an
-operational trick to **the** authentication mechanism, and it buys four
-properties at once:
+### 2.5 One hash → one Aegis block: amplification and equivocation die together
 
-1. **Spoof-proof.** An attacker cannot spend the lineage tip (it is guarded
-   by `proveDlog(PRODUCER_PK)`), so no attacker-created box ever counts. This
-   is why the marker is **not** a pure anyone-can-spend data box: the box
-   doubles as the lineage tip, and an anyone-can-spend tip could be spent (=
-   hijacked or burned) by anyone.
-2. **Total order for free.** Each counting marker spends the previous one;
-   Ergo's single-spend rule makes the sequence a chain with no ties, no
-   sibling ambiguity, no "two commitments for the same slot". Ordering needs
-   no `(height, tx_index, output_index)` tie-break — the spend graph *is* the
-   order (Ergo orders dependent txs within a block, so even two lineage steps
-   inside one Ergo block are unambiguous).
-3. **Cheap discovery.** The watcher tracks exactly one live outpoint (the
-   current lineage tip box id) and looks for its spend; the
-   `propositionBytes == MM_MARKER_TREE` byte-compare over block outputs is
-   the scan filter that finds it.
-4. **Self-funding.** The ERG in the tip rolls forward into the next tip; the
-   operator tops up the float with an extra input when needed. Nothing is
-   burned; min-box value (~0.001 ERG conventionally) is paid once.
+The old design needed an explicit anti-amplification hack ("one counting
+slot per Ergo block") and a lineage rule against equivocation. Both are now
+**intrinsic**:
 
-**Cost of the lineage rule (stated, not hidden):** commitment production is
-**permissioned** — only the holder of `PRODUCER_PK` can extend Aegis. In v1
-this changes nothing real (there is a single operator/producer anyway, and
-the operator is already trusted for *liveness* — never for safety). It is
-also the load-bearing answer to the committed-but-unavailable-body attack in
-§5.3. Opening production to multiple/permissionless producers is a v2
-consensus design with a genuine data-availability problem — see §9.
+- **No amplification.** One Autolykos evaluation produces one hit bound to
+  one `msg`; one `msg` commits (via `extension_root` + rule 405 + the
+  single-key rule) to at most one Aegis id. Re-binding the same hit to a
+  different Aegis block changes the field value → changes the leaf →
+  changes `extension_root` → changes `msg` → different hit, i.e. new work.
+  Weight is work, one-to-one, with no counting rule needed.
+- **No equivocation-for-free.** Two same-height Aegis blocks require two
+  independent clearing hits — plain Nakamoto forking at full price, handled
+  by fork choice like any fork.
+- **Duplicate witnesses are not duplicate blocks.** The Aegis block id is
+  the identity; ten distinct witnesses for one id are one block, counted
+  once (first valid witness wins, others discarded — no consensus meaning).
 
-### 2.2 The rejected alternative: the block-extension field
+### 2.6 Deltas vs. consensus.md §1 (to fold back in a follow-up commit)
 
-Ergo's header extension (2-byte key → 32-byte value) would carry the same 32
-bytes with a ~100 B witness and no box dust. It was verified
-stock-consensus-legal (consensus.md §1, deferred note: ported rules
-400/405/406 cap size/duplicates but never reject unknown keys) — **but no
-candidate API on either the Scala or our Rust node lets a client inject a
-custom extension key today**, so it needs node changes on both
-implementations plus miner cooperation. The data-box path needs *nothing*:
-any stock Scala or Rust node relays the marker tx like any fee-paying tx.
-Extension-field commitment stays the v2 optimization, alongside the
-`candidateWithTxs` cadence upgrade.
+Kept: parent→child binding direction (work commits to the SC block — D3),
+C2 height pinning, own target/DAA/fork-choice, "every merge-miner runs
+`aegis-node`". Changed: (i) channel = extension field, not a
+`candidateWithTxs` commitment-tx output — the C1 "exactly one R4 output"
+rule is replaced by rule-405 key uniqueness, and the C6 commitment-UTXO
+lineage is **deleted** (no UTXO to chain, nothing stalls on an Ergo win);
+(ii) witness shrinks from ~1–2 KB (tx + tx-Merkle-path) to ~200–300 B
+(field + extension-Merkle-path); (iii) **no `aegis-mm` sidecar required for
+the Rust-node solo path** — the builder hook is in-process (§4).
 
-## 3. Miner inclusion + incentive
+### 2.7 No marker contract — confirmed
 
-The Aegis node (M2a builder) constructs the marker tx — inputs: the current
-lineage tip (+ optionally a float top-up box), outputs: the new marker box,
-change, and a normal miner-fee output — signs it with the producer key, and
-submits it through the **stock `POST /transactions`** REST endpoint of any
-Ergo node it is pointed at. That is the entire Ergo-side surface.
+With the commitment as pure extension data there is **no box, no ErgoTree,
+no `MmMarker.es`, no `PRODUCER_PK`, no `MM_LINEAGE_ORIGIN`, no register
+schema**. The `aegis-contracts` crate keeps exactly its six peg contracts.
+Nothing about merge-mining touches the UTXO set. (An optional weightless
+anchor tx is discussed — and rejected for v1 — in §10.3.)
 
-- **Why an Ergo miner includes it:** the tx fee. To a miner it is an
-  ordinary fee-paying transaction; the miner neither knows nor cares that
-  Aegis exists. **No node fork, no miner-software change, no sidecar on the
-  miner** — this is the property the whole v1 design is built around.
-- **Why the Aegis producer bothers:** the **Aegis coinbase**. Each committed
-  block draws `NetworkParams::coinbase_reward(pot, n_txs)` from the emission
-  pot (fee credit-then-draw, consensus.md §5a), minted as a real coinbase
-  note bound to the header's `reward_claim` by the mint proof
-  (`verify_mint`). The producer owns that note. The producer's cost per
-  block ≈ one Ergo tx fee; the reward is denominated in USE from the pot
-  (peg fees + sc tx fees), so production is economically self-sustaining
-  once the chain carries traffic — and in v1 is simply an operator duty.
-- **The Ergo miner gets no Aegis reward.** Deliberate: rewarding the
-  includer would require identifying them and would buy nothing — inclusion
-  is already purchased by the fee.
+## 3. Aegis's own difficulty: the share target and DAA
 
-**Producer loop (v1 policy, not consensus):** build Aegis block `h+1` on the
-producer's own tip `h`, submit the marker tx, wait for it to confirm, repeat.
-One commitment in flight at a time — a replacement would double-spend the
-lineage tip and mempools keep first-seen, so replacement is not reliable and
-is not attempted. The producer does **not** wait `N_mint` between blocks
-(that would make cadence 10× worse): it chains optimistically at ~1 block per
-Ergo block and re-commits from the fork point if Ergo reorgs its recent
-markers away. Settlement depth gates *other nodes'* acceptance, not the
-producer's own progress.
+This **reverses** the previous doc's "`sc_nbits` = pinned min constant,
+`daa.rs` never consulted, no independent PoW." Aegis has real PoW again, so
+it has a real target again:
 
-## 4. The watcher (extends the follower)
+- **`sc_nbits` is live consensus.** Every Aegis header's `sc_nbits` must
+  equal `next_nbits(DaaParams, ancestors)` — LWMA-1 (zawy12) over a
+  90-block window as built and tested in `aegis-node/src/daa.rs`: solve
+  times clamped to `[1 ms, 6T]`, per-step target clamp ×4/÷4, below
+  `window + 1` headers the chain stays at `min_difficulty_nbits`
+  (`daa.rs::next_nbits:46`).
+- **Target share interval** = `NetworkParams::block_target_secs`
+  (`aegis-spec/src/lib.rs`), currently 15 s. **DECISION NEEDED** before
+  testnet-MM cut: 15 s is aggressive for early opted-in hashrate; 60 s is
+  the candidate fallback. Chain-id-breaking either way (§8), so decide at
+  re-cut, not after.
+- **Aegis target vs. Ergo target.** Normally
+  `aegis_target ≫ ergo_target` (shares much more frequent than Ergo
+  blocks). No consensus rule *enforces* this ordering — none is needed and
+  none is cleanly checkable (Aegis validation must not depend on Ergo's
+  current `n_bits`). If the DAA ever drove Aegis difficulty above Ergo's,
+  the only effect is that every share would also be an Ergo block; safety
+  is unaffected, cadence degrades, the DAA self-corrects. Stated, not
+  legislated.
+- **Weight of a block** = `decode_compact_bits(sc_nbits)` (via
+  `ergo_ser::difficulty`), i.e. real expected work. Cumulative weight
+  `W(b)` = sum over `b` and ancestors — see §5.
+- **Bootstrapping** (few miners → lumpy retarget) is a real gap, §10.2.
+  consensus.md §3's C7 stands: mainnet `min_difficulty_nbits` must be
+  non-trivial at cut time; dev stays trivial. `PowMode::DevStub`
+  (`chain.rs`) and the `--network dev` self-paced producer remain the
+  dev-network path, untouched.
 
-Today `ergo_follow.rs` reads **headers only**: `Follower::apply_header`
-PoW-gates every header via `ergo_crypto::pow::verify_pow_solution`, keeps
-heaviest-cumulative-work fork choice, and exposes the settled reference
-(`Follower::settled_reference`, `tip − N_mint`) and `Follower::settled_view`.
-The live transport is `poll_http::RestHeaderSource` over
-`GET /blocks/chainSlice`. All of that stays exactly as is — it remains the
-PoW spine and the *single* Ergo fork-choice authority in the process.
+## 4. Miner integration + incentive
 
-The watcher (M2b, `aegis-node/src/mm_watch.rs`) adds a second consumer of the
-same followed chain:
+**The adoption surface (honest):** a miner "merge-mines Aegis" iff the
+candidate they hash carries the `AEGIS_MM_KEY` field. That requires the
+software assembling their candidate to be Aegis-aware. Three tiers:
 
-**New data needed: full blocks, not headers.** For each best-chain Ergo
-block at settled depth the watcher fetches the block's transactions
-(`GET /blocks/{headerId}/transactions` — a new `BlockSource` trait + REST
-impl, the exact sibling of `poll::HeaderSource` / `poll_http::
-RestHeaderSource`, same blocking/`spawn_blocking` discipline). Headers-only
-is not enough: markers live in tx outputs. This is the honest bandwidth cost
-of the scheme (Ergo blocks are typically tens of KB; cap 8 MB), and it is
-v1-accepted; a compact-proof sync path exists below.
+1. **Our Rust Ergo node, solo (M2a, first).** The candidate's extension is
+   assembled in `ergo-mining/src/extension_builder.rs::
+   build_candidate_extension_fields` (interlinks always, epoch-boundary
+   fields when due). Adding one opt-in field there — value supplied by a
+   local `aegis-node` over a small RPC ("current Aegis candidate id") — is
+   a contained change in a repo we own. On every Aegis-tip change the
+   candidate is rebuilt (the existing candidate-rebuild machinery;
+   `candidate_base_cache` keeps this ~16 ms). No external sidecar, no
+   Scala dependency. The miner also builds the *Aegis* candidate: sets
+   `reward_claim` to their own coinbase note commitment (§ below), so the
+   header id they commit is already theirs.
+2. **Stock Scala node.** `candidateWithTxs` exists
+   (`MiningApiRoute.scala:48`) but injects transactions, not extension
+   fields — the extension path needs either a Scala-side patch or an
+   external work-provider proxy that post-processes the candidate. Real
+   cost, not hidden: this is a v1.x integration project, not a launch
+   blocker (launch mines with tier 1). Our own node's
+   `/mining/candidateWithTxs` REST-parity gap
+   (`ergo-api/src/v1/operator/mining.rs:313`, stubbed) is unchanged as a
+   W4 item but is no longer on Aegis's critical path.
+3. **Pools.** The pool's candidate builder adds the field; workers need no
+   change (they hash whatever `msg` stratum serves). Per-pool integration =
+   the long-term hashrate curve (§10.1).
 
-**Per-block verification, three layers:**
+**Incentive — the coinbase goes to the share finder.** Each Aegis block
+draws `NetworkParams::coinbase_reward(pot, n_txs)` from the emission pot
+(credit-then-draw, consensus.md §5a), minted as a real note bound to the
+header's `reward_claim` by `verify_mint`. Because `reward_claim` is inside
+the committed id, the reward is bound to the block *before* the work is
+done — the miner mines their own payout, exactly like Ergo's own coinbase.
+Nothing pays "the producer" anymore; there is no producer. Marginal cost of
+merge-mining ≈ 0 (same hashes they were already computing) + integration
+effort; revenue = USE coinbase. This is the standard merged-mining
+economics that keeps Namecoin at >⅓ of Bitcoin's hashrate.
 
-- **(a) Inclusion — reuses `pegmint_steps` verbatim.** Every observed
-  lineage-step tx is authenticated by exactly the discipline of
-  `pegmint_steps::check_inclusion` (`aegis-node/src/pegmint_steps.rs`),
-  steps (1)–(6): header id **re-derived** from carried header bytes via
-  `serialize_header` (never trusted); membership of that id at its own
-  height in the follower's settled best chain (step (2) — here via the
-  follower directly rather than a `SettledView` snapshot); tx decoded by
-  `read_transaction` with trailing-byte rejection; leaf recomputed as
-  `tx_leaf_digest(transaction_id(tx))` — never read from the proof; and the
-  single-leaf `BatchMerkleProof` reduced against the carried header's
-  `transactions_root` by `ergo_validation::popow::merkle::
-  verify_batch_merkle_proof`. When the watcher scans a full block it can
-  equivalently recompute the whole `transactions_root` (leaf rules per the
-  block version: tx ids, then witness ids for v2+ — the `block_leaves` /
-  `witness_id` construction already exercised in `pegmint_steps` tests) and
-  compare it to the PoW-verified header; the single-leaf `TxInclusion` form
-  is what a seed/peer hands a syncing node so it need not fetch whole Ergo
-  blocks. Both reduce to the same root check.
-- **(b) PoW** — already done: only headers accepted by
-  `Follower::apply_header` (hence Autolykos-verified) are ever consulted;
-  the watcher never looks at a block whose header the follower rejected.
-- **(c) Marker well-formedness** — `propositionBytes == MM_MARKER_TREE`,
-  strict R4–R7 layout per §2.1, lineage-tip spend check. Malformed ⇒ no
-  commitment (never an error).
+## 5. Fork choice: heaviest downloaded-and-validated chain of real work
 
-**Soundness vs. completeness (why a lying REST node can only stall).** The
-consensus object is the *lineage*, and each step both spends the previous box
-and is inclusion-proven in a settled PoW-valid block. A malicious block
-source can therefore **withhold** the next lineage step — the watcher simply
-does not advance (liveness; refetch from another node) — but can never
-**forge** one: a fabricated spend fails (a), a spend on a stale branch fails
-the settled-membership check, and fabricating PoW fails (b). Withholding a
-*non-lineage* tx is irrelevant to consensus. There is no scan-completeness
-requirement on which two honest nodes could disagree — both follow the same
-spend chain. (Recomputing the full tx root when scanning full blocks detects
-withholding immediately and is worth doing, but it is an integrity check,
-not a soundness dependency.)
+The panel's Fork B permissionless Nakamoto layer is kept — with the weight
+input it always wanted:
 
-**Output.** The watcher maintains a `CommitLog`: the ordered lineage steps
-`(aegis_id, aegis_height, prev_id, ergo_height, ergo_header_id)` on the
-settled best chain. On `Ingest::Reorg { depth }` from the follower it rolls
-back entries above the fork point and rescans the new branch —
-deterministic, exactly mirroring the follower.
+- **Canonical Aegis** = the leaf with maximal cumulative weight `W(b)` among
+  chains **this node has downloaded and validated** end-to-end
+  (`Chain::try_extend` per block). `W(b)` = Σ `decode_compact_bits(sc_nbits)`
+  over `b` and its ancestors — real aux-PoW work, nothing else. No fee
+  slots, no per-Ergo-block counting rule, no Ergo-difficulty proxy: those
+  were compensations for weightless commitments and are **gone** (§2.5).
+- **Availability is a monotone input, never a verdict.** A block whose
+  witness is valid (§2.3 steps 1–6) but whose body this node lacks is
+  **pending**: its weight exists but does not activate; the branch is not a
+  fork-choice candidate beyond the last validated block. "I don't have it
+  yet" can flip to "validated" when bytes arrive (monotone — bodies are
+  self-authenticating against the committed id), and can never flip back.
+  A withheld body therefore *delays* a branch, it never stalls the node and
+  never creates a subjective accept/reject split: the honest chain keeps
+  producing and validating shares, and fork-choice follows it. This
+  dissolves the old design's stall-on-unavailable rule (§5.3 of the
+  previous revision) — that rule existed because skipping a *sequenced
+  slot* forked the chain; with weight-based choice there are no slots to
+  skip, only branches to (not) prefer.
+- **Invalid body = dead branch prefix.** If a body arrives and fails
+  `Chain::try_extend`, that block and every descendant is permanently
+  invalid (verdict cached by id; deterministic — same bytes, same
+  pre-state, same verdict on every node). Its weight never activates. The
+  miner burned real work on garbage; no one else is affected.
+- **Reorg mechanics** are the existing ones: `Chain::rollback_tip` through
+  the 240-block undo ring (consensus.md §5), `store.rs` replay for deeper
+  resync. Acceptance-finality declared at retention depth (240) stands.
+- **Ties** in cumulative work break first-seen (consensus.md §5 C4,
+  unchanged and now actually operative again).
 
-**Composition with the peg-in watcher.** One process, one `Follower`, one
-Ergo REST upstream, three consumers: (i) header fork-choice + settled
-reference (exists), (ii) the marker watcher (new), (iii) PegMint proof
-verification (`verify_pegmint_full`), which already consumes
-`Follower::settled_view`. All three share `N_mint`
-(`aegis_spec::NetworkParams::ergo_mint_confs`), so "settled" means one thing
-process-wide. The marker watcher and the peg verifier share the inclusion
-primitives; nothing is duplicated.
+## 6. Data availability by gossip
 
-## 5. The consensus rule + fork choice
+Bodies (proofs + ciphertexts, KBs each) move on the Aegis P2P network
+(gossip + operator seed nodes — the M6 dependency). The DA story under
+weight-based fork choice:
 
-> **Canonical Aegis = the result of folding the valid commitment lineage
-> found in Ergo's heaviest chain, truncated to settled depth
-> (`tip − N_mint`), starting from the pinned Aegis genesis.**
+- A source can **withhold** (pending weight, liveness) but never **forge**
+  (body hashes to the committed id or it is not the body) and never
+  **reorder** (order is the chain structure the ids commit).
+- **Withholding attack**: attacker mines shares, gossips witnesses but not
+  bodies, hoping to later reveal a heavy hidden branch. While hidden, the
+  branch is pending everywhere and the honest chain accrues activated
+  weight normally — no honest node ever waits on it. The residual risk is
+  the **late reveal** (a valid, available, heavier branch appearing deep) —
+  which is just a private-mining attack, handled at the only place it can
+  be: finality policy, next section.
+- Nodes should retain pending witnesses (cheap, ~1 KB) and re-request
+  bodies with backoff; a branch pending past ~240 blocks of honest progress
+  is unrecoverable anyway (undo ring) and can be discarded.
 
-Aegis keeps **no independent fork choice**. `ergo_follow`'s
-heaviest-cumulative-work rule over PoW-verified Ergo headers *is* the Aegis
-fork choice; the lineage merely reads it out. This replaces consensus.md §5's
-cumulative-SC-work rule (and its C4 first-seen tie-break) for merge-mined
-networks: ties cannot arise, because the lineage admits no siblings.
+## 7. Peg finality: `W_settled`, pending-hostile accounting, `L_final`
 
-### 5.1 The fold
+Peg-out (v1: `V_cap`-bounded attester, [`security.md`](./security.md); the
+two-way peg remains unsolved — the vault contract cannot inspect Aegis, so
+v1 is one-way-plus-attester, carried over unchanged) must not act on weight
+that can evaporate. Three pieces:
 
-State: `(tip_id, tip_height)`, starting `(AEGIS_GENESIS_ID, 0)`. For each
-lineage step `M` in order:
+- **Anchors.** Shares that also cleared Ergo's target are real Ergo blocks
+  whose extensions carry the commitment **on the Ergo chain**. An Aegis
+  block committed in an Ergo block ≥ `N_mint` deep on the follower's best
+  chain (`Follower::settled_reference`, `aegis-node/src/ergo_follow.rs`) is
+  **Ergo-settled**. Reversing it requires reorging Ergo past `N_mint` —
+  Ergo's full security budget, not Aegis's.
+- **`W_settled(b)`** = cumulative Aegis weight of branch `b` up to its
+  highest Ergo-settled block. Weight above the last anchor is real but
+  Aegis-grade; weight below it is Ergo-grade.
+- **The attester rule.** Act on a peg-out at Aegis block `x` only when
+  `W_settled(canonical) − W_max_competing ≥ L_final`, where
+  `W_max_competing` counts every known competing branch **including
+  pending/unavailable weight as hostile** (valid witnesses whose bodies we
+  lack are assumed to be an attacker's hidden branch). A late reveal can
+  therefore never reorg attested state: its weight was already counted
+  against us before we acted. `L_final` (work units) is a new spec
+  constant — provisional intuition "≥ 30 blocks at current difficulty",
+  **DECISION NEEDED** with the cadence decision (§3), since its wall-clock
+  meaning scales with the share interval and opted-in hashrate.
 
-1. **Linkage check (registers only, body not needed):**
-   `M.R6 == tip_id && M.R5 == tip_height + 1`. If not — the step is
-   **dead**: permanently skipped, the fold state does not change, but the
-   **lineage still advances** (the step's marker box is the next lineage
-   tip). A dead step burns a lineage slot and nothing else — this makes the
-   scheme robust to producer bugs without letting them wedge the chain.
-2. **Body validation:** fetch the block bytes whose `Header::id() == M.R4`
-   (self-authenticating: hash and compare) and run them through the same
-   `Chain::try_extend` path live blocks take (the replay-and-verify
-   discipline `store.rs` already implements). Three outcomes:
-   - **valid** → accept; `(tip_id, tip_height) := (M.R4, M.R5)`.
-   - **invalid** → the step is **dead** (see 5.2).
-   - **unavailable** → **stall** (see 5.3).
+Full-node fork choice stays pure heaviest-validated (§5); anchors and
+`L_final` gate only *irreversible external actions* (peg-out attestation,
+and merchants are pointed at the same rule). An anchored-prefix no-reorg
+checkpoint rule for all nodes was considered and **rejected for v1**: both
+sides of a fork can anchor, so it buys little beyond `W_settled` and risks
+wedging fork choice on Ergo-inclusion timing.
 
-Gaps are trivial: an Ergo block containing no lineage step contributes no
-Aegis block. Aegis cadence is "whenever a commitment lands", full stop.
+## 8. New / changed `aegis-spec` constants (all chain-id-breaking)
 
-Two Aegis blocks in one Ergo block: two consecutive lineage steps in one
-block (the second marker tx spends the first's output in the same Ergo
-block). Both count, in lineage order; their heights must chain `h+1, h+2` or
-the second is dead by linkage. No tie-break rule is needed anywhere in this
-design — single-spend forbids siblings.
-
-### 5.2 Committed-but-**invalid** body: the commitment is dead, the chain does not halt
-
-Pinned rule: **a lineage step whose body is available but fails
-`Chain::try_extend` validation is permanently dead.** The fold skips it and
-waits for the next step whose `R6` matches the *unchanged* tip. Nodes cache
-dead ids (id → verdict) so bodies are not re-fetched or re-validated.
-
-Why this is safe to decide locally (the subtle part): the verdict is
-**objective and deterministic**. The body either blake2b256-hashes to the
-committed id or it is not the committed body at all; and
-`Chain::try_extend` against the fold's current state is a pure function —
-every honest node holding the same bytes reaches the same verdict
-(consistency-not-soundness caveats of the crypto aside, the *function* is
-deterministic). There is no first-seen, no timeout, no clock in the verdict,
-hence no way for two honest nodes to split on it.
-
-Why "dead", not "halt": halting would price chain-death at one Ergo tx fee
-plus a garbage body — and even restricted to the producer (lineage), a
-producer *bug* that commits an invalid block must not be fatal; the producer
-just fixes the bug and re-commits a valid block on the same parent. And why
-"dead", not "pretend it never happened and allow the same id to be
-re-committed": an id, once judged invalid, is invalid forever (determinism);
-allowing re-commitment of the same id buys nothing and invites verdict-cache
-inconsistencies.
-
-One consequence to state plainly: **a committed id is a commitment, not a
-guarantee** — Ergo's PoW orders commitments, it does not validate Aegis
-bodies. Depth in Ergo says "this is the canonical *attempt* sequence";
-validity is still judged by every Aegis node itself. That division is
-exactly the SPV-style trust model the architecture already claims (§5:
-"discovery + ordering + fork-choice = trustless via Ergo").
-
-### 5.3 Committed-but-**unavailable** body: stall, never skip
-
-Pinned rule: **a node that cannot obtain the body for a linkage-valid
-lineage step stops advancing at that point.** It does not skip, ever.
-
-Skipping on unavailability would be a *subjective* verdict — node A holds the
-body and accepts, node B timed out and skipped — a permanent fork from a
-liveness condition. Unavailability must therefore degrade to liveness only:
-sync waits, retries seeds/peers, and any single honest holder of the bytes
-unwedges everyone (the body is self-authenticating against `M.R4`).
-
-The attack this exposes: commit `R4 = random 32 bytes` with correct linkage —
-no body will ever exist, and everyone stalls forever. **The lineage rule of
-§2.1 is the answer:** only the producer can create a counting step, so only
-the producer can wedge the chain this way — and a producer that wedges the
-chain is indistinguishable from a producer that stops producing, a liveness
-failure v1 already accepts from its sole operator (the operator is trusted
-for liveness, never for safety — peg-out remains protected by `M`/`T_delay`
-independently). **v1-accepted under the single-producer assumption**; a
-permissionless-producer v2 must solve this for real (§9 — it is *the*
-open problem of the scheme).
-
-### 5.4 Ergo reorgs
-
-Commitments live in Ergo blocks, so they reorg with Ergo, and canonical
-Aegis re-derives deterministically from the new heaviest chain:
-
-- **Depth ≤ `N_mint`:** invisible. The fold only reads the settled prefix
-  (`Follower::settled_reference`), so ordinary Ergo churn never touches
-  Aegis state. The producer re-submits any of its marker txs that fell out
-  (they are ordinary txs and usually just re-confirm on the new branch —
-  unless the new branch already spent the lineage differently, which only
-  the producer itself could have caused).
-- **Depth > `N_mint`:** Aegis reorgs. The watcher rolls `CommitLog` back to
-  the fork point and refolds; the node rolls Aegis state back with
-  `Chain::rollback_tip` through the undo ring (240 blocks, consensus.md §5)
-  and re-extends along the new committed sequence. Deeper than the ring →
-  resync from snapshot/genesis (already the documented rule). Rewriting
-  settled Aegis history therefore costs **a real > `N_mint`-deep Ergo PoW
-  reorg** — Aegis inherits Ergo's full security budget here, which is the
-  entire point of merge-mining. (The same event also breaks peg-in
-  assumptions node-wide; `N_mint` is shared with PegMint by design, so the
-  two subsystems fail and recover together, not separately.)
-
-## 6. Body availability boundary
-
-Restated cleanly, because every security claim above leans on it:
-
-- **Trustless via Ergo:** discovery, ordering, fork choice, and the
-  *identity* of every canonical Aegis block (its 32-byte id sequence). A
-  fresh node needs only `aegis-spec` constants + an Ergo connection
-  (architecture.md §5).
-- **Liveness via the Aegis side:** the block *bodies* (proofs, ciphertexts —
-  KBs each) are served by the producer/seed in v1 and P2P gossip at M6/L2.
-  A body source can **withhold** but never **forge** (hash-checked against
-  the committed id) and never **reorder** (order is Ergo's). Body
-  unavailability stalls sync; it never changes what the chain *is*.
-
-## 7. Interaction with existing pieces
-
-- **Peg-in watcher:** shared infra, one follower — see §4. No change to
-  `pegmint.rs`/`pegmint_steps.rs` semantics; the marker watcher is a second
-  consumer, not a second Ergo client. (`ergo_follow.rs`'s module doc already
-  calls itself "shared infrastructure" for exactly this reason.)
-- **Difficulty / DAA / the 15 s target:** under this scheme Aegis has **no
-  independent PoW**, so difficulty is meaningless on merge-mined networks.
-  Pinned: on `aegis-test`/`aegis` (MM networks), `sc_nbits` **must equal**
-  the network's `min_difficulty_nbits` constant in every header (a
-  constant-equality consensus check; `daa.rs::next_nbits` is never
-  consulted), and block cadence is *whatever Ergo confirms* (~2 min
-  average, variable; finality for other nodes lags a further `N_mint` ≈ 20
-  min). The `sc_nbits` header field is **kept** (dropping it is a gratuitous
-  chain-id break and a header-codec change; a pinned constant is free). The
-  15 s `block_target_secs` and the LWMA DAA remain exactly what they are
-  today in practice: the **dev-network** self-paced producer's pacing
-  (`PowMode::DevStub` in `chain.rs`, the `--network dev` loop in `main.rs`).
-  consensus.md §3 and params.md must be amended to scope the DAA to dev
-  (follow-up; **DECISION NEEDED** only on whether `aegis-test` retains a
-  dev-style fallback pacer for local testing, which would be config, not
-  consensus).
-- **Timestamps:** MTP-11 still applies (producer-set timestamps stay
-  monotonic-ish for wallet UX). The 60 s future-drift check
-  (`MAX_FUTURE_DRIFT_MS`, `chain.rs`) applies at *live* acceptance;
-  for commitment-settled blocks replayed during sync it is **waived**
-  (`store.rs` replay already cannot honestly apply it; Ergo's own timestamp
-  rules bound the committed sequence transitively). This waiver is a
-  consensus rule and goes into the consensus.md amendment.
-- **Coinbase reward:** goes to the **Aegis producer** (the coinbase note is
-  minted to a producer-chosen key, bound via `reward_claim`), not to the
-  Ergo miner who mined the commitment — §3. With v1's single producer,
-  "who gets it" has one answer; a multi-producer v2 re-opens it together
-  with the §9 items.
-
-## 8. New `aegis-spec` constants (all chain-id-breaking)
-
-Joining `ergo_mint_confs` (= `N_mint`, already present) in
-`aegis-spec/src/lib.rs`, per network, frozen at chain-cut (a testnet →
-mainnet re-cut re-pins all of them — architecture.md §9 already declares
-the commitment-marker chain-id-breaking):
+Per network in `aegis-spec/src/lib.rs::NetworkParams`, frozen at chain-cut
+(testnet → mainnet is a re-cut, architecture.md §9):
 
 | Constant | Type | Meaning |
 |---|---|---|
-| `MM_MARKER_TREE` | `&[u8]` (pinned bytes) | compiled `MmMarker.es` ErgoTree with `CHAIN_TAG`/`PRODUCER_PK` injected — the scan filter and box-validity pin |
-| `MM_PRODUCER_PK` | 33 bytes | the lineage spend key (inside the tree; pinned separately for tooling) |
-| `MM_CHAIN_TAG` | 32 bytes | `= AEGIS_GENESIS_ID` (domain separation inside the tree) |
-| `MM_LINEAGE_ORIGIN` | 32 bytes (box id) | the pinned first lineage outpoint (§2.1) |
-| `MM_COMMITMENT_VERSION` | `u8 = 0x01` | the R7 byte; bump = new marker era (paired with a spec release) |
-| `ERGO_ANCHOR` | 32 bytes (header id) + height | the pinned Ergo root the follower starts from (`Follower::with_root`) — already planned by architecture.md §5, becomes load-bearing here |
+| `AEGIS_MM_KEY` | `[u8; 2] = [0xAE, 0x00]` | extension field key (namespace `0xAE`, index 0) |
+| `MM_COMMITMENT_VERSION` | `u8 = 0x01` | first byte of the field value; bump = new commitment era |
+| `AEGIS_GENESIS_ID` | 32 bytes | pinned genesis (current dogfood cut: `e369d3c9…`) — the chain the key commits to |
+| `min_difficulty_nbits` | `u32` | initial + floor Aegis difficulty (C7: non-trivial on mainnet) |
+| `block_target_secs` | `u64` | DAA share-interval target (15 s vs 60 s — **DECISION NEEDED**, §3) |
+| `K_LAG` | `u32 = 6` (provisional) | C2 Ergo-height window for share candidates |
+| `L_FINAL` | `u128` (work units) | peg-out attestation lead (§7 — **DECISION NEEDED**) |
+| `ERGO_ANCHOR` | 32-byte header id + height | pinned Ergo root for `Follower::with_root` |
+| `ergo_mint_confs` (`N_mint`) | exists | unchanged; now also the anchor settling depth |
 
-`Network::params()` grows these alongside the existing peg pins; like
-`PegParams`, values for testnet come from the deployed artifacts at M2a
-time (the `aegis-contracts` oracle-test pattern pins them byte-for-byte).
+**Deleted** (from the superseded design; never shipped, nothing to
+migrate): `MM_MARKER_TREE`, `MM_PRODUCER_PK`, `MM_CHAIN_TAG`,
+`MM_LINEAGE_ORIGIN`, and the `sc_nbits == min` constant-equality rule.
 
-## 9. Honest gaps, open questions, staged build plan
+## 9. Reuse ledger + staged build plan
 
-**Gaps / open questions (unresolved, stated plainly):**
+**Reused as-is** (no new cryptography anywhere in this design):
 
-1. **Permissionless producers (v2).** The lineage rule makes v1 production
-   single-keyed. Opening it re-introduces: the unavailable-body wedge
-   (§5.3) — the classic sidechain data-availability problem — plus
-   commitment ordering among competing producers and coinbase assignment.
-   Candidate directions (N-of-M lineage keys; open markers + on-Ergo
-   proposer auction; availability attestations; skip-after-Ergo-depth with
-   its fork risk) all need a real design pass. **DECISION NEEDED before any
-   multi-producer milestone; nothing in v1 forecloses any of them** (a new
-   marker era via `MM_COMMITMENT_VERSION` + re-cut covers even radical
-   changes on testnet).
-2. **Producer-key loss / lineage termination.** If `PRODUCER_PK` is lost, or
-   the tip is ever spent by a tx with no marker output, the lineage — and
-   the chain — terminates; recovery is a chain re-cut (cheap on testnet,
-   catastrophic on mainnet). Mitigations to decide at mainnet-cut time:
-   key ceremony, or a marker script with a timelocked recovery path to a
-   successor key (**DECISION NEEDED**, mainnet gate).
-3. **Miner censorship economics.** Fee-bumping is the only lever; a
-   miner-majority policy of dropping `MM_MARKER_TREE` outputs halts Aegis
-   (liveness only). v1-accepted; the extension-field/candidateWithTxs v2
-   channels are also the long-term hedge here.
-4. **consensus.md / params.md amendments** (§1 supersession scoping, §3 DAA
-   scoped to dev, §5 fork-choice replacement, timestamp waiver) —
-   follow-up doc commit, deliberately excluded from this one.
-5. **Bandwidth posture of full-block watching** on mainnet Ergo — fine on
-   paper (tens of KB typical), unmeasured by us. Measure during M2b;
-   the compact `TxInclusion` sync path (§4a) is the fallback.
+| Piece | Where | Role here |
+|---|---|---|
+| `serialize_header_without_pow` | `ergo-ser/src/header.rs` | PoW message preimage |
+| `check_pow_v2` / `hit_for_v2` | `ergo-crypto/src/autolykos/v2.rs` | the aux-PoW threshold check |
+| `get_target`, `decode_compact_bits` | `ergo-crypto/src/difficulty.rs`, `ergo-ser` | nbits ↔ target ↔ weight |
+| `extension_root`, `verify_batch_merkle_proof` | `ergo-crypto/src/merkle/mod.rs:348`, `ergo-validation/src/popow/merkle.rs:33` | field-inclusion proof |
+| `ExtensionField`/`read_extension` | `ergo-ser/src/extension.rs` | field wire format |
+| `Follower` (headers, settled view) | `aegis-node/src/ergo_follow.rs` | C2 window + anchor settling |
+| `pegmint_steps::check_inclusion` discipline | `aegis-node/src/pegmint_steps.rs` | anchor verification in settled Ergo blocks |
+| `next_nbits` (LWMA) | `aegis-node/src/daa.rs` | live again as consensus (§3) |
+| `Chain::try_extend`, undo ring, `store.rs` replay | `aegis-node` | body validation + reorg |
+| `build_candidate_extension_fields` | `ergo-mining/src/extension_builder.rs` (ergo repo) | the solo-miner injection point |
 
-**Staged build plan:**
+**Build plan:**
 
-- **M2a — commitment-tx builder + submitter.** `MmMarker.es` +
-  `aegis-contracts` pins (tree bytes, script hash, register schema
-  round-trip); `mm_commit.rs`: lineage wallet (track tip outpoint, build
-  spend, sign, `POST /transactions`, confirm-or-retry); `aegis-spec`
-  constants for dev/test. Deliverable: real marker lineage on Ergo testnet
-  committing dev-produced Aegis blocks. Tests: tree-byte oracle vs deployed
-  box (the `test-vectors/testnet/` pattern), register layout round-trip,
-  lineage-chaining across a simulated Ergo win, one-in-flight policy.
-- **M2b — watcher.** `BlockSource` + REST impl; marker extraction +
-  strict-parse; lineage tracking; `CommitLog` with reorg rollback wired to
-  `Ingest::Reorg`; inclusion verification reusing the `check_inclusion`
-  primitives. Deliverable: a node that, given only spec constants + an Ergo
-  node, prints the canonical Aegis id sequence. Tests: spoofed marker
-  ignored, withheld-tx refetch (root mismatch), reorg rescan determinism,
-  malformed-register vectors, settled-depth gating; oracle: the real M2a
-  testnet lineage.
-- **M2c — consensus rule.** The §5 fold; dead-id cache; body fetch
-  (seed URL) + `Chain::try_extend` replay; stall-on-unavailable;
-  `sc_nbits`-constant check + timestamp waiver on MM networks; switch
-  test-network block acceptance from "produced locally" to
-  "committed + settled". Deliverable: fresh-node sync from genesis via Ergo
-  (architecture.md §5 made real). Tests: skip-invalid vs stall-unavailable
-  split, deep-reorg refold against the undo ring, replay/equivocation
-  vectors, end-to-end sync against the live testnet lineage.
+- **M2a — extension-commit builder + aux-PoW verifier.** Ergo-repo side:
+  opt-in `AEGIS_MM_KEY` field in `extension_builder` fed by a local Aegis
+  candidate endpoint (config-gated; off by default). Aegis side:
+  `mm_verify.rs` implementing §2.3 steps 1–6 as a pure function;
+  share-witness codec. Tests: witness round-trip; oracle vectors — a real
+  testnet Ergo header whose extension carries the field, hit checked
+  against both targets from mainnet-grade `check_pow_v2` vectors; wrong-key
+  / wrong-value / forged-proof / oversized-value (rule 404) / duplicate-key
+  (rule 405) rejection vectors; C2 window edges.
+- **M2b — share ingestion + fork choice.** Witness pool; pending/active
+  weight bookkeeping; `W(b)` fork choice over validated leaves; dead-id
+  cache; anchor detection via the follower + `check_inclusion`;
+  `W_settled` computation. Tests: amplification attempt (two ids, one
+  hash — must be unconstructible), duplicate-witness dedup, pending→active
+  activation, invalid-body branch death, deep-reorg refold vs the undo
+  ring, first-seen tie.
+- **M6 — gossip.** Bodies + witnesses on Aegis P2P, seeds, re-request/
+  backoff, pending-hostile input to the attester. (Unchanged dependency;
+  now also carries witnesses.)
 
-## 10. Self-adversarial pass
+## 10. Honest gaps
+
+1. **Opted-in hashrate is the security budget.** Aux-PoW security equals
+   the Ergo hashrate that *actually embeds the commitment* — not Ergo's
+   total. Same as Namecoin/Dogecoin. At launch this is ~zero: tier-1 solo
+   miners on our Rust node, then pools (§4). Until adoption, Aegis-grade
+   reorg protection is weak and everything leans on §7's Ergo-settled
+   anchors + `L_final` + pending-hostile accounting for anything
+   irreversible. There is no clever fix; there is only adoption, and the
+   coinbase is the adoption incentive. Stated as the #1 risk.
+2. **Cadence/DAA bootstrapping.** One miner joining/leaving is a step
+   function in hashrate; LWMA handles it better than epochs (why it was
+   chosen) but early cadence will be lumpy, and a hashrate collapse
+   stretches block times until the ×4-per-step clamp walks difficulty
+   down. `block_target_secs` and `min_difficulty_nbits` must be re-picked
+   at MM-testnet cut with measured hashrate. **DECISION NEEDED** (§3, §8).
+3. **Pre-adoption liveness aid — decided: none.** A permissionless data-tx
+   /anchor-box path could let anyone checkpoint Aegis ids on Ergo before
+   miners adopt. Rejected for v1: it would be weightless by construction
+   (weight comes ONLY from aux-PoW), so it secures nothing, and its only
+   real function — discovery — is already served by Ergo-settled anchors
+   once even one miner mines (and by seed nodes before that). Reconsider
+   only if M6 discovery proves inadequate. Keeping it out keeps "the only
+   way to extend Aegis is work" exactly true.
+4. **Two-way peg unsolved** (unchanged): the Ergo-side contract cannot
+   observe Aegis, so v1 peg-out = one-way / `V_cap`-bounded attester per
+   `security.md`; `M`/`T_delay` protect the vault independently of
+   everything in this doc.
+5. **Scala-node miner path** (§4 tier 2) is unbuilt and needs either an
+   upstream patch or a candidate-proxy; until then merge-mining is
+   Rust-node-only. Accepted for v1.
+6. **`L_final` calibration** requires observed hashrate distribution;
+   provisional value is a placeholder (§7).
+
+## 11. Self-adversarial pass
 
 | # | Attack | Verdict | Killed by |
 |---|---|---|---|
-| 1 | **Spoof a marker box** (correct tree + registers, attacker-funded, R6 = current tip) | Dead | Lineage rule: the creating tx does not spend the producer-guarded lineage tip; watcher never counts it (§2.1) |
-| 2 | **Commit an invalid body** (garbage that hashes to the committed id) | Dead, chain continues | §5.2 skip rule: verdict objective (`Chain::try_extend` deterministic vs fixed pre-state); step dead, tip unchanged. Only the producer can even create the step |
-| 3 | **Commit an unavailable body** (`R4` = random) | Stall, not fork | §5.3: only the producer can (lineage); equivalent to the producer halting — v1-accepted under the single-operator liveness assumption; **the** open problem for permissionless v2 (§9.1) |
-| 4 | **Censor commitments** (miners refuse marker txs) | Halt, never unsafe | Nothing to kill it: liveness-only by construction (no commitment ⇒ no block ⇒ no state change; peg-out safety rests on `M`/`T_delay`, not SC liveness). v1-accepted (§9.3) |
-| 5 | **Commit two competing Aegis blocks at one height** (producer equivocation) | Impossible on one Ergo chain | Ergo single-spend: both steps would spend the same lineage tip; at most one confirms. Across Ergo forks, the settled-prefix rule picks exactly one (§5.4) |
-| 6 | **Replay an old commitment at a new position** | Dead | Fold linkage: `R6 ≠ current tip` / `R5 ≠ tip+1` (§5.1); and a replayed *tx* is unconfirmable anyway (its input is long spent) |
-| 7 | **Reorg Ergo > `N_mint` to rewrite Aegis history** | Works iff you can reorg Ergo | Inherited security — the attack *is* a deep Ergo PoW reorg (Aegis adds no cheaper path); Aegis refolds deterministically, undo ring to 240, resync beyond. Accepted: identical to the assumption the peg already makes (§5.4) |
-| 8 | **Forge PoW-less inclusion** (lying REST node fabricates a lineage-step tx or its host block) | Rejected | `Follower::apply_header`'s Autolykos gate + settled-membership + the `check_inclusion` merkle reduction against the PoW-committed `transactions_root` (§4). A lying source can only withhold (liveness) |
-| 9 | **Withhold the next lineage step** (lying block source) | Stall + detect | No skip decision exists to poison (§4 soundness/completeness); full-root recompute flags the source, watcher refetches elsewhere |
+| 1 | **Spoof a commitment without work** — hand-craft a witness for an Aegis block with a fabricated Ergo header | Rejected | §2.3 step 6: `check_pow_v2` over `msg = blake2b256(bytes_without_pow)` must clear `aegis_target`; the header being unpublished doesn't matter, the *hit* is the credential. No hit, no block. Fee-paying data-txs carry zero weight by construction (§10.3) |
+| 2 | **Double-commit: two Aegis blocks under one Ergo hash** | Impossible | One key counts (`AEGIS_MM_KEY`); rule 405 forbids duplicate keys inside one extension (`block.rs:642`); the value holds exactly one 33-byte entry (rule 404 caps 64 B; verifier requires len == 33); `msg` commits `extension_root`. A second id ⇒ different `msg` ⇒ the old hit is void — that's new work, not amplification (§2.5) |
+| 3 | **Fake extension proof** — valid PoW header, Merkle proof binding a different field | Rejected | §2.3 step 4: the leaf is rebuilt from the claimed key‖value (`kvToLeaf`) and reduced against the header's own `extension_root` via `verify_batch_merkle_proof`; a proof over other bytes cannot reach the committed root (blake2b256 collision resistance) |
+| 4 | **Low-hashrate reorg** — rent hash exceeding the opted-in set, rewrite recent Aegis | Works above honest share-rate; bounded | Honest answer: yes, until adoption (§10.1). Damage is bounded to reversible state: peg-out and merchant acceptance gate on `W_settled` lead ≥ `L_final` with pending-hostile counting (§7); rewriting below an Ergo-settled anchor needs a > `N_mint` Ergo reorg (Ergo's budget) |
+| 5 | **Withhold a body** — gossip witnesses, hide bodies, reveal a heavy branch late | Never a stall; reveal pre-charged | Pending weight never activates for fork choice (§5) — honest chain proceeds; the attester already counted the hidden branch as hostile before acting (§7), so the reveal reorgs nothing attested. Residual: unattested recent state reorgs — ordinary Nakamoto risk priced in real work |
+| 6 | **Ergo reorg** | Contained by depth | Shares don't live on Ergo — an Ergo reorg does not touch Aegis fork choice at all (improvement over the old design, where Aegis history *was* Ergo tx history). Only anchors move: ≤ `N_mint` deep, anchors were never settled (no `W_settled` impact); > `N_mint`, `W_settled` recedes and the attester's lead requirement re-arms — peg assumptions break with Ergo's, jointly with PegMint by shared `N_mint` |
+| 7 | **Selfish share-mining** — withhold valid shares, release to orphan honest work | Standard selfish mining | Same γ/α analysis as any Nakamoto chain; no new lever (a withheld share earns nothing until published, coinbase included — `reward_claim` matures per consensus.md §5). Lumpier at low hashrate; folded into §10.1's honest risk and `L_final` margin |
+| 8 | **Cheap-height grinding** — mine shares at a low Ergo height for a smaller `calc_n` table / cost edge, or stockpile offline | Rejected | C2 window (§2.3 step 2): candidate height within `[tip − K_LAG, tip + 1]` of the verifier's own `Follower` view bounds both the `n`-table choice and the stockpile horizon |
+| 9 | **Self-declared easy target** — set `sc_nbits` soft so your shares clear trivially | Rejected | `sc_nbits` is consensus-checked against `next_nbits(daa)` over ancestors (§3); a wrong value fails header validation in `Chain::try_extend` regardless of PoW |
+| 10 | **Replay a witness for a block already on-chain / duplicate weight** | No-op | Block id = identity; a second witness for a known id is discarded (§2.5); weight counted once per block per branch |
