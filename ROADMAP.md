@@ -38,21 +38,40 @@ Sizes are rough; each ships testable and gets reviewed.
 tree-hashes pinned as tested constants, **oracle-verified byte-for-byte against
 the live testnet deployment**. *(small)*
 
-### M1 — Testnet re-provision *(next)*
-Mint **100,000,000 tUSE** (10¹¹ base units, 3 decimals), redeploy fresh peg
-contracts using M0's compile-and-pin tooling (so deployed hashes provably match
-the pinned constants), and record a distribution-ready testnet supply. *(small)*
+### M1 — Testnet re-provision ✅ DONE
+Minted **100,000,000 tUSE** (10¹¹ base units, 3 decimals), redeployed fresh peg
+contracts via M0's compile-and-pin tooling (deployed hashes provably match the
+pinned constants — the crate was the *pre-deploy* oracle). Vectors +
+distribution-ready supply in `test-vectors/testnet/peg-v3/`.
 
-### M2 — Merge-mining *(the keystone)*
-Bind Aegis blocks to Ergo's proof-of-work — the feature that makes this a real
-merge-mined sidechain, and simultaneously its **security, block-ordering,
-fork-choice, and fresh-node sync** (architecture §4/§5). Staged:
-- **M2a** commitment-tx builder + submitter (Aegis → a stock Ergo `/transactions`
-  call, so *any* Scala **or** Rust node can mine it with zero modification).
-- **M2b** extend the follower to **watch Ergo for the commitment** and verify its
-  inclusion — reusing the peg-in inclusion machinery already built.
-- **M2c** the consensus rule: *canonical Aegis = the chain Ergo's PoW committed
-  to*, ≥ `N_mint` deep. *(large)*
+### M2 — Merge-mining ✅ DONE (dev) — the keystone
+Binds Aegis blocks to Ergo's proof-of-work: security, block-ordering,
+fork-choice, and fresh-node sync, all at once (architecture §4/§5). **Corrected
+mid-design** from a weak data-transaction commitment to **true Autolykos
+aux-PoW**: the Aegis block id rides in the Ergo block *extension* (which
+Autolykos hashes over), so one hash secures both chains and an Aegis block is a
+"share" clearing Aegis's easier target — real, unspoofable work. **Permissionless**
+(anyone mines) via a Nakamoto fork-choice over available+valid blocks; the
+data-availability wedge dissolves (a withheld body is pending weight, never a
+stall). Built + adversarially reviewed, each stage having found and fixed a real
+consensus bug:
+- **M2a** aux-PoW share verifier (extension commitment, dual-threshold PoW) —
+  reviewed, real-Ergo-block oracle; closed an empty-Merkle-proof forgery hole.
+- **M2b** real-work fork-choice tree — **adversarially reviewed SOUND**; closed a
+  subjective tie-break (would split consensus) and a block-poisoning attack.
+- **M6a** Ergo anchor-watcher (extension scan → verify → fork-choice) — real-block
+  oracle; root-authenticates served fields so a lying node is caught.
+- **M6b-1** seed/HTTP body layer + fresh-node sync — replay-equivalence proven
+  over real HTTP (a fresh node reaches the same tip).
+- **M6c** runnable node loop — **proof of life:** produces merge-mined blocks with
+  climbing real work, persists, and restart-resumes from a re-verified archive.
+
+*Remaining for **real** (non-dev) merge-mining:* the **Ergo-side candidate-builder
+task** — patch the Ergo node (`arkadianet/ergo`, `ergo-mining`) to embed the
+`AEGIS_MM_KEY` commitment in the extension of the candidates it hands miners
+([`ergo-integration.md`](dev-docs/sidechain/ergo-integration.md)). The consumer
+half (follower / anchor-watcher / seed / fresh-sync) is network-ready today. Also
+**M6b-2** push-gossip (removes seeds from the liveness path). *(large — done)*
 
 ### M3 — Node shell (API + mempool + wiring)
 Turn the producer into an inspectable node: an HTTP/RPC API (submit a shielded
@@ -72,12 +91,14 @@ A **peg + activity + merge-mining dashboard** — the only things a private chai
 can publicly show (blocks, tx counts, merge-mining proofs, the transparent peg /
 pool size), never shielded parties or amounts (architecture §7). *(medium)*
 
-### M6 — P2P
+### M6 — P2P *(partly done — landed with M2)*
 Multi-node body distribution + seed discovery. **Lighter than a normal chain's
 P2P**: Ergo already provides discovery/ordering/fork-choice, so this is a
-body-availability layer keyed by Ergo-committed hashes, with untrusted peers
-(verify each body against its committed hash; a bad peer can withhold, never
-forge). v1 can start with a seed/snapshot server and add gossip later. *(medium)*
+body-availability layer keyed by self-authenticating hashes, untrusted peers (a
+bad peer can withhold, never forge). **Done:** the design (`p2p.md`), the
+seed/HTTP body tier + fresh-sync (M6b-1), and the anchor-watcher (M6a). **Remaining
+(M6b-2):** push-gossip (`HAVE`/`GET`/peer scoring) so seeds leave the liveness
+path, and a real multi-node testnet run. *(medium — seed tier done, gossip next)*
 
 ### M7 — Mainnet hardening
 Light-wallet sync, operator tooling, the storage-rent turnstile (R1-T), receipt
