@@ -1,0 +1,17 @@
+[package]
+name        = "aegis-contracts"
+description = "Peg-out ErgoScript contracts as first-class build artifacts: the authoritative .es sources (es/), deploy-constant injection, compilation via the pinned ergo-compiler, and blake2b256 script-hash pins. Oracle-tested against the trees deployed on Ergo testnet (test-vectors/testnet/peg-v2)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish     = false
+
+[dependencies]
+base64        = { workspace = true }
+ergo-compiler = { workspace = true }
+ergo-crypto   = { workspace = true }
+thiserror     = { workspace = true }
+
+[dev-dependencies]
+hex = { workspace = true }

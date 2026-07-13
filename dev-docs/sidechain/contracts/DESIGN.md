@@ -1,6 +1,15 @@
 # Aegis peg contracts — contract-level design (passes 1–3)
 
-**Date:** 2026-07-12 · **Status:** design draft (authored fresh per [peg.md](../peg.md) + [GAPS.md](./GAPS.md); upstream ErgoHack = pattern reference only) · **Gate:** no public vault until GAPS must-fix green + this design reviewed. **Compilation ≠ security** — the `.es` here parse/typecheck; whether the conditions actually prevent theft is unverified and needs review + (for TVL) audit.
+**Date:** 2026-07-12 · **Status:** design draft (authored fresh per [peg.md](../peg.md) + [GAPS.md](./GAPS.md); upstream ErgoHack = pattern reference only) · **Gate:** no public vault until GAPS must-fix green + this design reviewed. **Compilation ≠ security** — the `.es` parse/typecheck; whether the conditions actually prevent theft is unverified and needs review + (for TVL) audit.
+
+> **Sources moved (2026-07-13):** the six `.es` files are now FIRST-CLASS build
+> artifacts under [`contracts/es/`](../../../contracts/es/) (the authoritative
+> home), compiled + constant-injected + script-hash-pinned by the
+> `aegis-contracts` workspace crate. Its tests pin the placeholder tree sizes
+> recorded below AND byte-for-byte parity with the trees deployed on Ergo
+> testnet (`test-vectors/testnet/peg-v2/`). This directory keeps the design
+> docs (this file + GAPS.md) only. Relative `.es` mentions below refer to
+> `contracts/es/<name>.es`.
 
 USE token id: `a55b8735ed1a99e46c2c89f8994aacdf4b1109bdcf682f1e5b34479c6e392669` (3 decimals; amounts are integer base units, any multiple of 1 = 0.001 USE). `V_cap` = 1_000_000 base units (1000 USE). `T_delay` = 720 Ergo blocks.
 

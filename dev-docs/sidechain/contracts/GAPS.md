@@ -16,7 +16,7 @@ contracts, keyed to where upstream fell short.
 
 ## Contract home
 
-Keep authored ErgoScript under `dev-docs/sidechain/contracts/` until first testnet deploy, then promote to a sibling repo (e.g. `arkadianet/aegis-contracts`) for versioning. Do **not** commit contract deploy keys.
+Promoted (2026-07-13, post first testnet deploy): authored ErgoScript lives in the in-repo `aegis-contracts` workspace crate (`contracts/es/`), which compiles the sources with the pinned `ergo-compiler` and oracle-tests them against the deployed testnet trees — versioned with the node instead of a sibling repo. Do **not** commit contract deploy keys.
 
 ## Inventory (upstream)
 

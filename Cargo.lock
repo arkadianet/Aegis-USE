@@ -3,6 +3,17 @@
 version = 4
 
 [[package]]
+name = "aegis-contracts"
+version = "0.5.1"
+dependencies = [
+ "base64",
+ "ergo-compiler",
+ "ergo-crypto",
+ "hex",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "aegis-crypto"
 version = "0.5.1"
 dependencies = [
@@ -664,6 +675,20 @@ dependencies = [
  "ergo-primitives",
  "ergo-ser",
  "hex",
+]
+
+[[package]]
+name = "ergo-compiler"
+version = "0.5.2"
+source = "git+https://github.com/arkadianet/ergo.git?tag=v0.5.2#e4bc1546b0e1e8f7e6ca5c16eea01c81dcfa5fae"
+dependencies = [
+ "base64",
+ "bs58",
+ "ergo-crypto",
+ "ergo-primitives",
+ "ergo-ser",
+ "num-bigint",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

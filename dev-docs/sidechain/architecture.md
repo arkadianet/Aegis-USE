@@ -74,9 +74,13 @@ network.
 - `proof.rs` / `tx.rs` — shielded-transfer wire ↔ proof binding.
 - `aegis-crypto` — generators, note commitments, the Poseidon nullifier, the
   Curve-Trees spend/mint circuits (the shielded-value engine).
-- `contracts/` (in `dev-docs/sidechain/contracts/`) — the six peg-out
-  ErgoScript contracts. **Currently design sources with no in-repo build/deploy
-  tooling** — see the roadmap (§8, step 1).
+- `contracts/` (the `aegis-contracts` workspace crate) — the six peg-out
+  ErgoScript contracts as first-class build artifacts: authoritative `.es`
+  sources under `contracts/es/`, deploy-constant injection, compilation via
+  the pinned `ergo-compiler`, and blake2b256 script-hash pins, oracle-tested
+  byte-for-byte against the trees deployed on Ergo testnet
+  (`test-vectors/testnet/peg-v2/`). Design docs stay in
+  `dev-docs/sidechain/contracts/` (DESIGN.md / GAPS.md).
 
 ---
 
@@ -209,9 +213,10 @@ explorer: pool size and tx counts, never shielded parties/amounts).
 
 ## 8. Roadmap — the build order
 
-1. **Contracts first-class** — a `contracts/` crate + a compile/pin tool
-   (against the git-dep'd `ergo-compiler`) that builds the `.es` and pins their
-   tree-hashes as consensus constants. *Small; closes a real gap.*
+1. **Contracts first-class** — ✅ DONE (2026-07-13): the `aegis-contracts`
+   crate (`contracts/`) builds the `.es` against the git-dep'd `ergo-compiler`
+   and pins tree sizes + blake2b256 script hashes, with on-chain parity tests
+   against the deployed testnet trees (`test-vectors/testnet/peg-v2/`).
 2. **Merge-mining (L1)** — the keystone (§4). Reuses the peg-in inclusion code.
    Unlocks security, ordering, fork-choice, **and** fresh-node sync (§5) at once.
 3. **Node API + mempool (L3)** — accept/order shielded transfers; submit/query
