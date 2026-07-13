@@ -20,9 +20,14 @@
 //!   Ergo height across the shares seen for it), then the lex-smaller
 //!   block id — order-independent given the same share/body set, so
 //!   nodes fed the same inputs in any order converge. (merge-mining.md
-//!   §5 still says "first-seen" for ties; first-seen is subjective and
-//!   breaks convergence, so this module implements the objective rule
-//!   and the doc line should be amended.)
+//!   §5 previously said "first-seen" for ties; first-seen is subjective
+//!   and breaks convergence, so this module implements the objective
+//!   rule and the doc was corrected to match.) NOTE (review NIT): the
+//!   ONLY residual order-dependence is two nodes holding *different
+//!   witness sets* for one block (different `min` Ergo height) — this is
+//!   transient and self-heals as Ergo-committed shares are public and
+//!   propagate (the peg's `NotCaughtUp` assumption); it can shift a live
+//!   tip but NEVER a `is_final` verdict (equal-W ties never finalize).
 //! - **Reorg mechanics** reuse [`Chain`] unchanged: the single linear
 //!   `Chain` is a *materialization cursor* into the tree — switching
 //!   branches rolls back through the undo ring
@@ -319,6 +324,15 @@ impl MmForkChoice {
     /// pending/unavailable share's weight counted as hostile**. A later
     /// reveal of pending weight can therefore never reorg a block this
     /// approved: revealed branches were already charged in full.
+    ///
+    /// **Caller contract (review P2):** soundness assumes shares and
+    /// anchors are fed from a *single caught-up* Ergo follower, so that
+    /// `pending` covers ALL Ergo-committed hidden weight at inclusion
+    /// height ≤ `settled_ergo_height`. A caller that records an anchor
+    /// without first ingesting the shares committed at/below that Ergo
+    /// height could get a premature `true` — the same "must be caught up
+    /// to judge" precondition the peg's `NotCaughtUp` path enforces. Pass
+    /// `settled_ergo_height = Follower::settled_reference().height`.
     pub fn is_final(&self, aegis_id: &Id, l_final: &BigUint, settled_ergo_height: u32) -> bool {
         if !self.nodes.contains_key(aegis_id) {
             return false;
