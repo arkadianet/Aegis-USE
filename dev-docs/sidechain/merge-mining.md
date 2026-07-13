@@ -336,8 +336,16 @@ input it always wanted:
 - **Reorg mechanics** are the existing ones: `Chain::rollback_tip` through
   the 240-block undo ring (consensus.md §5), `store.rs` replay for deeper
   resync. Acceptance-finality declared at retention depth (240) stands.
-- **Ties** in cumulative work break first-seen (consensus.md §5 C4,
-  unchanged and now actually operative again).
+- **Ties** in cumulative work break by an **objective, node-independent**
+  rule — NOT first-seen (first-seen is subjective and breaks
+  order-independent convergence; corrected during the M2b build, verified
+  by the `different_ingest_orders_converge_to_same_tip` test): equal-`W` →
+  the branch whose distinguishing block has the **lowest Ergo height of its
+  earliest share** (min over that block's share set), then the
+  lexicographically smaller Aegis id. This is computable identically by
+  every node from the shared Ergo view, so two nodes with the same
+  share+body set always pick the same tip. (Supersedes consensus.md §5 C4's
+  first-seen tie-break on merge-mined networks.)
 
 ## 6. Data availability by gossip
 
@@ -448,7 +456,7 @@ migrate): `MM_MARKER_TREE`, `MM_PRODUCER_PK`, `MM_CHAIN_TAG`,
   `W_settled` computation. Tests: amplification attempt (two ids, one
   hash — must be unconstructible), duplicate-witness dedup, pending→active
   activation, invalid-body branch death, deep-reorg refold vs the undo
-  ring, first-seen tie.
+  ring, objective (Ergo-order, not first-seen) tie-break.
 - **M6 — gossip.** Bodies + witnesses on Aegis P2P, seeds, re-request/
   backoff, pending-hostile input to the attester. (Unchanged dependency;
   now also carries witnesses.)
