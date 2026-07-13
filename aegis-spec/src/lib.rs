@@ -164,6 +164,38 @@ pub const NOTE_CT_BYTES: usize = 152;
 /// Sender (OVK) ciphertext, Sapling out_ciphertext discipline:
 /// esk(32) + pk(32) + AEAD tag(16). Mandatory fixed-size slot (N7).
 pub const NOTE_OUT_CT_BYTES: usize = 80;
+// ----- Merge-mining commitment constants (merge-mining.md §2.2, §8) -----
+//
+// The aux-PoW channel: one extension-section field inside the Ergo
+// block candidate carries the Aegis block id, so every Autolykos
+// attempt over that candidate commits to exactly one Aegis block.
+// All three values are chain-id-breaking (frozen at chain-cut).
+
+/// Extension-field key for the Aegis merge-mining commitment:
+/// namespace `0xAE`, index 0. Ergo's existing namespaces are `0x00`
+/// (system parameters), `0x01` (NiPoPoW interlinks) and `0x02`
+/// (validation rules); unknown keys are consensus-legal on Ergo
+/// (rules 400/404/405/406 never reject unknown keys).
+pub const AEGIS_MM_KEY: [u8; 2] = [0xAE, 0x00];
+
+/// First byte of the commitment field value; a bump starts a new
+/// commitment era (old-version fields stop being commitments).
+pub const MM_COMMITMENT_VERSION: u8 = 0x01;
+
+/// Commitment field value length: version byte + 32-byte Aegis block
+/// id. Must stay ≤ 64 (Ergo rule 404 per-field value cap).
+pub const MM_FIELD_VALUE_LEN: usize = 33;
+
+// Compile-time guard: the commitment value must fit Ergo's rule-404
+// 64-byte per-field cap (and, a fortiori, the 255-byte wire cap).
+const _: () = assert!(MM_FIELD_VALUE_LEN <= 64);
+
+/// C2 share height window (merge-mining.md §2.3 step 2, provisional):
+/// a share's Ergo candidate height must lie in
+/// `[follower_tip − K_LAG, follower_tip + 1]`. Blocks cheap-height
+/// `calc_n` grinding and bounds offline share stockpiling.
+pub const K_LAG: u32 = 6;
+
 /// Fixed 2-in/2-out arity (note-protocol.md §6).
 pub const TX_ARITY: usize = 2;
 /// Hard cap on proof bytes per transfer (spike measured ~3.4–4.0 KB).
@@ -313,6 +345,24 @@ mod tests {
         // capped by the pot even with a nonsense tx count.
         assert_eq!(main_params().coinbase_reward(u64::MAX, u64::MAX), u64::MAX);
         assert_eq!(main_params().coinbase_reward(500, u64::MAX), 500);
+    }
+
+    #[test]
+    fn mm_constants_match_merge_mining_design() {
+        // merge-mining.md §8: key namespace 0xAE index 0, value version
+        // 0x01, 33-byte value, K_LAG 6 (provisional).
+        assert_eq!(AEGIS_MM_KEY, [0xAE, 0x00]);
+        assert_eq!(MM_COMMITMENT_VERSION, 0x01);
+        assert_eq!(MM_FIELD_VALUE_LEN, 1 + 32);
+        assert_eq!(K_LAG, 6);
+    }
+
+    #[test]
+    fn mm_key_namespace_avoids_ergo_namespaces() {
+        // Ergo's occupied extension namespaces (ergo-ser extension.rs
+        // module doc): 0x00 params, 0x01 interlinks, 0x02 validation
+        // rules. The commitment must not collide.
+        assert!(![0x00, 0x01, 0x02].contains(&AEGIS_MM_KEY[0]));
     }
 
     // ----- oracle parity -----

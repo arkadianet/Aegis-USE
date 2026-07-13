@@ -9,6 +9,7 @@
 //! (blake2b256), and `ergo-ser` (compact-nbits codecs). Chain
 //! parameters come from `aegis-spec`.
 
+pub mod auxpow;
 pub mod block;
 pub mod chain;
 pub mod daa;
@@ -22,6 +23,10 @@ pub mod state;
 pub mod store;
 pub mod tx;
 
+pub use auxpow::{
+    aegis_mm_extension_field, verify_share, ShareContext, ShareError, ShareWitness, ValidShare,
+    WitnessDecodeError, WitnessError,
+};
 pub use block::{Block, BlockBody, BlockDecodeError, BodyDecodeError};
 pub use chain::{Chain, ExtendError, PowMode, ProofMode};
 pub use daa::{next_nbits, DaaParams};
