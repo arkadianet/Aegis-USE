@@ -102,13 +102,27 @@ reviewed slice of its own given it's the value path.
 
 ## Build order (M3 slices, each design→review→build)
 
-1. **Read-only API** (tip/state/peg/mm status + the `mm/commitment` endpoint —
-   unblocks the Ergo integration) — smallest, no mutation, safe first.
-2. **Mempool + submit** (admission, reorg-revalidation, ordering into the
-   producer) — the shielded-tx lifecycle.
-3. **Peg-in wiring** (`verify_pegmint_full` → mint) — a reviewed value-path slice.
+1. ✅ **DONE — Read-only API** (`4f55cf9`): tip/state/mm-status + the
+   `mm/commitment` template that unblocks the Ergo integration; nullifier
+   membership; block-by-id/height. Per-tick `NodeStatus` snapshot, no mutation.
+2. ✅ **DONE — Mempool + submit** (`64945be`): authoritative-at-the-boundary
+   admission (proof verifies vs the tip anchor at the consensus fee; nullifiers
+   unspent + conflict-free), `POST /aegis/v1/tx`, tip-change eviction, producer
+   drains the pool into the **existing** `BlockBody.transfers` field. **Non-chain-
+   id-breaking** — no block/state format change.
+3. ⛔ **BLOCKED — Peg-in wiring** (`verify_pegmint_full` → mint). Wiring the peg-in
+   verifier into the chain needs a **new peg-mint field in the block, a new
+   apply-rule (mint note + credit pot), and a new consensus used-set in the
+   state** — a **block-and-state format change = chain-id-breaking**. That is
+   prohibited by the active [FREEZE-HOLD](stark-native-decision.md), and it is the
+   exact **peg-settlement path (#6)** an EIP-0045 STARK would reshape. **Defer**
+   until the STARK decision resolves the settlement architecture, or until the
+   operator explicitly authorizes a chain-id-breaking testnet re-cut. *(A
+   non-chain-id-breaking partial is possible: a read-only endpoint that runs
+   `verify_pegmint_full` and returns the `PegMintEffect` without applying it — an
+   operator/wallet peg-in checker. Offered, not built unprompted.)*
 4. *(later)* multi-node encrypted tx relay (Dandelion-shaped) — its own privacy
    design.
 
-Slice 1 is the quickest win and directly enables real merge-mining (the Ergo
-candidate-builder needs `mm/commitment`). Recommend it first.
+Slices 1–2 are complete and clean under the freeze-hold. Slice 3 is the value
+path and is held; see above.
