@@ -33,7 +33,9 @@ use std::sync::{Arc, RwLock};
 
 use num_bigint::BigUint;
 
+use crate::mempool::{AdmissionView, AdmitError, Admitted, Mempool};
 use crate::seed::{Id, SeedCore};
+use crate::tx::ShieldedTransfer;
 
 /// An immutable, public snapshot of node state, published once per tick
 /// and served verbatim by the API. All fields are public aggregates.
@@ -77,15 +79,28 @@ pub struct NodeStatus {
 pub struct ApiState {
     status: Arc<RwLock<Arc<NodeStatus>>>,
     core: Arc<RwLock<SeedCore>>,
+    /// Pending transfers (shared with the node's producer).
+    mempool: Arc<RwLock<Mempool>>,
+    /// Admission snapshot (spend anchor + spent set + fee), republished
+    /// by the node on each tip change.
+    admission: Arc<RwLock<Arc<AdmissionView>>>,
 }
 
 impl ApiState {
-    /// Create the shared state from an initial snapshot and the node's
-    /// archive (for block-body lookups).
-    pub fn new(initial: NodeStatus, core: Arc<RwLock<SeedCore>>) -> Self {
+    /// Create the shared state from an initial snapshot, the node's
+    /// archive (block bodies), the shared mempool, and the initial
+    /// admission view.
+    pub fn new(
+        initial: NodeStatus,
+        core: Arc<RwLock<SeedCore>>,
+        mempool: Arc<RwLock<Mempool>>,
+        admission: AdmissionView,
+    ) -> Self {
         ApiState {
             status: Arc::new(RwLock::new(Arc::new(initial))),
             core,
+            mempool,
+            admission: Arc::new(RwLock::new(Arc::new(admission))),
         }
     }
 
@@ -94,8 +109,26 @@ impl ApiState {
         *self.status.write().expect("api status lock poisoned") = Arc::new(status);
     }
 
+    /// Replace the admission view (called by the node on a tip change).
+    pub fn publish_admission(&self, view: AdmissionView) {
+        *self.admission.write().expect("api admission lock poisoned") = Arc::new(view);
+    }
+
     fn snapshot(&self) -> Arc<NodeStatus> {
         Arc::clone(&self.status.read().expect("api status lock poisoned"))
+    }
+
+    /// Admit a decoded transfer against the current admission view.
+    fn submit(&self, tx: ShieldedTransfer) -> Result<Admitted, AdmitError> {
+        let view = Arc::clone(&self.admission.read().expect("api admission lock poisoned"));
+        self.mempool
+            .write()
+            .expect("mempool lock poisoned")
+            .admit(tx, &view)
+    }
+
+    fn mempool_len(&self) -> usize {
+        self.mempool.read().expect("mempool lock poisoned").len()
     }
 }
 
@@ -168,9 +201,14 @@ mod serve {
     use std::time::Duration;
 
     use super::{mm_commitment_json, mm_status_json, state_json, tip_json, ApiState, BTreeSet};
+    use crate::mempool::AdmitError;
     use crate::seed::Id;
+    use crate::tx::ShieldedTransfer;
+    use aegis_spec::MAX_PROOF_BYTES;
 
     const MAX_REQUEST_HEAD_BYTES: usize = 8 * 1024;
+    /// POST body cap: a full transfer wire (proof + fixed fields + slack).
+    const MAX_POST_BODY_BYTES: usize = MAX_PROOF_BYTES + 4 * 1024;
     const SOCKET_TIMEOUT: Duration = Duration::from_secs(10);
 
     /// A running API server; shuts down (and joins its thread) on drop.
@@ -230,14 +268,19 @@ mod serve {
     fn handle_connection(mut stream: TcpStream, state: &ApiState) -> std::io::Result<()> {
         stream.set_read_timeout(Some(SOCKET_TIMEOUT))?;
         stream.set_write_timeout(Some(SOCKET_TIMEOUT))?;
-        let head = match read_head(&mut stream) {
-            Ok(h) => h,
+        let (head, rest) = match read_head(&mut stream) {
+            Ok(parts) => parts,
             Err(_) => return respond(&mut stream, 400, b"bad request"),
         };
-        let Some((method, target)) = parse_head(&head) else {
+        let Some((method, target, content_length)) = parse_head(&head) else {
             return respond(&mut stream, 400, b"bad request");
         };
         let path = target.split_once('?').map(|(p, _)| p).unwrap_or(&target);
+
+        // The only mutating route: submit a shielded transfer.
+        if method == "POST" && path == "/aegis/v1/tx" {
+            return submit_tx(&mut stream, state, content_length, rest);
+        }
         if method != "GET" {
             return respond(&mut stream, 405, b"method not allowed");
         }
@@ -249,7 +292,7 @@ mod serve {
             "/aegis/v1/mm/commitment" => json(&mut stream, &mm_commitment_json(&snap)),
             "/aegis/v1/mempool" => json(
                 &mut stream,
-                &serde_json::json!({ "size": snap.mempool_size }),
+                &serde_json::json!({ "size": state.mempool_len() }),
             ),
             p if p.starts_with("/aegis/v1/nullifier/") => nullifier(
                 &mut stream,
@@ -306,14 +349,63 @@ mod serve {
         }
     }
 
+    /// `POST /aegis/v1/tx`: decode a wire [`ShieldedTransfer`] and admit
+    /// it to the mempool. Status: 200 (new or idempotent duplicate), 400
+    /// (bad wire), 409 (nullifier spent/conflict or no anchor), 422
+    /// (invalid proof), 503 (mempool full).
+    fn submit_tx(
+        stream: &mut TcpStream,
+        state: &ApiState,
+        content_length: Option<usize>,
+        mut body: Vec<u8>,
+    ) -> std::io::Result<()> {
+        let Some(len) = content_length else {
+            return respond(stream, 400, b"missing content-length");
+        };
+        if len > MAX_POST_BODY_BYTES {
+            return respond(stream, 400, b"transfer too large");
+        }
+        if body.len() < len {
+            let mut more = vec![0u8; len - body.len()];
+            if stream.read_exact(&mut more).is_err() {
+                return respond(stream, 400, b"truncated body");
+            }
+            body.extend_from_slice(&more);
+        }
+        let tx = match ShieldedTransfer::from_bytes(&body[..len]) {
+            Ok(tx) => tx,
+            Err(_) => return respond(stream, 400, b"malformed transfer"),
+        };
+        match state.submit(tx) {
+            Ok(outcome) => {
+                let kind = if outcome.is_new() { "new" } else { "duplicate" };
+                json(
+                    stream,
+                    &serde_json::json!({ "admitted": kind, "id": hex::encode(outcome.id()) }),
+                )
+            }
+            Err(e) => {
+                let code = match e {
+                    AdmitError::Invalid(_) => 422,
+                    AdmitError::Full => 503,
+                    AdmitError::AlreadySpent | AdmitError::Conflict | AdmitError::NoAnchor => 409,
+                };
+                respond(stream, code, e.to_string().as_bytes())
+            }
+        }
+    }
+
     // ----- transport (mirrors seed::serve_http) -----
 
-    fn read_head(stream: &mut TcpStream) -> std::io::Result<Vec<u8>> {
+    /// Read to the end of the request head; returns (head, any body
+    /// bytes already read past it).
+    fn read_head(stream: &mut TcpStream) -> std::io::Result<(Vec<u8>, Vec<u8>)> {
         let mut buf = Vec::with_capacity(512);
         let mut chunk = [0u8; 512];
         loop {
-            if buf.windows(4).any(|w| w == b"\r\n\r\n") {
-                return Ok(buf);
+            if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                let rest = buf.split_off(pos + 4);
+                return Ok((buf, rest));
             }
             if buf.len() > MAX_REQUEST_HEAD_BYTES {
                 return Err(std::io::Error::other("request head too large"));
@@ -326,12 +418,21 @@ mod serve {
         }
     }
 
-    fn parse_head(head: &[u8]) -> Option<(String, String)> {
+    fn parse_head(head: &[u8]) -> Option<(String, String, Option<usize>)> {
         let head = std::str::from_utf8(head).ok()?;
-        let mut request_line = head.split("\r\n").next()?.split(' ');
+        let mut lines = head.split("\r\n");
+        let mut request_line = lines.next()?.split(' ');
         let method = request_line.next()?.to_string();
         let target = request_line.next()?.to_string();
-        Some((method, target))
+        let mut content_length = None;
+        for line in lines {
+            if let Some((name, value)) = line.split_once(':') {
+                if name.eq_ignore_ascii_case("content-length") {
+                    content_length = value.trim().parse::<usize>().ok();
+                }
+            }
+        }
+        Some((method, target, content_length))
     }
 
     fn parse_id_hex(s: &str) -> Option<Id> {
@@ -367,6 +468,9 @@ mod serve {
             400 => "Bad Request",
             404 => "Not Found",
             405 => "Method Not Allowed",
+            409 => "Conflict",
+            422 => "Unprocessable Entity",
+            503 => "Service Unavailable",
             _ => "Error",
         };
         let head = format!(
@@ -414,9 +518,99 @@ mod tests {
         }
     }
 
+    const FEE: u64 = 10; // dev sc_tx_fee
+
+    fn empty_admission() -> AdmissionView {
+        AdmissionView::new(Arc::new(Vec::new()), Arc::new(BTreeSet::new()), FEE)
+    }
+
     fn state() -> ApiState {
         let core = Arc::new(RwLock::new(SeedCore::new(Network::Dev)));
-        ApiState::new(sample_status(), core)
+        ApiState::new(
+            sample_status(),
+            core,
+            Arc::new(RwLock::new(Mempool::new())),
+            empty_admission(),
+        )
+    }
+
+    /// A valid wire transfer + an admission view whose anchor it spends.
+    fn transfer_scene() -> (ApiState, Vec<u8>) {
+        use aegis_crypto::note::{note_cm_bytes, EvenScalar};
+        use aegis_crypto::nullifier::OddScalar;
+        use aegis_crypto::spend::{
+            consensus_note_commitment, consensus_note_tag, prove_transfer, NoteOpening,
+            TransferOutput,
+        };
+        use aegis_crypto::tree::build_tree;
+        use aegis_spec::{EPK_BYTES, NOTE_CT_BYTES, NOTE_OUT_CT_BYTES};
+        use rand::rngs::StdRng;
+        use rand::SeedableRng;
+
+        let opening = |value: u64, seed: u64, leaf_index: usize| NoteOpening {
+            value,
+            blinding: EvenScalar::from(seed),
+            leaf_index,
+            nk: OddScalar::from(seed + 1),
+            rho: OddScalar::from(seed + 2),
+            r_key: OddScalar::from(seed + 3),
+        };
+        let leaf = |o: &NoteOpening| {
+            consensus_note_commitment(
+                o.value,
+                consensus_note_tag(o.nk, o.rho, o.r_key),
+                o.blinding,
+            )
+        };
+        let inputs = [opening(1_000, 0x21, 0), opening(500, 0x22, 1)];
+        let leaves = vec![
+            leaf(&inputs[0]),
+            leaf(&inputs[1]),
+            leaf(&opening(0, 0x23, 2)),
+        ];
+        let anchor = build_tree(&leaves);
+        let outputs = [
+            TransferOutput {
+                value: 1_500 - FEE - 100,
+                tag: EvenScalar::from(0x31u64),
+                blinding: EvenScalar::from(0x41u64),
+            },
+            TransferOutput {
+                value: 100,
+                tag: EvenScalar::from(0x32u64),
+                blinding: EvenScalar::from(0x42u64),
+            },
+        ];
+        let proof = prove_transfer(
+            &anchor,
+            &inputs,
+            &outputs,
+            FEE,
+            &mut StdRng::seed_from_u64(1),
+        )
+        .unwrap();
+        let mut proof_bytes = Vec::new();
+        ark_serialize::CanonicalSerialize::serialize_compressed(&proof, &mut proof_bytes).unwrap();
+        let out_wire = |i: usize| crate::tx::ShieldedOutput {
+            note_cm: note_cm_bytes(&proof.output_cms[i]),
+            epk: [0u8; EPK_BYTES],
+            ct: [0u8; NOTE_CT_BYTES],
+            out_ct: [0u8; NOTE_OUT_CT_BYTES],
+        };
+        let tx = ShieldedTransfer {
+            nullifiers: proof.nullifiers(),
+            outputs: [out_wire(0), out_wire(1)],
+            proof: proof_bytes,
+        };
+        let core = Arc::new(RwLock::new(SeedCore::new(Network::Dev)));
+        let admission = AdmissionView::new(Arc::new(leaves), Arc::new(BTreeSet::new()), FEE);
+        let state = ApiState::new(
+            sample_status(),
+            core,
+            Arc::new(RwLock::new(Mempool::new())),
+            admission,
+        );
+        (state, tx.bytes())
     }
 
     /// Issue one GET and return `(status_code, body)`.
@@ -437,6 +631,29 @@ mod tests {
             .and_then(|c| c.parse().ok())
             .unwrap_or(0);
         (code, body.to_string())
+    }
+
+    /// POST `body` and return `(status_code, response_body)`.
+    fn post(base: &str, path: &str, body: &[u8]) -> (u16, String) {
+        let addr = base.trim_start_matches("http://");
+        let mut s = TcpStream::connect(addr).expect("connect");
+        write!(
+            s,
+            "POST {path} HTTP/1.1\r\nHost: x\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        )
+        .unwrap();
+        s.write_all(body).unwrap();
+        let mut raw = Vec::new();
+        s.read_to_end(&mut raw).expect("read");
+        let raw = String::from_utf8_lossy(&raw).into_owned();
+        let (head, resp) = raw.split_once("\r\n\r\n").unwrap_or((&raw, ""));
+        let code = head
+            .split_whitespace()
+            .nth(1)
+            .and_then(|c| c.parse().ok())
+            .unwrap_or(0);
+        (code, resp.to_string())
     }
 
     // ----- happy path -----
@@ -522,6 +739,59 @@ mod tests {
         assert_eq!(get(&server.base_url(), "/aegis/v1/nope").0, 404);
         assert_eq!(get(&server.base_url(), "/aegis/v1/nullifier/zz").0, 400);
         assert_eq!(get(&server.base_url(), "/aegis/v1/block/at/notnum").0, 400);
+    }
+
+    // ----- submit (slice 2) -----
+
+    #[test]
+    fn submit_admits_a_valid_transfer_and_mempool_reflects_it() {
+        let (st, tx_bytes) = transfer_scene();
+        let server = ApiServer::spawn("127.0.0.1:0", st).expect("spawn");
+        let (code, body) = post(&server.base_url(), "/aegis/v1/tx", &tx_bytes);
+        assert_eq!(code, 200, "body={body}");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&body).unwrap()["admitted"],
+            "new"
+        );
+        let (_, mp) = get(&server.base_url(), "/aegis/v1/mempool");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&mp).unwrap()["size"],
+            1
+        );
+    }
+
+    #[test]
+    fn submit_double_is_idempotent() {
+        let (st, tx_bytes) = transfer_scene();
+        let server = ApiServer::spawn("127.0.0.1:0", st).expect("spawn");
+        assert_eq!(post(&server.base_url(), "/aegis/v1/tx", &tx_bytes).0, 200);
+        let (code, body) = post(&server.base_url(), "/aegis/v1/tx", &tx_bytes);
+        assert_eq!(code, 200);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&body).unwrap()["admitted"],
+            "duplicate"
+        );
+    }
+
+    #[test]
+    fn submit_malformed_body_400s_and_invalid_proof_422s() {
+        let (st, mut tx_bytes) = transfer_scene();
+        let server = ApiServer::spawn("127.0.0.1:0", st).expect("spawn");
+        // Garbage bytes fail to decode → 400.
+        assert_eq!(post(&server.base_url(), "/aegis/v1/tx", b"not a tx").0, 400);
+        // A structurally-decodable transfer with a corrupted proof tail
+        // decodes but fails verification → 422.
+        let n = tx_bytes.len();
+        tx_bytes[n - 1] ^= 0xFF;
+        assert_eq!(post(&server.base_url(), "/aegis/v1/tx", &tx_bytes).0, 422);
+    }
+
+    #[test]
+    fn submit_without_an_anchor_409s() {
+        let (st, tx_bytes) = transfer_scene();
+        st.publish_admission(empty_admission()); // drop the anchor
+        let server = ApiServer::spawn("127.0.0.1:0", st).expect("spawn");
+        assert_eq!(post(&server.base_url(), "/aegis/v1/tx", &tx_bytes).0, 409);
     }
 
     #[test]

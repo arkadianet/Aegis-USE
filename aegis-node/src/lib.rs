@@ -19,6 +19,7 @@ pub mod ergo_follow;
 pub mod fresh_sync;
 pub mod genesis;
 pub mod header;
+pub mod mempool;
 pub mod mm_forkchoice;
 pub mod node;
 pub mod pegmint;
@@ -47,6 +48,7 @@ pub use fresh_sync::{
 };
 pub use genesis::genesis_header;
 pub use header::{Header, HeaderDecodeError};
+pub use mempool::{AdmissionView, AdmitError, Admitted, Mempool};
 pub use mm_forkchoice::{BodyIngest, MmForkChoice, ShareIngest};
 pub use node::{Node, NodeConfig, NodeError, TickReport};
 pub use proof::{verify_shielded_transfer, ProofError};

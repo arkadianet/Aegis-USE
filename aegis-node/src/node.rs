@@ -58,6 +58,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
+use aegis_crypto::generators::EvenPoint;
 use aegis_crypto::note::EvenScalar;
 use aegis_spec::{Network, K_LAG};
 use ergo_crypto::autolykos::common::blake2b256;
@@ -82,6 +83,7 @@ use crate::daa::DaaParams;
 use crate::ergo_follow::poll_http::{RestHeaderSource, RestSourceConfig, RestSourceError};
 use crate::ergo_follow::Follower;
 use crate::fresh_sync::{fresh_sync, sync_from_seeds};
+use crate::mempool::{AdmissionView, Mempool};
 use crate::mm_forkchoice::{BodyIngest, MmForkChoice, ShareIngest};
 use crate::seed::fetch_http::{FetchError, RestAegisSource, SeedClientConfig};
 use crate::seed::serve_http::SeedServer;
@@ -202,9 +204,13 @@ pub struct Node {
     /// `api_addr`.
     api_state: Option<ApiState>,
     api_server: Option<ApiServer>,
-    /// Nullifier-set snapshot for the API, rebuilt only when the tip
-    /// changes (bounds the clone to once per new block).
+    /// Shared mempool (with the API's submit path). `None` without an
+    /// API server — there is no other way to submit.
+    mempool: Option<Arc<RwLock<Mempool>>>,
+    /// Nullifier-set + note-leaf snapshots for the API/admission,
+    /// rebuilt only when the tip changes (once per new block).
     nf_snapshot: Arc<BTreeSet<[u8; 32]>>,
+    cm_leaves_snapshot: Arc<Vec<EvenPoint>>,
     nf_snapshot_tip: Id,
     /// Block ids already recorded into the core archive (+ disk log).
     recorded_blocks: BTreeSet<Id>,
@@ -314,7 +320,9 @@ impl Node {
             server,
             api_state: None,
             api_server: None,
+            mempool: None,
             nf_snapshot: Arc::new(BTreeSet::new()),
+            cm_leaves_snapshot: Arc::new(Vec::new()),
             nf_snapshot_tip: [0u8; 32],
             recorded_blocks,
             recorded_witnesses,
@@ -324,14 +332,21 @@ impl Node {
         for e in node.catch_up(now_ms) {
             tracing::warn!(error = %e, "boot catch-up incomplete; retrying in the loop");
         }
-        // Spawn the read-only API over a snapshot of the caught-up state.
+        // Spawn the API (+ its shared mempool) over the caught-up state.
         if let Some(addr) = api_addr {
-            node.refresh_nf_snapshot();
-            let state = ApiState::new(node.build_status(), Arc::clone(&node.core));
+            node.refresh_snapshots();
+            let mempool = Arc::new(RwLock::new(Mempool::new()));
+            let state = ApiState::new(
+                node.build_status(),
+                Arc::clone(&node.core),
+                Arc::clone(&mempool),
+                node.admission_view(),
+            );
             let server = ApiServer::spawn(&addr, state.clone())?;
             tracing::info!(addr = %server.local_addr(), "node API serving");
             node.api_state = Some(state);
             node.api_server = Some(server);
+            node.mempool = Some(mempool);
         }
         Ok(node)
     }
@@ -411,22 +426,50 @@ impl Node {
 
     // ----- internals -----
 
-    /// Rebuild the API nullifier snapshot iff the canonical tip moved.
-    fn refresh_nf_snapshot(&mut self) {
+    /// Rebuild the API nullifier + note-leaf snapshots iff the canonical
+    /// tip moved. Returns whether the tip changed.
+    fn refresh_snapshots(&mut self) -> bool {
         let tip = self.fc.canonical_tip_id();
-        if tip != self.nf_snapshot_tip {
-            self.nf_snapshot = Arc::new(self.fc.chain().state().nullifiers().clone());
-            self.nf_snapshot_tip = tip;
+        if tip == self.nf_snapshot_tip {
+            return false;
         }
+        let state = self.fc.chain().state();
+        self.nf_snapshot = Arc::new(state.nullifiers().clone());
+        self.cm_leaves_snapshot = Arc::new(state.cm_leaves().to_vec());
+        self.nf_snapshot_tip = tip;
+        true
+    }
+
+    /// The admission view for the current snapshots (spend anchor leaves
+    /// + spent set + consensus fee).
+    fn admission_view(&self) -> AdmissionView {
+        AdmissionView::new(
+            Arc::clone(&self.cm_leaves_snapshot),
+            Arc::clone(&self.nf_snapshot),
+            self.network.params().sc_tx_fee,
+        )
     }
 
     /// Publish a fresh [`NodeStatus`] snapshot to the API (no-op without
-    /// an API server).
+    /// an API server). On a tip change, also refresh the admission view
+    /// and evict now-spent mempool transfers.
     fn publish_status(&mut self) {
         if self.api_state.is_none() {
             return;
         }
-        self.refresh_nf_snapshot();
+        if self.refresh_snapshots() {
+            if let Some(mempool) = &self.mempool {
+                mempool
+                    .write()
+                    .expect("mempool lock poisoned")
+                    .evict_spent(&self.nf_snapshot);
+            }
+            let view = self.admission_view();
+            self.api_state
+                .as_ref()
+                .expect("checked above")
+                .publish_admission(view);
+        }
         let status = self.build_status();
         self.api_state
             .as_ref()
@@ -442,6 +485,13 @@ impl Node {
         let state = chain.state();
         let tip = self.fc.canonical_tip_id();
         let header = self.fc.canonical_tip();
+        let (mempool_size, mempool_txs) = match &self.mempool {
+            Some(mempool) => {
+                let pool = mempool.read().expect("mempool lock poisoned");
+                (pool.len(), Arc::new(pool.tx_bytes()))
+            }
+            None => (0, Arc::new(Vec::new())),
+        };
         NodeStatus {
             network_name: self.network.params().network_name,
             canonical_tip: tip,
@@ -463,8 +513,8 @@ impl Node {
             cm_tree_root: state.cm_tree_root(),
             leaf_count: state.leaf_count(),
             nullifiers: Arc::clone(&self.nf_snapshot),
-            mempool_size: 0,
-            mempool_txs: Arc::new(Vec::new()),
+            mempool_size,
+            mempool_txs,
         }
     }
 
@@ -579,11 +629,25 @@ impl Node {
     fn produce_one(&mut self, now_ms: u64, errors: &mut Vec<String>) -> Result<(u64, Id), String> {
         debug_assert_eq!(self.network, Network::Dev, "producer is dev-gated at boot");
         let next_height = self.fc.canonical_tip().height + 1;
+        // Drain the mempool: include transfers that RE-verify against the
+        // live anchor (authoritative inclusion check). Empty without an
+        // API/mempool → coinbase-only block, exactly as before.
+        let (transfers, included_ids) = match &self.mempool {
+            Some(mempool) => {
+                let anchor = self.fc.chain().state().anchor_tree();
+                let fee = self.network.params().sc_tx_fee;
+                mempool
+                    .read()
+                    .expect("mempool lock poisoned")
+                    .select_for_block(anchor.as_ref(), fee)
+            }
+            None => (Vec::new(), Vec::new()),
+        };
         let candidate = self
             .fc
             .chain()
             .produce_next_with_coinbase(
-                BlockBody::default(),
+                BlockBody { transfers },
                 now_ms,
                 EvenScalar::from(DEV_COINBASE_TAG),
                 EvenScalar::from(next_height),
@@ -615,6 +679,15 @@ impl Node {
             ));
         }
         self.persist_one(&candidate, &witness, errors);
+        // Drop the transfers this block included from the mempool.
+        if let Some(mempool) = &self.mempool {
+            if !included_ids.is_empty() {
+                mempool
+                    .write()
+                    .expect("mempool lock poisoned")
+                    .remove(&included_ids);
+            }
+        }
         Ok((candidate.header.height, candidate.id()))
     }
 

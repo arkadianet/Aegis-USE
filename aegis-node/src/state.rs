@@ -128,6 +128,12 @@ impl ShieldedState {
         &self.nullifiers
     }
 
+    /// The note-commitment leaves (read-only). Used to publish a
+    /// spend-anchor snapshot for mempool admission.
+    pub fn cm_leaves(&self) -> &[EvenPoint] {
+        &self.cm_leaves
+    }
+
     fn recompute_cm_root(&mut self) {
         self.cm_root = if self.cm_leaves.is_empty() {
             EMPTY_TREE_ROOT_PLACEHOLDER
