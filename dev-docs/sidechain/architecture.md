@@ -88,6 +88,7 @@ network.
 
 Merge-mining is simultaneously Aegis's **security**, **block ordering**, **fork
 choice**, and **sync/discovery**. Building it unlocks all four.
+Full design (marker scheme, watcher, consensus rule): [`merge-mining.md`](./merge-mining.md).
 
 ### Data flow
 
