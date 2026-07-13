@@ -1,0 +1,78 @@
+{
+    "id": "32bdefe80abc680896e8bee727f3b4e4b9e318db6b51afd07b5521e8797b5674",
+    "inputs": [
+        {
+            "boxId": "0243f853ac6efb59b2786d06a9a1c77824f0e0866bda1783f5f176d793dded84",
+            "spendingProof": {
+                "proofBytes": "f7c6b5f4f27e70eadc433b4fe71adb2cfc297da998f5c192d5298f615b1d9bddd5312c43fcd21eee2bca417522bcb491fd5cc8ce4f878ec5",
+                "extension": {}
+            }
+        },
+        {
+            "boxId": "70d3c729a234d35dd8e16c98d0978bbfb46d165dbfd7ccb81a4cb03a1380f83f",
+            "spendingProof": {
+                "proofBytes": "767b2599ab14fc59015ea274c745a239ed1b5c979fdbd0bc8616ff0941403840e0abc0021e6c67b38cc32b5958f1222d6f8cc46dece437dd",
+                "extension": {}
+            }
+        },
+        {
+            "boxId": "71c9b5b34fcbe2173e7c700e956c4666b929aee83843806bf0d83edcc39f963c",
+            "spendingProof": {
+                "proofBytes": "6585cf91116aadf881de9d1346d76a9c48909b022a5e47587865ab859cb5113db4f6d83d95d5aa4a1e8e9ebee15128ce78c302e2bb342d6a",
+                "extension": {}
+            }
+        }
+    ],
+    "dataInputs": [],
+    "outputs": [
+        {
+            "boxId": "9d4910797dd34f30750b96bac8cd974b565468d09730a4381e27c3b2fd029421",
+            "value": 1000000000,
+            "ergoTree": "100a040004000e2001f4e85f5214bd29aae27dc9e0bfed2a934d5783fbee04224a30c8379583da2804000442040004000e2001f7c2fb58c0053a57f9051f1a40514bd0ff38a2de1243266ac5d7273f3ef16c0414043cd804d601db6308a7d602eded91b172017300938cb27201730100017302e6c6a7040ed603db6308b2a5730300d604e4c6a70804eb02d1eded720293b1e4c6a7040e7304ed91b172037305938cb27203730600017307ea02d1ed7202ed92a372049272049a9a8cc7a70173087309e4c6a70708",
+            "address": "4ftaxv5T31S2QZmCaoW65yLAfDXHFzhxnj3ML7y2p5biixwTExttE1sSActbuG9XFyJFvNGQmwJdUryxZ2eNzwHH281dDPuweco3pTgkL7U2giVUbuNjXMBnBARDwdEkkva2VjXvuPwasPzpSohcmkYnR5YKXufS26n4EdmrAechTK37vhV195EZQZMcZwko5v5JtKcJTYCHpPahH4xCHfqw1PwdaQJhAPCRSHTp85iHv9uCbb1mhuTsVsTokQgyiBbr9dskntNedPYYKXv8gSCJ",
+            "assets": [
+                {
+                    "tokenId": "01f4e85f5214bd29aae27dc9e0bfed2a934d5783fbee04224a30c8379583da28",
+                    "amount": 999000
+                }
+            ],
+            "creationHeight": 443909,
+            "additionalRegisters": {
+                "R4": "0e210279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+                "R5": "0e2461656769732d746573746e65742d6c6f636b2d76332d6d312d726570726f766973696f6e",
+                "R6": "0406",
+                "R7": "08cd03b648cf969eba0499bce0d5b1247c11f0b94c878e56a2f4daf26920311ae107fd",
+                "R8": "04d09c36"
+            }
+        },
+        {
+            "boxId": "31f6e807d161abf076f3409671bc9750b21cd867cced83928eae51e0d11e7b90",
+            "value": 1100000,
+            "ergoTree": "1005040004000e36100204a00b08cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ea02d192a39a8cc7a701730073011001020402d19683030193a38cc7b2a57300000193c2b2a57301007473027303830108cdeeac93b1a57304",
+            "address": "Bf1X9JgQTUtgntaer91B24n6kP8L2kqEiQqNf1z97BKo9UbnW3WRP9VXu8BXd1LsYCiYbHJEdWKxkF5YNx5n7m31wsDjbEuB3B13ZMDVBWkepGmWfGa71otpFViHDCuvbw1uNicAQnfuWfnj8fbCa4",
+            "assets": [],
+            "creationHeight": 443909,
+            "additionalRegisters": {}
+        },
+        {
+            "boxId": "3a95cbd6207c30178d28465431ad05ce6be57c795ee7725c3991bb210dc7a196",
+            "value": 200498773440,
+            "ergoTree": "0008cd03b648cf969eba0499bce0d5b1247c11f0b94c878e56a2f4daf26920311ae107fd",
+            "address": "3WywEV3keFs3zpXTHx9wbAxjQcWdBU9yCWud4CmEuqsDPXpwgj7M",
+            "assets": [
+                {
+                    "tokenId": "01f4e85f5214bd29aae27dc9e0bfed2a934d5783fbee04224a30c8379583da28",
+                    "amount": 99999000000
+                }
+            ],
+            "creationHeight": 443909,
+            "additionalRegisters": {}
+        }
+    ],
+    "size": 801,
+    "inclusionHeight": 443910,
+    "scans": [
+        10
+    ],
+    "numConfirmations": 2
+}

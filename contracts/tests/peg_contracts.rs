@@ -24,6 +24,10 @@ const VECTORS: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../test-vectors/testnet/peg-v2"
 );
+const VECTORS_V3: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../test-vectors/testnet/peg-v3"
+);
 
 /// tUSE token id minted for the testnet ceremonies (peg-v2 README).
 const TUSE_TOKEN_ID: &str = "006a33af9b295c830b1fe19422ede003da35a1c3a5f6ac56618e99ef2eaa2bab";
@@ -42,10 +46,15 @@ fn hex32(s: &str) -> [u8; 32] {
 }
 
 /// Read a captured tree-bytes vector (`*.hex`, single hex line).
-fn vector_tree(name: &str) -> Vec<u8> {
-    let path = format!("{VECTORS}/{name}");
+fn vector_tree_at(dir: &str, name: &str) -> Vec<u8> {
+    let path = format!("{dir}/{name}");
     let hex_text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));
     hex::decode(hex_text.trim()).unwrap_or_else(|e| panic!("decode {path}: {e}"))
+}
+
+/// peg-v2 tree vector.
+fn vector_tree(name: &str) -> Vec<u8> {
+    vector_tree_at(VECTORS, name)
 }
 
 /// Read a captured injected source (`*.injected.es`).
@@ -251,6 +260,69 @@ fn captured_injected_sources_compile_to_deployed_trees() {
             "{src_name} does not reproduce {tree_name}"
         );
     }
+}
+
+/// tUSE v3 token id — M1 re-provision ceremony (peg-v3 README), minted at
+/// height 443905 with 100,000,000,000 base-unit supply.
+const TUSE_TOKEN_ID_V3: &str = "01f4e85f5214bd29aae27dc9e0bfed2a934d5783fbee04224a30c8379583da28";
+/// PegVault v3 singleton NFT id (peg-v3 README).
+const VAULT_NFT_V3: &str = "01f7c2fb58c0053a57f9051f1a40514bd0ff38a2de1243266ac5d7273f3ef16c";
+/// `RECEIPT_SCRIPT_HASH` recorded in the peg-v3 README =
+/// blake2b256(deployed DepositReceipt v3 tree).
+const RECEIPT_SCRIPT_HASH_V3: &str =
+    "446d147f29faeae4251dd9fff5505842c30c095c4a1ea178681ff4399f88676e";
+/// blake2b256(deployed PegVault v3 tree) recorded in the peg-v3 README.
+const VAULT_SCRIPT_HASH_V3: &str =
+    "c750024ed155e6b5695b63eef6f1560aac05f1b6c3eba4d3505de03203f3ee2b";
+
+/// The exact deploy constants of the testnet peg-v3 (M1 re-provision)
+/// ceremony — same shape as peg-v2 (fresh real ids, dummy payout-sibling
+/// pins), but here the crate itself was the pre-deploy oracle: these
+/// injections produced the trees FIRST, then the chain had to match them.
+fn testnet_v3_constants() -> ScriptConstants {
+    ScriptConstants {
+        use_token_id: Some(hex32(TUSE_TOKEN_ID_V3)),
+        peg_vault_nft: Some(hex32(VAULT_NFT_V3)),
+        double_redeem_nft: Some(blake2b256(b"aegis-testnet-dummy-doubleredeem-nft")),
+        unlock_intent_script_hash: Some(blake2b256(b"aegis-testnet-dummy-unlockintent")),
+        receipt_script_hash: Some(hex32(RECEIPT_SCRIPT_HASH_V3)),
+        fee_pot_script_hash: Some(blake2b256(b"aegis-testnet-dummy-feepot")),
+        sidechain_state_nft: None,
+        tip_pk: None,
+    }
+}
+
+/// On-chain oracle, peg-v3: both contracts under the v3 injections must
+/// reproduce the trees deployed by the M1 re-provision ceremony (vault box
+/// spent + re-created at height 443911, receipt consolidated from
+/// `INPUTS(1)`), plus the README-recorded script hashes.
+#[test]
+fn testnet_v3_injection_matches_deployed_trees() {
+    let receipt = deposit_receipt(&testnet_v3_constants(), NetworkPrefix::Testnet).unwrap();
+    let deployed_receipt = vector_tree_at(VECTORS_V3, "deposit_receipt_tree.hex");
+    assert_eq!(deployed_receipt.len(), 200, "vector file drifted");
+    assert_eq!(
+        receipt.tree_bytes, deployed_receipt,
+        "compiled DepositReceipt v3 tree != tree deployed on Ergo testnet"
+    );
+    assert_eq!(
+        receipt.script_hash,
+        hex32(RECEIPT_SCRIPT_HASH_V3),
+        "receipt script hash != peg-v3 README RECEIPT_SCRIPT_HASH"
+    );
+
+    let vault = peg_vault(&testnet_v3_constants(), NetworkPrefix::Testnet).unwrap();
+    let deployed_vault = vector_tree_at(VECTORS_V3, "peg_vault_tree.hex");
+    assert_eq!(deployed_vault.len(), 796, "vector file drifted");
+    assert_eq!(
+        vault.tree_bytes, deployed_vault,
+        "compiled PegVault v3 tree != tree deployed on Ergo testnet"
+    );
+    assert_eq!(
+        vault.script_hash,
+        hex32(VAULT_SCRIPT_HASH_V3),
+        "vault script hash != peg-v3 README record"
+    );
 }
 
 /// `PegMintPins` (the `PegParams`-shaped accessor) pins the deployed
