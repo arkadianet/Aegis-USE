@@ -57,9 +57,10 @@
 //! presented bytes) and bodies are self-authenticated against their id
 //! here before any validation.
 //!
-//! **DO NOT WIRE into `main.rs`/the consensus loop yet.** Gossip (M6)
-//! feeds this module; until then it is a pure, deterministic structure
-//! driven in-memory (see tests).
+//! Wired into the node loop by M6c: [`crate::node`] feeds this module
+//! from the anchor watcher, the seed schedule, and the dev producer.
+//! It remains a pure, deterministic structure — all I/O lives in its
+//! callers.
 
 use std::collections::BTreeMap;
 

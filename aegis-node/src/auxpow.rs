@@ -16,10 +16,11 @@
 //! `sc_nbits`-vs-DAA equality). Everything is re-derived from the
 //! presented bytes; nothing carried in the witness is trusted.
 //!
-//! **DO NOT WIRE into `Chain`/fork choice yet.** Body validation
-//! (§2.3 step 7, `Chain::try_extend`), share ingestion, weight
-//! bookkeeping and fork choice are M2b. M2a intentionally stops at
-//! "this witness proves real Autolykos work bound to this Aegis id".
+//! M2a intentionally stops at "this witness proves real Autolykos
+//! work bound to this Aegis id". Body validation (§2.3 step 7,
+//! `Chain::try_extend`), share ingestion, weight bookkeeping and fork
+//! choice live in [`crate::mm_forkchoice`] (M2b); the running loop
+//! that feeds them is [`crate::node`] (M6c).
 
 use ergo_crypto::autolykos::common::blake2b256;
 use ergo_crypto::autolykos::v2::check_pow_v2;

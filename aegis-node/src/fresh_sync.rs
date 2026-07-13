@@ -45,11 +45,12 @@
 //! bound for *historical* weight — re-minting history still costs the
 //! full real work of the chain (each share must clear the DAA-pinned
 //! `sc_nbits` for its exact chain position), and the settled prefix is
-//! bounded by the Ergo anchors regardless. Live operation (M6b-2
-//! gossip, M6c loop) keeps the strict window.
+//! bounded by the Ergo anchors regardless. Live operation (the M6c
+//! loop's anchor-watch path) keeps the strict window.
 //!
-//! **DO NOT WIRE into `main.rs` yet** — M6c composes this with the
-//! producer loop; M6b-1 delivers it as a tested primitive.
+//! Wired into the node loop by M6c: [`crate::node`] runs [`fresh_sync`]
+//! at boot (and [`sync_from_seeds`] per tick, and as the
+//! archive-resume replay).
 
 use aegis_spec::{Network, K_LAG};
 

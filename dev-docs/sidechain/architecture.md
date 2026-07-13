@@ -127,6 +127,30 @@ notes.)
    an Ergo block with valid PoW, ≥ `N_mint` deep. Fork choice becomes
    *"follow the Aegis chain Ergo's PoW committed to."*
 
+### M6c status — what runs today vs. the Ergo-side gap
+
+`aegis-node/src/node.rs` (M6c) wires the verified modules into a **runnable
+node loop**: boot (archive resume, fully re-verified) → fresh-sync
+(`--seed-url`) → follow + anchor-watch (`--ergo-url`) → produce (dev) → serve
+(`--serve-addr`). Two honesty lines:
+
+- **The dev network merge-mines end-to-end today** — but against *synthetic*
+  Ergo headers: the dev producer grinds a real Autolykos-v2 nonce over a
+  fabricated header committing the Aegis candidate, checked against the (easy)
+  **Aegis** target only. Real work at dev difficulty; the real-Ergo C2 height
+  window is bypassed (dev has no real Ergo). This path is hard-gated to
+  `--network dev`, and the synthetic headers declare a mainnet-scale Ergo
+  difficulty they can never clear, so they can never pass the real follower's
+  PoW gate.
+- **Production merge-mining on testnet/mainnet is an Ergo-side task.** The
+  consumer half (follower, anchor-watcher, seed fetch/serve, fresh-sync) is
+  network-ready — it activates the moment real Ergo blocks carry
+  `AEGIS_MM_KEY` commitments. Getting them there requires the **Ergo node's
+  candidate builder** (`arkadianet/ergo`, `ergo-mining`) to embed the
+  commitment field in the extension of the block candidates it hands miners —
+  a change to that repo, deliberately **not** attempted here. Until it lands,
+  `--produce` on non-dev networks is refused and the node runs as a consumer.
+
 ---
 
 ## 5. How a fresh node finds & syncs the chain

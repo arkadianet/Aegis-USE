@@ -1,25 +1,31 @@
-//! `aegis-node` binary: boots a network's chain from genesis and, in
-//! dev mode, produces empty blocks at the 15 s target (G1). P2P, the
-//! tx/state layer, and Autolykos witness verification arrive in later
-//! slices — this is the walking skeleton the gate asks for.
+//! `aegis-node` binary: the merge-mining node loop (M6c).
+//!
+//! Composes the library's [`aegis_node::node::Node`] runner: boot
+//! (archive resume + fresh sync), then a tick loop that follows Ergo
+//! (`--ergo-url`), syncs bodies/witnesses from seeds (`--seed-url`),
+//! produces merge-mined dev blocks (`--produce`, dev network only),
+//! and serves the archive to peers (`--serve-addr`). Blocking work
+//! (HTTP polls, share grinding, seed sync) runs under
+//! `spawn_blocking`, off the async loop.
 
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use aegis_crypto::note::EvenScalar;
-use aegis_node::{BlockBody, Chain, PowMode, ProofMode};
+use aegis_node::node::{Node, NodeConfig};
 use aegis_spec::Network;
 use clap::Parser;
-use tracing::info;
+use tracing::{info, warn};
 
 #[derive(Parser)]
-#[command(name = "aegis-node", about = "Aegis sidechain node (G1 dev skeleton)")]
+#[command(name = "aegis-node", about = "Aegis sidechain merge-mining node")]
 struct Args {
     /// Network to run: dev, test, or main.
     #[arg(long, default_value = "dev")]
     network: String,
 
-    /// Produce dev-stub blocks at the block target (dev network only).
+    /// Produce merge-mined blocks (honored on the dev network only —
+    /// real networks need the Ergo-side candidate builder; see
+    /// `node.rs`).
     #[arg(long, default_value_t = true)]
     produce: bool,
 
@@ -27,10 +33,35 @@ struct Args {
     #[arg(long, default_value_t = 0)]
     max_blocks: u64,
 
-    /// Persist blocks to this directory and resume from it on boot
-    /// (P5). Unset: fully in-memory, resets to genesis every restart.
+    /// Persist blocks + share witnesses to this directory and resume
+    /// from it on boot. Unset: fully in-memory.
     #[arg(long)]
     data_dir: Option<PathBuf>,
+
+    /// Ergo node REST base URL for the follower + anchor watcher
+    /// (e.g. http://127.0.0.1:9052). On non-dev networks this is the
+    /// node's block source.
+    #[arg(long)]
+    ergo_url: Option<String>,
+
+    /// Ergo height the follower starts from when empty (the followed
+    /// root, e.g. the network's Aegis genesis anchor height).
+    #[arg(long, default_value_t = 1)]
+    ergo_start_height: u32,
+
+    /// Seed base URL for body/witness fetch + fresh sync (repeatable).
+    #[arg(long)]
+    seed_url: Vec<String>,
+
+    /// Bind address for this node's own seed server
+    /// (e.g. 127.0.0.1:8650; port 0 for ephemeral).
+    #[arg(long)]
+    serve_addr: Option<String>,
+
+    /// Peg-finality work lead (difficulty units) for the per-tick
+    /// `is_final` telemetry.
+    #[arg(long, default_value_t = 0)]
+    l_final: u64,
 }
 
 fn now_ms() -> u64 {
@@ -52,76 +83,95 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         other => return Err(format!("unknown network {other:?} (dev|test|main)").into()),
     };
     let params = network.params();
-    // With --data-dir: replay the on-disk block log through the normal
-    // validation path and resume from the persisted tip. Without it the
-    // node stays fully in-memory (unchanged no-arg dev boot).
-    let mut chain = match &args.data_dir {
-        Some(dir) => aegis_node::load_chain(dir, network, PowMode::DevStub, ProofMode::DevStub)?,
-        None => Chain::new(network, PowMode::DevStub, ProofMode::DevStub),
+    let config = NodeConfig {
+        network,
+        produce: args.produce,
+        data_dir: args.data_dir,
+        ergo_url: args.ergo_url,
+        ergo_start_height: args.ergo_start_height,
+        seed_urls: args.seed_url,
+        serve_addr: args.serve_addr,
+        l_final: args.l_final,
     };
+    let producing = config.produce && network == Network::Dev;
+
+    let boot_now = now_ms();
+    let node = tokio::task::spawn_blocking(move || Node::boot(config, boot_now)).await??;
     info!(
         network = params.network_name,
         genesis = hex::encode(aegis_node::genesis_header(network).id()),
-        tip_height = chain.tip().height,
-        tip = hex::encode(chain.tip().id()),
-        resumed_from_disk = args.data_dir.is_some() && chain.tip().height > 0,
+        tip_height = node.canonical_height(),
+        tip = hex::encode(node.canonical_tip_id()),
+        serve = ?node.serve_addr(),
+        producing,
         target_secs = params.block_target_secs,
-        "aegis-node booted"
+        "aegis-node booted (merge-mining loop)"
     );
 
-    if !(args.produce && network == Network::Dev) {
-        info!("production disabled (non-dev network or --produce=false); idling until Ctrl-C");
-        tokio::signal::ctrl_c().await?;
-        return Ok(());
-    }
+    // Producers tick at the block target; consumers poll faster so a
+    // freshly served block is picked up promptly.
+    let tick = if producing {
+        Duration::from_secs(params.block_target_secs)
+    } else {
+        Duration::from_secs(2)
+    };
 
-    let target = Duration::from_secs(params.block_target_secs);
-    let mut produced = 0u64;
+    let mut node = Some(node);
+    let mut produced_total = 0u64;
+    let mut last_height = u64::MAX;
     loop {
         tokio::select! {
-            _ = tokio::time::sleep(target) => {}
+            _ = tokio::time::sleep(tick) => {}
             _ = tokio::signal::ctrl_c() => break,
         }
+        let mut n = node
+            .take()
+            .expect("node is always returned by the tick task");
         let now = now_ms();
-        // Mint a coinbase note each block (fixed dev reward tag; blinding
-        // varied by height so the notes are distinct leaves). Spending a
-        // coinbase note is blocked until the nullifier fix (N1) — this
-        // enables minting/the first in-band notes only.
-        let next_height = chain.tip().height + 1;
-        let block = chain
-            .produce_next_with_coinbase(
-                BlockBody::default(),
-                now,
-                EvenScalar::from(0xC0FFEEu64),
-                EvenScalar::from(next_height),
-            )
-            .expect("coinbase block must produce");
-        let id = block.header.id();
-        let (height, nbits, ts) = (
-            block.header.height,
-            block.header.sc_nbits,
-            block.header.timestamp_ms,
-        );
-        chain
-            .try_extend(block.clone(), now)
-            .expect("self-produced block must validate");
-        // Persist only ACCEPTED blocks so the log replays by construction.
-        if let Some(dir) = &args.data_dir {
-            aegis_node::save_block(dir, &block)?;
+        let (n, report) = tokio::task::spawn_blocking(move || {
+            let report = n.tick(now);
+            (n, report)
+        })
+        .await?;
+        node = Some(n);
+
+        for e in &report.errors {
+            warn!(error = %e, "tick error (retried next tick)");
         }
-        info!(
-            height,
-            id = hex::encode(id),
-            nbits = format_args!("{nbits:#010x}"),
-            ts,
-            leaves = chain.state().leaf_count(),
-            "block produced"
-        );
-        produced += 1;
-        if args.max_blocks != 0 && produced >= args.max_blocks {
+        for ev in &report.watch_events {
+            info!(event = %ev, "ergo watch");
+        }
+        if let Some((height, id)) = report.produced {
+            produced_total += 1;
+            info!(
+                height,
+                id = hex::encode(id),
+                tip = hex::encode(report.canonical_tip),
+                work = %report.cumulative_work,
+                pending_hostile = %report.pending_hostile_work,
+                ergo_tip = ?report.ergo_tip_height,
+                is_final = report.tip_is_final,
+                "merge-mined block produced"
+            );
+        } else if report.canonical_height != last_height || report.sync_activated > 0 {
+            info!(
+                height = report.canonical_height,
+                tip = hex::encode(report.canonical_tip),
+                work = %report.cumulative_work,
+                synced = report.sync_activated,
+                pending_hostile = %report.pending_hostile_work,
+                ergo_tip = ?report.ergo_tip_height,
+                is_final = report.tip_is_final,
+                "chain advanced"
+            );
+        }
+        last_height = report.canonical_height;
+
+        if args.max_blocks != 0 && produced_total >= args.max_blocks {
             break;
         }
     }
-    info!(tip = chain.tip().height, "shutting down");
+    let node = node.expect("node present at shutdown");
+    info!(tip = node.canonical_height(), "shutting down");
     Ok(())
 }

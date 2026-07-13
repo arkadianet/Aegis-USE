@@ -45,11 +45,11 @@
 //! arrival — beyond the undo ring, an unactivated branch is
 //! unrecoverable anyway.
 //!
-//! **DO NOT WIRE into `main.rs`'s producer loop yet.** M6b-1 delivers
-//! the launch-critical primitives (fetch-by-id, seed-serve,
-//! `fresh_sync`) in isolation; the running-loop integration — miner
-//! persist-before-announce, background serve/fetch threads — lands
-//! with M6c. Push-gossip (`HAVE`/`GET` over TCP) is M6b-2.
+//! Wired into the node loop by M6c: [`crate::node`] serves its archive
+//! through [`SeedServer`] (`--serve-addr`), records every accepted
+//! block + verified witness into its [`SeedCore`], and fetches from
+//! peers via [`fetch_http::RestAegisSource`] (`--seed-url`).
+//! Push-gossip (`HAVE`/`GET` over TCP) is M6b-2.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;

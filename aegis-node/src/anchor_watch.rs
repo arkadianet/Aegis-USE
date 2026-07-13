@@ -53,10 +53,11 @@
 //! authenticated against PoW-committed roots, ids are recomputed, and
 //! `verify_share` re-derives every claim from presented bytes.
 //!
-//! **DO NOT WIRE into `main.rs`'s producer loop yet.** M6a delivers
-//! the watcher + the Ergo→share→fork-choice pipeline in isolation; the
-//! main-loop integration lands with M6b (P2P body/share gossip), which
-//! also replaces the seed [`AegisSource`].
+//! Wired into the node loop by M6c: [`crate::node`] drives this
+//! watcher each tick with `--ergo-url` as the header/block source and
+//! the node's own archive + configured seeds as the [`AegisSource`].
+//! Push-gossip (M6b-2) is still pending; until then seeds + the Ergo
+//! scan are the block sources.
 
 use std::collections::BTreeMap;
 
