@@ -390,6 +390,28 @@ impl MmForkChoice {
         self.nodes.get(id).map(|n| &n.cumulative_work)
     }
 
+    /// `(timestamp_ms, sc_nbits)` of the validated chain genesis →
+    /// `tip_id`, oldest first — exactly the [`crate::daa::next_nbits`]
+    /// view for a CHILD of `tip_id` (what
+    /// [`crate::auxpow::ShareContext::daa_view`] wants when verifying a
+    /// share whose Aegis header has `prev_id == tip_id`). `None` when
+    /// `tip_id` is not a validated tree node — the share's DAA
+    /// expectation is then undecidable until the parent chain lands.
+    pub fn daa_view(&self, tip_id: &Id) -> Option<Vec<(u64, u32)>> {
+        if !self.nodes.contains_key(tip_id) {
+            return None;
+        }
+        Some(
+            self.path_ids(*tip_id)
+                .into_iter()
+                .map(|id| {
+                    let h = &self.nodes[&id].block.header;
+                    (h.timestamp_ms, h.sc_nbits)
+                })
+                .collect(),
+        )
+    }
+
     /// Total weight of shares whose blocks are not fork-choice
     /// candidates yet — the §7 hostile-pending term.
     pub fn pending_hostile_work(&self) -> BigUint {
@@ -900,6 +922,31 @@ mod tests {
         assert_eq!(fc.canonical_tip_id(), b.last().unwrap().id());
         assert_eq!(fc.canonical_tip().height, (depth + 5) as u64);
         assert_eq!(fc.chain().tip().id(), b.last().unwrap().id());
+    }
+
+    #[test]
+    fn daa_view_walks_validated_chain_and_matches_producer_expectation() {
+        // The view for a child of the canonical tip must equal the
+        // (timestamp, nbits) sequence Chain::expected_nbits consumes —
+        // the share verifier and the body validator must agree on the
+        // DAA expectation.
+        let blocks = extend_branch(&[], 3, T_MS);
+        let mut fc = fc_new();
+        feed(&mut fc, &blocks, 10);
+
+        let tip_id = fc.canonical_tip_id();
+        let view = fc.daa_view(&tip_id).expect("tip is validated");
+        let expected: Vec<(u64, u32)> = std::iter::once(&fc.nodes[&fc.genesis].block)
+            .chain(blocks.iter())
+            .map(|b| (b.header.timestamp_ms, b.header.sc_nbits))
+            .collect();
+        assert_eq!(view, expected, "genesis-first, oldest first");
+        assert_eq!(
+            crate::daa::next_nbits(&crate::daa::DaaParams::for_network(Network::Dev), &view),
+            fc.chain().expected_nbits(),
+            "share-verifier DAA expectation == producer expectation"
+        );
+        assert_eq!(fc.daa_view(&[0xAB; 32]), None, "unknown id has no view");
     }
 
     #[test]

@@ -111,11 +111,7 @@ impl Chain {
             body: BlockBody::default(),
             coinbase: None,
         };
-        let daa = DaaParams {
-            target_secs: network.params().block_target_secs,
-            window: 90,
-            min_difficulty_nbits: genesis.header.sc_nbits,
-        };
+        let daa = DaaParams::for_network(network);
         Chain {
             network,
             pow_mode,
@@ -140,11 +136,7 @@ impl Chain {
         let state = ShieldedState::seeded(leaves);
         let mut header = genesis_header(network);
         header.cm_tree_root = state.cm_tree_root();
-        let daa = DaaParams {
-            target_secs: network.params().block_target_secs,
-            window: 90,
-            min_difficulty_nbits: header.sc_nbits,
-        };
+        let daa = DaaParams::for_network(network);
         Chain {
             network,
             pow_mode,

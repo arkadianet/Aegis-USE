@@ -9,6 +9,7 @@
 //! (blake2b256), and `ergo-ser` (compact-nbits codecs). Chain
 //! parameters come from `aegis-spec`.
 
+pub mod anchor_watch;
 pub mod auxpow;
 pub mod block;
 pub mod chain;
@@ -24,6 +25,11 @@ pub mod state;
 pub mod store;
 pub mod tx;
 
+pub use anchor_watch::{
+    extension_field_proof, extract_commitment, settled_is_final, AegisLookup, AegisSource,
+    AnchorWatch, BlockSource, Commitment, ExtractError, Extracted, MalformedReason,
+    MemoryAegisSource, MemoryBlockSource, ScanError, UnresolvedReason, WatchError, WatchEvent,
+};
 pub use auxpow::{
     aegis_mm_extension_field, verify_share, ShareContext, ShareError, ShareWitness, ValidShare,
     WitnessDecodeError, WitnessError,

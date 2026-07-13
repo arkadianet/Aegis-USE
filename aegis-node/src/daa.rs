@@ -24,6 +24,22 @@ pub struct DaaParams {
     pub min_difficulty_nbits: u32,
 }
 
+impl DaaParams {
+    /// The network's consensus DAA parameters (consensus.md §3):
+    /// LWMA-90 at the network's block target, floored at the genesis
+    /// difficulty. The single spelling shared by [`crate::chain::Chain`]
+    /// (block production/validation) and the anchor-watcher's share
+    /// verification ([`crate::auxpow::verify_share`]'s `sc_nbits`
+    /// equality) — the two must never diverge.
+    pub fn for_network(network: aegis_spec::Network) -> Self {
+        DaaParams {
+            target_secs: network.params().block_target_secs,
+            window: 90,
+            min_difficulty_nbits: crate::genesis::genesis_header(network).sc_nbits,
+        }
+    }
+}
+
 /// Encode a difficulty as compact nbits (thin alias kept next to the
 /// DAA so callers and tests share one spelling).
 pub fn difficulty_to_nbits(difficulty: &BigUint) -> u32 {
