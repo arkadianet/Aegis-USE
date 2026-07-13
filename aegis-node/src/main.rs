@@ -58,6 +58,11 @@ struct Args {
     #[arg(long)]
     serve_addr: Option<String>,
 
+    /// Bind address for the read-only node API (M3)
+    /// (e.g. 127.0.0.1:8750; port 0 for ephemeral).
+    #[arg(long)]
+    api_addr: Option<String>,
+
     /// Peg-finality work lead (difficulty units) for the per-tick
     /// `is_final` telemetry.
     #[arg(long, default_value_t = 0)]
@@ -91,6 +96,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ergo_start_height: args.ergo_start_height,
         seed_urls: args.seed_url,
         serve_addr: args.serve_addr,
+        api_addr: args.api_addr,
         l_final: args.l_final,
     };
     let producing = config.produce && network == Network::Dev;
@@ -103,6 +109,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tip_height = node.canonical_height(),
         tip = hex::encode(node.canonical_tip_id()),
         serve = ?node.serve_addr(),
+        api = ?node.api_addr(),
         producing,
         target_secs = params.block_target_secs,
         "aegis-node booted (merge-mining loop)"

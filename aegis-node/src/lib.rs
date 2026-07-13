@@ -10,6 +10,7 @@
 //! parameters come from `aegis-spec`.
 
 pub mod anchor_watch;
+pub mod api;
 pub mod auxpow;
 pub mod block;
 pub mod chain;
@@ -33,6 +34,7 @@ pub use anchor_watch::{
     AnchorWatch, BlockSource, Commitment, ExtractError, Extracted, MalformedReason,
     MemoryAegisSource, MemoryBlockSource, ScanError, UnresolvedReason, WatchError, WatchEvent,
 };
+pub use api::{ApiServer, ApiState, NodeStatus};
 pub use auxpow::{
     aegis_mm_extension_field, verify_share, ShareContext, ShareError, ShareWitness, ValidShare,
     WitnessDecodeError, WitnessError,

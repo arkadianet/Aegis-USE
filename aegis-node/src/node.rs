@@ -74,6 +74,7 @@ use crate::anchor_watch::fetch_http::{RestBlockConfig, RestBlockError, RestBlock
 use crate::anchor_watch::{
     extension_field_proof, settled_is_final, AegisLookup, AegisSource, AnchorWatch,
 };
+use crate::api::{ApiServer, ApiState, NodeStatus};
 use crate::auxpow::{aegis_mm_extension_field, ShareContext, ShareWitness};
 use crate::block::{Block, BlockBody};
 use crate::chain::{PowMode, ProofMode};
@@ -129,6 +130,9 @@ pub struct NodeConfig {
     /// Peg-finality work lead `l_final` (in difficulty units) used for
     /// the per-tick `is_final` telemetry.
     pub l_final: u64,
+    /// Bind address for the read-only node API (M3), e.g.
+    /// `127.0.0.1:8750`. Unset: no API server.
+    pub api_addr: Option<String>,
 }
 
 /// Node boot/config failure.
@@ -185,6 +189,7 @@ pub struct Node {
     produce_enabled: bool,
     data_dir: Option<PathBuf>,
     l_final: BigUint,
+    l_final_units: u64,
     fc: MmForkChoice,
     follower: Follower,
     headers: Option<RestHeaderSource>,
@@ -192,6 +197,15 @@ pub struct Node {
     seeds: Option<RestAegisSource>,
     core: Arc<RwLock<SeedCore>>,
     server: Option<SeedServer>,
+    /// Read-only API (M3): the shared snapshot the node publishes into
+    /// each tick, and the server that serves it. `None` without
+    /// `api_addr`.
+    api_state: Option<ApiState>,
+    api_server: Option<ApiServer>,
+    /// Nullifier-set snapshot for the API, rebuilt only when the tip
+    /// changes (bounds the clone to once per new block).
+    nf_snapshot: Arc<BTreeSet<[u8; 32]>>,
+    nf_snapshot_tip: Id,
     /// Block ids already recorded into the core archive (+ disk log).
     recorded_blocks: BTreeSet<Id>,
     /// Ids whose witness is already recorded (+ disk log).
@@ -283,12 +297,14 @@ impl Node {
             );
         }
 
+        let api_addr = config.api_addr.clone();
         let mut node = Node {
             network,
             daa: DaaParams::for_network(network),
             produce_enabled,
             data_dir: config.data_dir,
             l_final: BigUint::from(config.l_final),
+            l_final_units: config.l_final,
             fc,
             follower,
             headers,
@@ -296,6 +312,10 @@ impl Node {
             seeds,
             core,
             server,
+            api_state: None,
+            api_server: None,
+            nf_snapshot: Arc::new(BTreeSet::new()),
+            nf_snapshot_tip: [0u8; 32],
             recorded_blocks,
             recorded_witnesses,
         };
@@ -303,6 +323,15 @@ impl Node {
         // an unreachable source must not kill the node.
         for e in node.catch_up(now_ms) {
             tracing::warn!(error = %e, "boot catch-up incomplete; retrying in the loop");
+        }
+        // Spawn the read-only API over a snapshot of the caught-up state.
+        if let Some(addr) = api_addr {
+            node.refresh_nf_snapshot();
+            let state = ApiState::new(node.build_status(), Arc::clone(&node.core));
+            let server = ApiServer::spawn(&addr, state.clone())?;
+            tracing::info!(addr = %server.local_addr(), "node API serving");
+            node.api_state = Some(state);
+            node.api_server = Some(server);
         }
         Ok(node)
     }
@@ -330,6 +359,7 @@ impl Node {
         report.pending_hostile_work = self.fc.pending_hostile_work();
         report.ergo_tip_height = self.follower.tip_height();
         report.tip_is_final = settled_is_final(&self.fc, &self.follower, &tip, &self.l_final);
+        self.publish_status();
         report
     }
 
@@ -373,7 +403,70 @@ impl Node {
         self.server.as_ref().map(SeedServer::local_addr)
     }
 
+    /// The API server's bound address, when serving (useful with
+    /// port 0).
+    pub fn api_addr(&self) -> Option<SocketAddr> {
+        self.api_server.as_ref().map(ApiServer::local_addr)
+    }
+
     // ----- internals -----
+
+    /// Rebuild the API nullifier snapshot iff the canonical tip moved.
+    fn refresh_nf_snapshot(&mut self) {
+        let tip = self.fc.canonical_tip_id();
+        if tip != self.nf_snapshot_tip {
+            self.nf_snapshot = Arc::new(self.fc.chain().state().nullifiers().clone());
+            self.nf_snapshot_tip = tip;
+        }
+    }
+
+    /// Publish a fresh [`NodeStatus`] snapshot to the API (no-op without
+    /// an API server).
+    fn publish_status(&mut self) {
+        if self.api_state.is_none() {
+            return;
+        }
+        self.refresh_nf_snapshot();
+        let status = self.build_status();
+        self.api_state
+            .as_ref()
+            .expect("checked above")
+            .publish(status);
+    }
+
+    /// Snapshot the current public node state for the API. Reads live
+    /// fork-choice/follower state; the nullifier set comes from the
+    /// tip-gated [`Self::refresh_nf_snapshot`].
+    fn build_status(&self) -> NodeStatus {
+        let chain = self.fc.chain();
+        let state = chain.state();
+        let tip = self.fc.canonical_tip_id();
+        let header = self.fc.canonical_tip();
+        NodeStatus {
+            network_name: self.network.params().network_name,
+            canonical_tip: tip,
+            canonical_height: header.height,
+            tip_timestamp_ms: header.timestamp_ms,
+            next_sc_nbits: chain.expected_nbits(),
+            median_time_past: chain.median_time_past(),
+            cumulative_work: self
+                .fc
+                .cumulative_work(&tip)
+                .cloned()
+                .unwrap_or(BigUint::ZERO),
+            pending_hostile_work: self.fc.pending_hostile_work(),
+            ergo_tip_height: self.follower.tip_height(),
+            tip_is_final: settled_is_final(&self.fc, &self.follower, &tip, &self.l_final),
+            l_final: self.l_final_units,
+            pot: state.pot(),
+            nullifier_digest: state.nullifier_digest(),
+            cm_tree_root: state.cm_tree_root(),
+            leaf_count: state.leaf_count(),
+            nullifiers: Arc::clone(&self.nf_snapshot),
+            mempool_size: 0,
+            mempool_txs: Arc::new(Vec::new()),
+        }
+    }
 
     /// Full bootstrap: Ergo skeleton to exhaustion + seed schedule +
     /// buffered-commitment retry ([`fresh_sync`]).

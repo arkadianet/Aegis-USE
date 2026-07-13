@@ -122,6 +122,12 @@ impl ShieldedState {
         self.nullifiers.contains(nf)
     }
 
+    /// The spent-nullifier set (read-only). Used by the node API to
+    /// publish a membership snapshot for `GET /nullifier/{hex}`.
+    pub fn nullifiers(&self) -> &BTreeSet<[u8; NF_BYTES]> {
+        &self.nullifiers
+    }
+
     fn recompute_cm_root(&mut self) {
         self.cm_root = if self.cm_leaves.is_empty() {
             EMPTY_TREE_ROOT_PLACEHOLDER
