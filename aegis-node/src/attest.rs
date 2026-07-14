@@ -9,7 +9,7 @@
 //! The node's public key is a member of the federation's [`AttesterSet`];
 //! the same key later co-signs the Ergo `atLeast` peg-out (slice S1c).
 
-use aegis_attest::{Attestation, AttesterKey, AttesterSet, Purpose};
+use aegis_attest::{Attestation, AttesterKey, AttesterSet, KeyError, PublicKey, Purpose, SetError};
 
 use crate::api::NodeStatus;
 
@@ -96,4 +96,113 @@ pub fn tip_attestation_json(ctx: &AttesterContext, status: &NodeStatus) -> serde
         "signature": hex::encode(att.sig),
         "payload": hex::encode(&payload),
     })
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum AttesterLoadError {
+    #[error("attester key file is not valid JSON: {0}")]
+    Json(String),
+    #[error("attester key file missing or non-string field `{0}`")]
+    Field(&'static str),
+    #[error("field `{0}` is not valid fixed-length hex")]
+    Hex(&'static str),
+    #[error("key: {0}")]
+    Key(#[from] KeyError),
+    #[error("set: {0}")]
+    Set(#[from] SetError),
+    #[error(transparent)]
+    Config(#[from] AttesterConfigError),
+}
+
+/// Load an attester identity from a JSON key file:
+/// ```json
+/// { "secret": "<32-byte hex>", "members": ["<33-byte hex>", …], "k": <n> }
+/// ```
+/// `members` is the full federation (including this node's own public key);
+/// the loader rejects a `secret` whose public key is not among them.
+pub fn load_attester(json: &str) -> Result<AttesterContext, AttesterLoadError> {
+    let v: serde_json::Value =
+        serde_json::from_str(json).map_err(|e| AttesterLoadError::Json(e.to_string()))?;
+
+    let secret = decode_hex::<32>(
+        v["secret"]
+            .as_str()
+            .ok_or(AttesterLoadError::Field("secret"))?,
+    )
+    .ok_or(AttesterLoadError::Hex("secret"))?;
+    let key = AttesterKey::from_secret_bytes(&secret)?;
+
+    let raw = v["members"]
+        .as_array()
+        .ok_or(AttesterLoadError::Field("members"))?;
+    let mut members = Vec::with_capacity(raw.len());
+    for m in raw {
+        let hex = m.as_str().ok_or(AttesterLoadError::Field("members"))?;
+        let bytes = decode_hex::<33>(hex).ok_or(AttesterLoadError::Hex("members"))?;
+        members.push(PublicKey::from_bytes(&bytes)?);
+    }
+
+    let k = v["k"].as_u64().ok_or(AttesterLoadError::Field("k"))? as usize;
+    let set = AttesterSet::new(members, k)?;
+    Ok(AttesterContext::new(key, set)?)
+}
+
+/// Decode a hex string into exactly `N` bytes, or `None`.
+fn decode_hex<const N: usize>(h: &str) -> Option<[u8; N]> {
+    hex::decode(h).ok()?.try_into().ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn key(seed: u8) -> AttesterKey {
+        AttesterKey::from_secret_bytes(&[seed; 32]).expect("valid scalar")
+    }
+
+    /// A key-file JSON for `secret_seed`'s key over the federation
+    /// `member_seeds` at threshold `k`.
+    fn key_file(secret_seed: u8, member_seeds: &[u8], k: usize) -> String {
+        let members: Vec<String> = member_seeds
+            .iter()
+            .map(|s| hex::encode(key(*s).public().to_bytes()))
+            .collect();
+        serde_json::json!({
+            "secret": hex::encode([secret_seed; 32]),
+            "members": members,
+            "k": k,
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn load_attester_valid_file_builds_context() {
+        let ctx = load_attester(&key_file(1, &[1, 2, 3], 2)).expect("loads");
+        assert_eq!(ctx.set().k(), 2);
+        assert_eq!(ctx.set().n(), 3);
+    }
+
+    #[test]
+    fn load_attester_rejects_non_member_secret() {
+        // Secret for seed 9, but the federation is seeds 1..3.
+        let err = load_attester(&key_file(9, &[1, 2, 3], 2)).unwrap_err();
+        assert!(matches!(err, AttesterLoadError::Config(_)));
+    }
+
+    #[test]
+    fn load_attester_rejects_bad_json() {
+        assert!(matches!(
+            load_attester("not json"),
+            Err(AttesterLoadError::Json(_))
+        ));
+    }
+
+    #[test]
+    fn load_attester_rejects_short_secret_hex() {
+        let json = serde_json::json!({ "secret": "00", "members": [], "k": 1 }).to_string();
+        assert!(matches!(
+            load_attester(&json),
+            Err(AttesterLoadError::Hex("secret"))
+        ));
+    }
 }

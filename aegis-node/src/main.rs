@@ -67,6 +67,12 @@ struct Args {
     /// `is_final` telemetry.
     #[arg(long, default_value_t = 0)]
     l_final: u64,
+
+    /// Run this node as an attester: path to a JSON key file
+    /// `{ "secret": "<hex>", "members": ["<hex>", …], "k": <n> }`.
+    /// Enables `GET /aegis/v1/attest/tip` (needs `--api-addr`).
+    #[arg(long)]
+    attester_key: Option<PathBuf>,
 }
 
 fn now_ms() -> u64 {
@@ -88,6 +94,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         other => return Err(format!("unknown network {other:?} (dev|test|main)").into()),
     };
     let params = network.params();
+    let attester = match &args.attester_key {
+        Some(path) => {
+            let json = std::fs::read_to_string(path)
+                .map_err(|e| format!("reading attester key {}: {e}", path.display()))?;
+            Some(aegis_node::attest::load_attester(&json)?)
+        }
+        None => None,
+    };
     let config = NodeConfig {
         network,
         produce: args.produce,
@@ -98,9 +112,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         serve_addr: args.serve_addr,
         api_addr: args.api_addr,
         l_final: args.l_final,
-        // CLI attester-key wiring is a follow-up (S1b exposes the capability
-        // via NodeConfig + the API; a plain CLI node is not an attester).
-        attester: None,
+        attester,
     };
     let producing = config.produce && network == Network::Dev;
 
