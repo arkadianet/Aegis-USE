@@ -77,7 +77,7 @@ fn testnet_v2_constants() -> ScriptConstants {
         receipt_script_hash: Some(hex32(RECEIPT_SCRIPT_HASH_V2)),
         fee_pot_script_hash: Some(blake2b256(b"aegis-testnet-dummy-feepot")),
         sidechain_state_nft: None,
-        tip_pk: None,
+        attester_pks: None,
     }
 }
 
@@ -85,7 +85,9 @@ fn testnet_v2_constants() -> ScriptConstants {
 
 /// Structure pin: placeholder-form tree sizes vs the DESIGN.md record.
 /// `DepositReceipt 138 · DoubleRedeem 79 · FeePot 74 · PegVault 590 ·
-/// SideChainState 209 · UnlockIntent 159` (post F1 + eager-ValDef fixes).
+/// SideChainState 225 · UnlockIntent 159` (post F1 + eager-ValDef fixes;
+/// SideChainState 209 → 225 is the S1c authority swap — one `proveDlog(TIP_PK)`
+/// → `atLeast(k, Coll(proveDlog(pk_1..3)))`, +16 B).
 #[test]
 fn placeholder_trees_match_design_size_record() {
     let consts = ScriptConstants::placeholder();
@@ -114,7 +116,7 @@ fn placeholder_trees_match_design_size_record() {
         (
             "SideChainState",
             side_chain_state(&consts, net).unwrap().tree_bytes.len(),
-            209,
+            225,
         ),
         (
             "UnlockIntent",
@@ -141,6 +143,33 @@ fn partial_injection_compiles() {
     };
     let c = fee_pot(&consts, NetworkPrefix::Testnet).unwrap();
     assert!(!c.tree_bytes.is_empty());
+}
+
+/// S1c: `SideChainState` compiles with a REAL 2-of-3 attester federation
+/// injected — `decodePoint` accepts the real compressed keys and the
+/// `atLeast` tree bakes them in (differs from the empty-placeholder tree).
+#[test]
+fn sidechain_state_injects_a_real_attester_federation() {
+    use aegis_attest::AttesterKey;
+    let pks: [[u8; 33]; 3] = std::array::from_fn(|i| {
+        AttesterKey::from_secret_bytes(&[(i as u8) + 1; 32])
+            .unwrap()
+            .public()
+            .to_bytes()
+    });
+    let consts = ScriptConstants {
+        sidechain_state_nft: Some(blake2b256(b"aegis-testnet-sidechain-state-nft")),
+        attester_pks: Some(pks),
+        ..ScriptConstants::placeholder()
+    };
+    let net = NetworkPrefix::Testnet;
+    let injected = side_chain_state(&consts, net).unwrap();
+    let placeholder = side_chain_state(&ScriptConstants::placeholder(), net).unwrap();
+    assert!(!injected.tree_bytes.is_empty());
+    assert_ne!(
+        injected.tree_bytes, placeholder.tree_bytes,
+        "real attester keys must be baked into the tree"
+    );
 }
 
 /// `derive_sibling_hashes` fills exactly the three vault-pinned hash
@@ -288,7 +317,7 @@ fn testnet_v3_constants() -> ScriptConstants {
         receipt_script_hash: Some(hex32(RECEIPT_SCRIPT_HASH_V3)),
         fee_pot_script_hash: Some(blake2b256(b"aegis-testnet-dummy-feepot")),
         sidechain_state_nft: None,
-        tip_pk: None,
+        attester_pks: None,
     }
 }
 

@@ -27,6 +27,7 @@ dependencies = [
 name = "aegis-contracts"
 version = "0.5.1"
 dependencies = [
+ "aegis-attest",
  "base64",
  "ergo-compiler",
  "ergo-crypto",

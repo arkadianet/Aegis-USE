@@ -32,14 +32,16 @@
   // `insert` verifies the proof against the OLD digest and returns the NEW
   // tree; `.get` fails if any key already exists or the proof is invalid.
   // Consequence: every digest this box can ever hold is an insert-descendant
-  // of the genesis empty tree — the updater (even holding TIP_PK) CANNOT
+  // of the genesis empty tree — the updater (even a k-of-n attester quorum)
+  // CANNOT
   //   * swap in a fresh/foreign tree (it is not the insert-image of SELF.R6),
   //   * delete or mutate a recorded burn (insert-only; re-inserting an
   //     existing burn_id fails ⇒ a burn's N is immutable once posted),
   //   * change tree params/flags (AvlTree == compares digest AND keyLength/
   //     valueLength/enabledOperations; both branches pin them to SELF's).
-  // History is append-only: a fake burn is possible only via TIP_PK (C1) and
-  // leaves a permanent, attributable on-chain insert record (fraud evidence).
+  // History is append-only: a fake burn is possible only via a k-of-n
+  // attester quorum (C1) and leaves a permanent, attributable on-chain
+  // insert record (fraud evidence).
   // NB `==` on AvlTree compares whole authenticated-tree values — no manual
   // digest byte-slicing anywhere (sidesteps the 0..32 vs 1..33 question).
   //
@@ -58,18 +60,26 @@
   //   and holds no USE (successor.tokens.size == 1), so it contributes 0 to
   //   the vault's pass-2 sum-accounting and cannot perturb it.
   //
-  // ⚠⚠ C1 — v1 TRUST STATEMENT (verbatim-honest): the updater is a DECLARED
-  //   TRUSTED KEY (TIP_PK, the miner-tip key). Burn authenticity is trusted
-  //   from that key, bounded only by V_cap + T_delay. R5 (tip commitment) is
-  //   unverified data. This contract makes the trusted key APPEND-ONLY and
-  //   AUDITABLE — it does NOT make peg-out trust-minimized. Do NOT deploy
-  //   value beyond V_cap; trust-minimization needs U1-strong (k-of-n
-  //   attesters) or SPV-in-consensus. See DESIGN.md §C1.
-  // ⚠ deploy-time injections: SIDECHAIN_STATE_NFT, TIP_PK (33-byte
-  //   compressed EC point).
+  // ── C1 — U1-STRONG (k-of-n attesters, S1c) ─────────────────────────────
+  //   Tip updates (INCLUDING every burn insert) are authorized by a k-of-n
+  //   ATTESTER FEDERATION, not a single key. A fake burn now requires k
+  //   colluding attesters instead of one compromised tip key, and still
+  //   leaves a permanent, attributable append-only insert record (fraud
+  //   evidence). Burn authenticity is therefore majority-honest-trusted,
+  //   bounded by V_cap + T_delay. R5 (tip commitment) remains unverified
+  //   DATA — k-of-n does NOT make peg-out trustless; full trust-minimization
+  //   needs SPV-in-consensus / STARK settlement (S2). See attester-infra.md
+  //   §S1c (dev-docs/sidechain/s1c-attester-unlock.md) + DESIGN.md §C1.
+  // ⚠ deploy-time injections: SIDECHAIN_STATE_NFT, ATTESTER_PK_1..N (33-byte
+  //   compressed EC points). ATTEST_K (the threshold) is inlined. Canonical
+  //   form = 2-of-3 (dogfood, attest_k/n default); a different (k,n)
+  //   re-authors ATTEST_K + the ATTESTER_PK_i list + the atLeast Coll below.
 
-  val SIDECHAIN_STATE_NFT = fromBase64("")        // todo state singleton NFT id
-  val TIP_PK = decodePoint(fromBase64(""))        // todo miner-tip pubkey (C1)
+  val SIDECHAIN_STATE_NFT = fromBase64("")         // todo state singleton NFT id
+  val ATTESTER_PK_1 = decodePoint(fromBase64(""))  // todo attester #1 pubkey
+  val ATTESTER_PK_2 = decodePoint(fromBase64(""))  // todo attester #2 pubkey
+  val ATTESTER_PK_3 = decodePoint(fromBase64(""))  // todo attester #3 pubkey
+  val ATTEST_K = 2                                 // k-of-n threshold (2-of-3)
 
   val successor = OUTPUTS(0)
 
@@ -104,6 +114,14 @@
       newTree == oldTree
     }
 
-  proveDlog(TIP_PK) &&
+  // U1-strong authority: k-of-n attesters must co-sign the update tx. The
+  // transition constraints below are ANDed on, so ≥k signatures are
+  // NECESSARY but not sufficient — a signed update still has to be a valid
+  // append-only advance.
+  atLeast(ATTEST_K, Coll(
+    proveDlog(ATTESTER_PK_1),
+    proveDlog(ATTESTER_PK_2),
+    proveDlog(ATTESTER_PK_3)
+  )) &&
     sigmaProp(structural && heightAdvances && tipWellFormed && rateLimited && treeTransition)
 }

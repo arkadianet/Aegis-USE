@@ -110,7 +110,7 @@ pub enum ContractsError {
 /// | `receipt_script_hash` | `RECEIPT_SCRIPT_HASH` | PegVault |
 /// | `fee_pot_script_hash` | `FEE_POT_SCRIPT_HASH` | PegVault |
 /// | `sidechain_state_nft` | `SIDECHAIN_STATE_NFT` | SideChainState, UnlockIntent |
-/// | `tip_pk` | `TIP_PK` (33-byte compressed point) | SideChainState |
+/// | `attester_pks` | `ATTESTER_PK_1..3` (33-byte compressed points) | SideChainState |
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ScriptConstants {
     /// USE token id (`tokens(0)._1` of receipts / `tokens(1)._1` of the vault).
@@ -127,9 +127,10 @@ pub struct ScriptConstants {
     pub fee_pot_script_hash: Option<[u8; 32]>,
     /// Singleton SideChainState NFT id.
     pub sidechain_state_nft: Option<[u8; 32]>,
-    /// Miner-tip pubkey (33-byte SEC1-compressed point) — the v1 C1
-    /// trusted key.
-    pub tip_pk: Option<[u8; 33]>,
+    /// The k-of-n attester federation's public keys (33-byte SEC1-compressed
+    /// points), injected into `ATTESTER_PK_1..3` — the S1c U1-strong tip
+    /// authority (replaces the v1 single `TIP_PK`). Canonical n = 3.
+    pub attester_pks: Option<[[u8; 33]; 3]>,
 }
 
 impl ScriptConstants {
@@ -299,20 +300,27 @@ pub fn peg_vault(
     compile_es(NAME, &src, network)
 }
 
-/// Compile `SideChainState.es`. Injections: `sidechain_state_nft`, `tip_pk`.
+/// Compile `SideChainState.es`. Injections: `sidechain_state_nft`,
+/// `attester_pks` (into `ATTESTER_PK_1..3`).
 pub fn side_chain_state(
     consts: &ScriptConstants,
     network: NetworkPrefix,
 ) -> Result<CompiledContract, ContractsError> {
     const NAME: &str = "SideChainState";
     let src = SIDE_CHAIN_STATE_ES.to_owned();
-    let src = inject(
+    let mut src = inject(
         src,
         NAME,
         "SIDECHAIN_STATE_NFT",
         opt_slice(&consts.sidechain_state_nft),
     )?;
-    let src = inject(src, NAME, "TIP_PK", opt_slice(&consts.tip_pk))?;
+    // Inject each attester pubkey into its ATTESTER_PK_i placeholder. `None`
+    // leaves all three empty (the canonical placeholder form).
+    const PK_NAMES: [&str; 3] = ["ATTESTER_PK_1", "ATTESTER_PK_2", "ATTESTER_PK_3"];
+    for (i, name) in PK_NAMES.iter().enumerate() {
+        let pk = consts.attester_pks.map(|pks| pks[i]);
+        src = inject(src, NAME, name, pk.as_ref().map(|p| p.as_slice()))?;
+    }
     compile_es(NAME, &src, network)
 }
 
