@@ -95,10 +95,16 @@ scanning, diversified addresses, and payment disclosures (architecture §6). Thi
 is what lets a recipient confirm "I received 10 USE" and a sender prove it.
 *(medium-large)*
 
-### M5 — Indexer + explorer
+### M5 — Indexer + explorer ✅ DONE
 A **peg + activity + merge-mining dashboard** — the only things a private chain
-can publicly show (blocks, tx counts, merge-mining proofs, the transparent peg /
-pool size), never shielded parties or amounts (architecture §7). *(medium)*
+can publicly show (blocks, tx counts, merge-mining status, the transparent
+pot/pool), never shielded parties or amounts (architecture §7). Built as a
+**self-contained page the node serves at `/`** (inline CSS + vanilla JS, fetched
+same-origin — no CORS, no build step) over new read-only endpoints
+`GET /aegis/v1/blocks?from=&limit=` (recent block summaries, newest-first) and
+`/aegis/v1/blocks/{id}` (full public header). Proof-of-life: a dev node with
+`--api-addr` serves the dashboard + block list/detail of real mined blocks.
+Public aggregates only. *(medium — done)*
 
 ### M6 — P2P *(partly done — landed with M2)*
 Multi-node body distribution + seed discovery. **Lighter than a normal chain's

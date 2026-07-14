@@ -1,7 +1,10 @@
 //! M3 node API — a read-only HTTP/JSON surface over the running node
-//! (`dev-docs/sidechain/node-api.md`). This is slice 1: observability
-//! and the merge-mining template. The mempool/submit path (slice 2)
-//! and peg-in wiring (slice 3) build on top of this.
+//! (`dev-docs/sidechain/node-api.md`) — plus the M5 explorer page. Slice 1
+//! (observability + the merge-mining template) and slice 2 (mempool/submit)
+//! are built; peg-in wiring (slice 3) is deferred. The **M5 explorer** — a
+//! self-contained dashboard served at `/` — renders the public skeleton over
+//! these endpoints (blocks, merge-mining status, the transparent pot); never
+//! shielded parties or amounts.
 //!
 //! ## Threading
 //!
@@ -201,6 +204,7 @@ mod serve {
     use std::time::Duration;
 
     use super::{mm_commitment_json, mm_status_json, state_json, tip_json, ApiState, BTreeSet};
+    use crate::block::Block;
     use crate::mempool::AdmitError;
     use crate::seed::Id;
     use crate::tx::ShieldedTransfer;
@@ -275,7 +279,10 @@ mod serve {
         let Some((method, target, content_length)) = parse_head(&head) else {
             return respond(&mut stream, 400, b"bad request");
         };
-        let path = target.split_once('?').map(|(p, _)| p).unwrap_or(&target);
+        let (path, query) = match target.split_once('?') {
+            Some((p, q)) => (p, q),
+            None => (target.as_str(), ""),
+        };
 
         // The only mutating route: submit a shielded transfer.
         if method == "POST" && path == "/aegis/v1/tx" {
@@ -286,6 +293,8 @@ mod serve {
         }
         let snap = state.snapshot();
         match path {
+            // ----- explorer (M5): the node-served public dashboard -----
+            "/" | "/explorer" => html(&mut stream, EXPLORER_HTML),
             "/aegis/v1/tip" => json(&mut stream, &tip_json(&snap)),
             "/aegis/v1/state" => json(&mut stream, &state_json(&snap)),
             "/aegis/v1/mm/status" => json(&mut stream, &mm_status_json(&snap)),
@@ -294,6 +303,10 @@ mod serve {
                 &mut stream,
                 &serde_json::json!({ "size": state.mempool_len() }),
             ),
+            "/aegis/v1/blocks" => blocks_list(&mut stream, query, state),
+            p if p.starts_with("/aegis/v1/blocks/") => {
+                block_detail(&mut stream, &p["/aegis/v1/blocks/".len()..], state)
+            }
             p if p.starts_with("/aegis/v1/nullifier/") => nullifier(
                 &mut stream,
                 &p["/aegis/v1/nullifier/".len()..],
@@ -307,6 +320,78 @@ mod serve {
             }
             _ => respond(&mut stream, 404, b"not found"),
         }
+    }
+
+    /// The self-contained explorer page (inline CSS + vanilla JS; fetches the
+    /// `/aegis/v1` endpoints same-origin, so no CORS and no build step).
+    const EXPLORER_HTML: &str = include_str!("explorer.html");
+
+    /// Public JSON summary of one decoded block (header aggregates + tx count;
+    /// never per-note data). `detail` adds the full header commitment fields.
+    fn block_summary(block: &Block, detail: bool) -> serde_json::Value {
+        let h = &block.header;
+        let mut v = serde_json::json!({
+            "height": h.height,
+            "id": hex::encode(block.id()),
+            "timestamp_ms": h.timestamp_ms,
+            "tx_count": block.body.transfers.len(),
+            "has_coinbase": block.coinbase.is_some(),
+        });
+        if detail {
+            v["prev_id"] = hex::encode(h.prev_id).into();
+            v["tx_root"] = hex::encode(h.tx_root).into();
+            v["cm_tree_root"] = hex::encode(h.cm_tree_root).into();
+            v["nullifier_digest"] = hex::encode(h.nullifier_digest).into();
+            v["pot_balance"] = h.pot_balance.into();
+            v["sc_nbits"] = h.sc_nbits.into();
+        }
+        v
+    }
+
+    /// `GET /aegis/v1/blocks?from=&limit=` — recent block summaries, newest
+    /// first. Defaults to the latest `limit` (≤ 100, default 20) blocks.
+    fn blocks_list(stream: &mut TcpStream, query: &str, state: &ApiState) -> std::io::Result<()> {
+        let limit = query_param(query, "limit")
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(20)
+            .clamp(1, 100);
+        let core = state.core.read().expect("seed core lock poisoned");
+        let tip = core.height();
+        let from = query_param(query, "from")
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or_else(|| tip.saturating_sub(limit - 1).max(1));
+        let mut blocks: Vec<serde_json::Value> = core
+            .chain_page(from, limit as usize)
+            .iter()
+            .filter_map(|id| core.body_bytes(id))
+            .filter_map(|bytes| Block::from_bytes(bytes).ok())
+            .map(|block| block_summary(&block, false))
+            .collect();
+        blocks.reverse(); // newest first
+        json(
+            stream,
+            &serde_json::json!({ "tip_height": tip, "from": from, "blocks": blocks }),
+        )
+    }
+
+    /// `GET /aegis/v1/blocks/{id}` — full public summary of one block.
+    fn block_detail(stream: &mut TcpStream, id_hex: &str, state: &ApiState) -> std::io::Result<()> {
+        let Some(id) = parse_id_hex(id_hex) else {
+            return respond(stream, 400, b"bad id");
+        };
+        let core = state.core.read().expect("seed core lock poisoned");
+        match core.body_bytes(&id).and_then(|b| Block::from_bytes(b).ok()) {
+            Some(block) => json(stream, &block_summary(&block, true)),
+            None => respond(stream, 404, b"don't have"),
+        }
+    }
+
+    fn query_param<'a>(query: &'a str, name: &str) -> Option<&'a str> {
+        query
+            .split('&')
+            .filter_map(|kv| kv.split_once('='))
+            .find(|(k, _)| *k == name)
+            .map(|(_, v)| v)
     }
 
     fn nullifier(
@@ -451,6 +536,10 @@ mod serve {
 
     fn octet(stream: &mut TcpStream, body: &[u8]) -> std::io::Result<()> {
         write_response(stream, 200, "application/octet-stream", body)
+    }
+
+    fn html(stream: &mut TcpStream, body: &str) -> std::io::Result<()> {
+        write_response(stream, 200, "text/html; charset=utf-8", body.as_bytes())
     }
 
     fn respond(stream: &mut TcpStream, status: u16, body: &[u8]) -> std::io::Result<()> {
@@ -792,6 +881,103 @@ mod tests {
         st.publish_admission(empty_admission()); // drop the anchor
         let server = ApiServer::spawn("127.0.0.1:0", st).expect("spawn");
         assert_eq!(post(&server.base_url(), "/aegis/v1/tx", &tx_bytes).0, 409);
+    }
+
+    // ----- explorer (M5) -----
+
+    /// An `ApiState` whose archive holds `n` produced dev blocks (heights
+    /// 1..=n), plus the block ids in height order.
+    fn state_with_blocks(n: usize) -> (ApiState, Vec<[u8; 32]>) {
+        use crate::block::BlockBody;
+        use crate::chain::{Chain, PowMode, ProofMode};
+        let mut chain = Chain::new(Network::Dev, PowMode::DevStub, ProofMode::DevStub);
+        let mut core = SeedCore::new(Network::Dev);
+        let mut ids = Vec::new();
+        for _ in 0..n {
+            let ts = chain.tip().timestamp_ms + 15_000;
+            let block = chain
+                .produce_next(BlockBody::default(), ts)
+                .expect("produce");
+            chain.try_extend(block.clone(), ts).expect("extend");
+            core.record_canonical(&block);
+            ids.push(block.id());
+        }
+        let st = ApiState::new(
+            sample_status(),
+            Arc::new(RwLock::new(core)),
+            Arc::new(RwLock::new(Mempool::new())),
+            empty_admission(),
+        );
+        (st, ids)
+    }
+
+    #[test]
+    fn blocks_list_returns_recent_blocks_newest_first() {
+        let (st, ids) = state_with_blocks(3);
+        let server = ApiServer::spawn("127.0.0.1:0", st).expect("spawn");
+        let (code, body) = get(&server.base_url(), "/aegis/v1/blocks");
+        assert_eq!(code, 200);
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["tip_height"], 3);
+        let blocks = v["blocks"].as_array().unwrap();
+        assert_eq!(blocks.len(), 3);
+        // Newest first: height 3, then 2, then 1.
+        assert_eq!(blocks[0]["height"], 3);
+        assert_eq!(blocks[0]["id"], hex::encode(ids[2]));
+        assert_eq!(blocks[0]["tx_count"], 0);
+        assert_eq!(blocks[2]["height"], 1);
+        // Summary carries no per-note data.
+        assert!(blocks[0].get("cm_leaves").is_none());
+    }
+
+    #[test]
+    fn blocks_list_limit_is_honored() {
+        let (st, _) = state_with_blocks(5);
+        let server = ApiServer::spawn("127.0.0.1:0", st).expect("spawn");
+        let (_, body) = get(&server.base_url(), "/aegis/v1/blocks?limit=2");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let blocks = v["blocks"].as_array().unwrap();
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0]["height"], 5); // the two newest
+        assert_eq!(blocks[1]["height"], 4);
+    }
+
+    #[test]
+    fn block_detail_returns_header_fields() {
+        let (st, ids) = state_with_blocks(2);
+        let server = ApiServer::spawn("127.0.0.1:0", st).expect("spawn");
+        let (code, body) = get(
+            &server.base_url(),
+            &format!("/aegis/v1/blocks/{}", hex::encode(ids[1])),
+        );
+        assert_eq!(code, 200);
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["height"], 2);
+        assert_eq!(v["id"], hex::encode(ids[1]));
+        assert!(v["prev_id"].is_string());
+        assert!(v["cm_tree_root"].is_string());
+        // Unknown id → 404.
+        assert_eq!(
+            get(
+                &server.base_url(),
+                &format!("/aegis/v1/blocks/{}", hex::encode([0xEE; 32]))
+            )
+            .0,
+            404
+        );
+    }
+
+    #[test]
+    fn explorer_page_is_served_at_root_and_explorer() {
+        let server = ApiServer::spawn("127.0.0.1:0", state()).expect("spawn");
+        for path in ["/", "/explorer"] {
+            let (code, body) = get(&server.base_url(), path);
+            assert_eq!(code, 200, "path {path}");
+            assert!(
+                body.contains("Aegis Explorer"),
+                "path {path} served the page"
+            );
+        }
     }
 
     #[test]

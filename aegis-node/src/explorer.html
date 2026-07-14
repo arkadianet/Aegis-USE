@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Aegis Explorer</title>
+<style>
+  :root {
+    --bg: #0d1117; --card: #161b22; --border: #30363d; --fg: #e6edf3;
+    --muted: #8b949e; --accent: #58a6ff; --good: #3fb950; --warn: #d29922;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: #f6f8fa; --card: #fff; --border: #d0d7de; --fg: #1f2328;
+      --muted: #656d76; --accent: #0969da; --good: #1a7f37; --warn: #9a6700;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  .wrap { max-width: 1000px; margin: 0 auto; padding: 24px 16px 64px; }
+  header { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; margin-bottom: 4px; }
+  h1 { font-size: 22px; margin: 0; }
+  .net { color: var(--accent); font-family: var(--mono); font-size: 13px; }
+  .sub { color: var(--muted); font-size: 13px; margin: 0 0 20px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin-bottom: 20px; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px; }
+  .card h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 0 0 10px; }
+  .kv { display: flex; justify-content: space-between; gap: 12px; padding: 3px 0; font-size: 14px; }
+  .kv .k { color: var(--muted); }
+  .kv .v { font-family: var(--mono); text-align: right; overflow-wrap: anywhere; }
+  .pill { font-family: var(--mono); font-size: 12px; padding: 1px 7px; border-radius: 999px; border: 1px solid var(--border); }
+  .pill.ok { color: var(--good); border-color: var(--good); }
+  .pill.no { color: var(--warn); border-color: var(--warn); }
+  .tablewrap { background: var(--card); border: 1px solid var(--border); border-radius: 8px; overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th, td { text-align: left; padding: 9px 14px; white-space: nowrap; }
+  th { color: var(--muted); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: .03em; border-bottom: 1px solid var(--border); }
+  tbody tr { border-top: 1px solid var(--border); }
+  td.mono, .mono { font-family: var(--mono); }
+  td.num { text-align: right; }
+  a { color: var(--accent); text-decoration: none; }
+  .foot { color: var(--muted); font-size: 12px; margin-top: 24px; }
+  .err { color: var(--warn); font-family: var(--mono); font-size: 13px; }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--muted); margin-right: 6px; vertical-align: middle; }
+  .dot.live { background: var(--good); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Aegis Explorer</h1>
+    <span class="net" id="net">…</span>
+    <span style="margin-left:auto;font-size:12px;color:var(--muted)"><span class="dot" id="live"></span><span id="updated">connecting…</span></span>
+  </header>
+  <p class="sub">Public view of a shielded chain — blocks, activity, and merge-mining only. Amounts and parties are private and never shown.</p>
+
+  <div class="grid">
+    <div class="card">
+      <h2>Chain</h2>
+      <div class="kv"><span class="k">Height</span><span class="v" id="c-height">—</span></div>
+      <div class="kv"><span class="k">Cumulative work</span><span class="v" id="c-work">—</span></div>
+      <div class="kv"><span class="k">Tip final</span><span class="v" id="c-final">—</span></div>
+      <div class="kv"><span class="k">Tip id</span><span class="v mono" id="c-tip" style="font-size:12px">—</span></div>
+    </div>
+    <div class="card">
+      <h2>Merge-mining</h2>
+      <div class="kv"><span class="k">Ergo tip height</span><span class="v" id="m-ergo">—</span></div>
+      <div class="kv"><span class="k">Pending hostile work</span><span class="v" id="m-hostile">—</span></div>
+      <div class="kv"><span class="k">Finality lead (l_final)</span><span class="v" id="m-lfinal">—</span></div>
+    </div>
+    <div class="card">
+      <h2>Shielded state</h2>
+      <div class="kv"><span class="k">Emission pot</span><span class="v" id="s-pot">—</span></div>
+      <div class="kv"><span class="k">Nullifiers (spent)</span><span class="v" id="s-nf">—</span></div>
+      <div class="kv"><span class="k">Note commitments</span><span class="v" id="s-leaves">—</span></div>
+      <div class="kv"><span class="k">Mempool</span><span class="v" id="s-mempool">—</span></div>
+    </div>
+  </div>
+
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>Height</th><th>Block id</th><th>Time</th><th class="num">Txs</th><th>Coinbase</th></tr></thead>
+      <tbody id="blocks"><tr><td colspan="5" class="mono" style="color:var(--muted)">loading…</td></tr></tbody>
+    </table>
+  </div>
+
+  <p class="foot" id="foot">Aegis — a merge-mined, private-USE sidechain. This page shows only the transparent skeleton.</p>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const short = h => h ? h.slice(0, 10) + "…" + h.slice(-6) : "—";
+const num = n => (n === undefined || n === null) ? "—" : Number(n).toLocaleString();
+const ago = ms => {
+  if (!ms) return "—";
+  const s = Math.max(0, Math.floor((Date.now() - ms) / 1000));
+  if (s < 60) return s + "s ago";
+  if (s < 3600) return Math.floor(s / 60) + "m ago";
+  return Math.floor(s / 3600) + "h ago";
+};
+async function getJSON(path) {
+  const r = await fetch(path, { cache: "no-store" });
+  if (!r.ok) throw new Error(path + " → " + r.status);
+  return r.json();
+}
+async function refresh() {
+  try {
+    const [tip, state, mm, mem, blocks] = await Promise.all([
+      getJSON("/aegis/v1/tip"),
+      getJSON("/aegis/v1/state"),
+      getJSON("/aegis/v1/mm/status"),
+      getJSON("/aegis/v1/mempool"),
+      getJSON("/aegis/v1/blocks?limit=25"),
+    ]);
+    $("net").textContent = tip.network || "";
+    $("c-height").textContent = num(tip.height);
+    $("c-work").textContent = num(tip.cumulative_work);
+    $("c-final").innerHTML = tip.is_final
+      ? '<span class="pill ok">final</span>' : '<span class="pill no">pending</span>';
+    $("c-tip").textContent = short(tip.id);
+    $("m-ergo").textContent = mm.ergo_tip_height == null ? "not following" : num(mm.ergo_tip_height);
+    $("m-hostile").textContent = num(mm.pending_hostile_work);
+    $("m-lfinal").textContent = num(mm.l_final);
+    $("s-pot").textContent = num(state.pot);
+    $("s-nf").textContent = num(state.nullifier_count);
+    $("s-leaves").textContent = num(state.leaf_count);
+    $("s-mempool").textContent = num(mem.size);
+
+    const rows = (blocks.blocks || []).map(b => `<tr>
+      <td class="num">${num(b.height)}</td>
+      <td class="mono"><a href="/aegis/v1/blocks/${b.id}">${short(b.id)}</a></td>
+      <td>${ago(b.timestamp_ms)}</td>
+      <td class="num">${num(b.tx_count)}</td>
+      <td>${b.has_coinbase ? '<span class="pill ok">yes</span>' : '<span class="pill no">no</span>'}</td>
+    </tr>`).join("");
+    $("blocks").innerHTML = rows || '<tr><td colspan="5" style="color:var(--muted)">no blocks yet</td></tr>';
+
+    $("live").classList.add("live");
+    $("updated").textContent = "updated " + new Date().toLocaleTimeString();
+  } catch (e) {
+    $("live").classList.remove("live");
+    $("updated").innerHTML = '<span class="err">node unreachable</span>';
+  }
+}
+refresh();
+setInterval(refresh, 5000);
+</script>
+</body>
+</html>
