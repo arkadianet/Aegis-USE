@@ -7,16 +7,18 @@
 //! self-transfer that merges two notes). Sending to another party needs
 //! note encryption (held), so every note here is self-owned.
 //!
-//! The wallet file is a small JSON journal (sk + the self-note list). It
-//! is **not encrypted at rest yet** — an encrypted keystore is a held
-//! slice (`wallet-design.md` §7); until then treat the file like a key.
+//! The wallet file is a small JSON journal (spending key + the self-note
+//! list). Set `AEGIS_WALLET_PASSPHRASE` to seal the spending key at rest
+//! (PBKDF2 + AES-256-GCM, `keystore.rs`); without it the key is stored as
+//! plaintext hex (warned) for backward compatibility — treat that file
+//! like a key.
 
 use std::path::{Path, PathBuf};
 
 use aegis_spec::Network;
 use aegis_wallet::{
-    consolidate, pay, Address, NodeClient, SelfNote, SpendingKey, TrackedNote, WalletState,
-    HRP_MAINNET, HRP_TESTNET,
+    consolidate, pay, Address, Keystore, NodeClient, SelfNote, SpendingKey, TrackedNote,
+    WalletState, HRP_MAINNET, HRP_TESTNET,
 };
 use clap::{Parser, Subcommand};
 
@@ -133,7 +135,17 @@ fn cmd_init(path: &Path, network: &str) -> Result<(), Box<dyn std::error::Error>
     let addr = Address::from_spending_key(&sk);
     println!("wrote wallet: {}", path.display());
     println!("address:      {}", addr.encode(hrp_for(net)));
-    println!("(the wallet file holds your spending key UNENCRYPTED — guard it like funds)");
+    if wallet_passphrase().is_some() {
+        println!(
+            "(spending key encrypted at rest with AEGIS_WALLET_PASSPHRASE — \
+             keep it safe; losing it loses the wallet)"
+        );
+    } else {
+        println!(
+            "(spending key stored UNENCRYPTED — set AEGIS_WALLET_PASSPHRASE before \
+             commands that write the wallet to encrypt it at rest)"
+        );
+    }
     Ok(())
 }
 
@@ -278,9 +290,19 @@ impl WalletFile {
         let text = std::fs::read_to_string(path)
             .map_err(|e| format!("reading wallet {}: {e}", path.display()))?;
         let v: serde_json::Value = serde_json::from_str(&text)?;
-        let sk = SpendingKey::from_bytes(parse_sk(
-            v["sk"].as_str().ok_or("wallet file missing `sk`")?,
-        )?);
+        let sk = match v.get("keystore").filter(|k| !k.is_null()) {
+            Some(ks_json) => {
+                let pw = wallet_passphrase()
+                    .ok_or("wallet is encrypted — set AEGIS_WALLET_PASSPHRASE to unlock it")?;
+                let bytes = parse_keystore(ks_json)?
+                    .open(&pw)
+                    .ok_or("wrong passphrase (or corrupt keystore)")?;
+                SpendingKey::from_bytes(bytes)
+            }
+            None => SpendingKey::from_bytes(parse_sk(
+                v["sk"].as_str().ok_or("wallet file missing `sk`")?,
+            )?),
+        };
         let network = parse_network(v["network"].as_str().unwrap_or("test"))?;
         let next_index = v["next_index"].as_u64().unwrap_or(0);
         let scanned_height = v["scanned_height"].as_u64().unwrap_or(0);
@@ -310,14 +332,28 @@ impl WalletFile {
                 })
             })
             .collect();
-        let doc = serde_json::json!({
+        let mut doc = serde_json::json!({
             "version": 1,
             "network": network_name(self.network),
-            "sk": hex::encode(self.sk.to_bytes()),
             "next_index": self.state.next_index(),
             "scanned_height": self.state.scanned_height(),
             "notes": notes,
         });
+        // Encrypt the spending key at rest when a passphrase is set; else
+        // fall back to the (warned) plaintext form for backward compatibility.
+        match wallet_passphrase() {
+            Some(pw) => {
+                let ks = Keystore::seal(&self.sk.to_bytes(), &pw, &mut rand::thread_rng());
+                doc["keystore"] = serde_json::json!({
+                    "kdf": "pbkdf2-hmac-sha256",
+                    "iters": ks.iters,
+                    "salt": hex::encode(ks.salt),
+                    "nonce": hex::encode(ks.nonce),
+                    "ct": hex::encode(ks.ct),
+                });
+            }
+            None => doc["sk"] = hex::encode(self.sk.to_bytes()).into(),
+        }
         std::fs::write(path, serde_json::to_string_pretty(&doc)?)
             .map_err(|e| format!("writing wallet {}: {e}", path.display()).into())
     }
@@ -340,6 +376,39 @@ fn parse_sk(s: &str) -> Result<[u8; 32], Box<dyn std::error::Error>> {
     bytes
         .try_into()
         .map_err(|_| "spending key must be 32 bytes (64 hex chars)".into())
+}
+
+/// The wallet passphrase from `AEGIS_WALLET_PASSPHRASE` (unset/empty ⇒ none,
+/// i.e. the legacy plaintext form).
+fn wallet_passphrase() -> Option<String> {
+    std::env::var("AEGIS_WALLET_PASSPHRASE")
+        .ok()
+        .filter(|s| !s.is_empty())
+}
+
+/// Parse the `keystore` object of an encrypted wallet file.
+fn parse_keystore(v: &serde_json::Value) -> Result<Keystore, Box<dyn std::error::Error>> {
+    let iters = v["iters"].as_u64().ok_or("keystore missing `iters`")? as u32;
+    Ok(Keystore {
+        iters,
+        salt: decode_hex_arr(v["salt"].as_str().ok_or("keystore missing `salt`")?, "salt")?,
+        nonce: decode_hex_arr(
+            v["nonce"].as_str().ok_or("keystore missing `nonce`")?,
+            "nonce",
+        )?,
+        ct: hex::decode(v["ct"].as_str().ok_or("keystore missing `ct`")?)
+            .map_err(|_| "keystore `ct` is not hex")?,
+    })
+}
+
+fn decode_hex_arr<const N: usize>(
+    s: &str,
+    field: &str,
+) -> Result<[u8; N], Box<dyn std::error::Error>> {
+    hex::decode(s)
+        .map_err(|_| format!("keystore `{field}` is not hex"))?
+        .try_into()
+        .map_err(|_| format!("keystore `{field}` has wrong length").into())
 }
 
 fn parse_network(s: &str) -> Result<Network, Box<dyn std::error::Error>> {

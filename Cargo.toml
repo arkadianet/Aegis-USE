@@ -35,6 +35,8 @@ ark-secq256k1 = "0.4.0"
 
 # --- shared utility crates ---
 k256               = "0.13"
+aes-gcm            = "0.10"
+pbkdf2             = { version = "0.12", default-features = false, features = ["hmac"] }
 base64             = "0.22"
 hex                = "0.4"
 sha2               = "0.10"

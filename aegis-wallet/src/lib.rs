@@ -17,6 +17,7 @@
 pub mod address;
 pub mod client;
 pub mod keys;
+pub mod keystore;
 pub mod notes;
 pub mod pay;
 pub mod send;
@@ -27,6 +28,7 @@ pub use client::{
     BlockSummary, BlocksPage, ChainState, ClientError, NodeClient, SubmitOutcome, Tip,
 };
 pub use keys::{IncomingViewingKey, Ovk, SpendingKey};
+pub use keystore::Keystore;
 pub use notes::{detect_received, ReceivedNote, SelfNote};
 pub use pay::{pay, PayError, Payment};
 pub use send::{consolidate, ConsolidateError, Consolidation};

@@ -30,6 +30,10 @@ ark-secq256k1 = { workspace = true }
 ergo-crypto = { workspace = true }
 bech32      = "0.9"
 hex         = { workspace = true }
+# Encrypted keystore: PBKDF2-HMAC-SHA256 (passphrase → key) + AES-256-GCM.
+aes-gcm     = { workspace = true }
+pbkdf2      = { workspace = true }
+sha2        = { workspace = true }
 rand        = { workspace = true }
 thiserror   = { workspace = true }
 tracing     = { workspace = true }
