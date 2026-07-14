@@ -14,7 +14,9 @@ use crate::header::Header;
 pub const EMPTY_TREE_ROOT_PLACEHOLDER: [u8; 32] = *b"aegis/empty-curve-tree-root/v1..";
 
 /// Placeholder digests for the empty tx set / nullifier set at genesis.
-pub const EMPTY_TX_ROOT: [u8; 32] = *b"aegis/empty-tx-root/v1..........";
+/// `EMPTY_TX_ROOT` is defined in `aegis-types` (the block codec needs it)
+/// and re-exported here so `crate::genesis::EMPTY_TX_ROOT` is unchanged.
+pub use aegis_types::EMPTY_TX_ROOT;
 pub const EMPTY_NULLIFIER_DIGEST: [u8; 32] = *b"aegis/empty-nullifier-set/v1....";
 
 /// Header `reward_claim` sentinel for genesis and any no-coinbase block

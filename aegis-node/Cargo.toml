@@ -10,6 +10,7 @@ publish     = false
 [dependencies]
 aegis-crypto    = { path = "../aegis-crypto" }
 aegis-spec      = { path = "../aegis-spec" }
+aegis-types     = { path = "../aegis-types" }
 ark-ec          = { workspace = true }
 ark-serialize   = { workspace = true }
 ergo-primitives = { workspace = true }
@@ -37,3 +38,6 @@ serde_json     = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+# The shared wire-type fixture (`aegis_types::tx::testutil::sample_transfer`)
+# that state/chain/seed/store/mm-forkchoice tests build blocks from.
+aegis-types = { path = "../aegis-types", features = ["testutil"] }

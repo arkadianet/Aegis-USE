@@ -12,13 +12,11 @@
 pub mod anchor_watch;
 pub mod api;
 pub mod auxpow;
-pub mod block;
 pub mod chain;
 pub mod daa;
 pub mod ergo_follow;
 pub mod fresh_sync;
 pub mod genesis;
-pub mod header;
 pub mod mempool;
 pub mod mm_forkchoice;
 pub mod node;
@@ -28,7 +26,11 @@ pub mod proof;
 pub mod seed;
 pub mod state;
 pub mod store;
-pub mod tx;
+
+// The pure wire types/codecs now live in `aegis-types`; re-export the
+// modules so `crate::block` / `crate::header` / `crate::tx` — used
+// throughout the node and its tests — keep resolving unchanged.
+pub use aegis_types::{block, header, tx};
 
 pub use anchor_watch::{
     extension_field_proof, extract_commitment, settled_is_final, AegisLookup, AegisSource,

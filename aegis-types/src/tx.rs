@@ -106,16 +106,18 @@ impl ShieldedTransfer {
     }
 }
 
-/// Test fixtures shared by tx/block/state/chain test modules.
-#[cfg(test)]
-pub(crate) mod testutil {
+/// Test fixtures shared by tx/block test modules here and — via the
+/// `testutil` feature — by `aegis-node`'s state/chain/seed/store tests.
+/// Gated so it never compiles into a normal build.
+#[cfg(any(test, feature = "testutil"))]
+pub mod testutil {
     use super::*;
     use aegis_crypto::note::{note_cm_bytes, note_commitment, EvenScalar};
 
     /// A transfer whose note commitments are VALID curve points (the
     /// state layer strictly decodes them); nullifiers/ciphertexts are
     /// recognizable byte patterns.
-    pub(crate) fn sample_transfer(seed: u8) -> ShieldedTransfer {
+    pub fn sample_transfer(seed: u8) -> ShieldedTransfer {
         let out = |b: u8| ShieldedOutput {
             note_cm: note_cm_bytes(&note_commitment(
                 u64::from(b),

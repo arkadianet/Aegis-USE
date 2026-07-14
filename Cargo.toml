@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members  = ["aegis-crypto", "aegis-node", "aegis-spec", "aegis-wallet", "contracts"]
+members  = ["aegis-crypto", "aegis-node", "aegis-spec", "aegis-types", "aegis-wallet", "contracts"]
 # The vendored Curve Trees stack is its own nested workspace; aegis-crypto
 # path-depends into it (see aegis-crypto/Cargo.toml). Excluded here exactly
 # as in the upstream monorepo.

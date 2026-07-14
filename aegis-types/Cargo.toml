@@ -1,0 +1,27 @@
+[package]
+name        = "aegis-types"
+description = "Pure Aegis wire types + codecs (header, transfer, block): serialization only, no I/O and no runtime services. Shared by aegis-node and aegis-wallet so the wallet decodes blocks without linking the node binary."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish     = false
+
+[dependencies]
+aegis-crypto    = { path = "../aegis-crypto" }
+aegis-spec      = { path = "../aegis-spec" }
+ark-serialize   = { workspace = true }
+ergo-primitives = { workspace = true }
+ergo-crypto     = { workspace = true }
+thiserror       = { workspace = true }
+
+[features]
+# Exposes `tx::testutil` (a valid `ShieldedTransfer` fixture with real
+# curve-point commitments) to other crates' test suites, without a
+# `#[cfg(test)]` cross-crate barrier. Enabled by aegis-node as a
+# dev-dependency feature; off in every normal build.
+testutil = []
+
+[dev-dependencies]
+hex  = { workspace = true }
+rand = { workspace = true }

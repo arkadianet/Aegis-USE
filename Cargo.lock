@@ -40,6 +40,7 @@ version = "0.5.1"
 dependencies = [
  "aegis-crypto",
  "aegis-spec",
+ "aegis-types",
  "ark-ec",
  "ark-serialize",
  "clap",
@@ -63,6 +64,20 @@ dependencies = [
 [[package]]
 name = "aegis-spec"
 version = "0.5.1"
+
+[[package]]
+name = "aegis-types"
+version = "0.5.1"
+dependencies = [
+ "aegis-crypto",
+ "aegis-spec",
+ "ark-serialize",
+ "ergo-crypto",
+ "ergo-primitives",
+ "hex",
+ "rand",
+ "thiserror 2.0.18",
+]
 
 [[package]]
 name = "aegis-wallet"

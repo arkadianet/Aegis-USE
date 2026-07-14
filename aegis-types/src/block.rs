@@ -12,9 +12,9 @@ use ergo_crypto::merkle::merkle_tree_root;
 use ergo_primitives::reader::{ReadError, VlqReader};
 use ergo_primitives::writer::VlqWriter;
 
-use crate::genesis::EMPTY_TX_ROOT;
 use crate::header::{Header, HeaderDecodeError};
 use crate::tx::{ShieldedTransfer, TxDecodeError};
+use crate::EMPTY_TX_ROOT;
 
 /// Ordered transfers carried by one block.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
