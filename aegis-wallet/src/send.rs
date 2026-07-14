@@ -7,23 +7,27 @@
 //! wallet tops up its zero-value reserve for the fixed 2-in/2-out arity —
 //! each consolidation emits `[change, zero]`.
 //!
-//! Sending to *another party* is deliberately out of scope: it needs an
-//! address-binding note primitive (note encryption to `pk_d`, slice 3)
-//! that does not exist yet. Everything here stays on self-owned notes,
-//! whose secrets the wallet re-derives from `sk`.
+//! Sending to *another party* lives in [`crate::pay`]; everything here
+//! stays on self-owned notes, whose secrets the wallet re-derives from
+//! `sk` rather than by decryption.
 //!
-//! Note ciphertexts (`epk`/`ct`/`out_ct`) are zero-filled: encryption is
-//! held, and a self-note is recovered by re-derivation, not decryption,
-//! so no plaintext is lost by omitting them this slice.
+//! Both outputs are nonetheless encrypted to the wallet's *own* address
+//! with the same note-encryption primitive `pay` uses, so a self-transfer
+//! is byte-indistinguishable from a payment on the wire (§6 uniformity —
+//! an observer must not be able to tell a consolidation from a spend). A
+//! scan still recognizes these outputs as own notes by commitment, so
+//! they are never double-counted as receipts.
 
+use aegis_crypto::generators::EvenPoint;
 use aegis_crypto::note::note_cm_bytes;
+use aegis_crypto::note_encryption::{encrypt_note, EncryptedNote, MEMO_BYTES};
 use aegis_crypto::nullifier::NF_BYTES;
 use aegis_crypto::spend::{prove_transfer, SpendError, TransferProof};
-use aegis_spec::{EPK_BYTES, NOTE_CT_BYTES, NOTE_OUT_CT_BYTES};
 use aegis_types::{ShieldedOutput, ShieldedTransfer};
 use ark_serialize::CanonicalSerialize;
 use rand::Rng;
 
+use crate::address::Address;
 use crate::keys::SpendingKey;
 use crate::notes::SelfNote;
 use crate::state::WalletState;
@@ -110,7 +114,34 @@ pub fn consolidate<R: Rng>(
     let outputs = [change.output(sk), reserve.output(sk)];
 
     let proof = prove_transfer(&anchor, &inputs, &outputs, fee, rng)?;
-    let transfer = assemble_transfer(&proof);
+
+    // Encrypt both outputs to the wallet's own address so the transfer is
+    // byte-indistinguishable from a payment (§6 uniformity). Recovery is
+    // still by re-derivation on scan; the ciphertext exists only to match
+    // a payment's wire shape (and, as a bonus, lets `ovk`/`nk` recover the
+    // change if the journal is ever lost).
+    let ovk = sk.ovk().0;
+    let own_pk = Address::from_spending_key(sk).payment_address();
+    let memo = [0u8; MEMO_BYTES];
+    let enc = [
+        encrypt_note(
+            &own_pk,
+            &change.payment_opening(sk),
+            &memo,
+            &note_cm_bytes(&proof.output_cms[0]),
+            &ovk,
+            rng,
+        ),
+        encrypt_note(
+            &own_pk,
+            &reserve.payment_opening(sk),
+            &memo,
+            &note_cm_bytes(&proof.output_cms[1]),
+            &ovk,
+            rng,
+        ),
+    ];
+    let transfer = assemble_transfer(&proof, enc);
 
     Ok(Consolidation {
         transfer,
@@ -120,25 +151,25 @@ pub fn consolidate<R: Rng>(
     })
 }
 
-/// Assemble the wire [`ShieldedTransfer`] from a proof: the revealed
-/// nullifiers, the two output commitments (ciphertexts zero-filled —
-/// encryption held), and the ark-compressed proof blob.
-fn assemble_transfer(proof: &TransferProof) -> ShieldedTransfer {
+/// Assemble the wire [`ShieldedTransfer`] from a proof and the two output
+/// ciphertexts: the revealed nullifiers, the output commitments with their
+/// `(epk, ct, out_ct)`, and the ark-compressed proof blob.
+fn assemble_transfer(proof: &TransferProof, enc: [EncryptedNote; 2]) -> ShieldedTransfer {
     let mut proof_bytes = Vec::new();
     proof
         .serialize_compressed(&mut proof_bytes)
         .expect("serializing a proof into a Vec is infallible");
-    let out_wire = |cm| ShieldedOutput {
+    let out_wire = |cm: &EvenPoint, e: &EncryptedNote| ShieldedOutput {
         note_cm: note_cm_bytes(cm),
-        epk: [0u8; EPK_BYTES],
-        ct: [0u8; NOTE_CT_BYTES],
-        out_ct: [0u8; NOTE_OUT_CT_BYTES],
+        epk: e.epk,
+        ct: e.ct,
+        out_ct: e.out_ct,
     };
     ShieldedTransfer {
         nullifiers: proof.nullifiers(),
         outputs: [
-            out_wire(&proof.output_cms[0]),
-            out_wire(&proof.output_cms[1]),
+            out_wire(&proof.output_cms[0], &enc[0]),
+            out_wire(&proof.output_cms[1], &enc[1]),
         ],
         proof: proof_bytes,
     }
@@ -222,6 +253,33 @@ mod tests {
                 aegis_crypto::note::note_cm_bytes(&out.commitment(&sk()))
             );
         }
+    }
+
+    #[test]
+    fn consolidate_outputs_carry_real_ciphertext_not_zero_fill() {
+        // §6 uniformity: a self-transfer must look exactly like a payment
+        // on the wire — no zero-ciphertext tell that marks it a self-move.
+        use aegis_spec::{EPK_BYTES, NOTE_CT_BYTES, NOTE_OUT_CT_BYTES};
+        let st = funded_state();
+        let c = consolidate(&sk(), &st, FEE, &mut StdRng::seed_from_u64(6)).unwrap();
+        for out in &c.transfer.outputs {
+            assert_ne!(out.epk, [0u8; EPK_BYTES], "epk must be a real ephemeral");
+            assert_ne!(out.ct, [0u8; NOTE_CT_BYTES], "ct must be real ciphertext");
+            assert_ne!(out.out_ct, [0u8; NOTE_OUT_CT_BYTES], "out_ct must be real");
+        }
+    }
+
+    #[test]
+    fn consolidate_change_decrypts_to_self() {
+        // The change is encrypted to the wallet's own address, so `nk`
+        // recovers it (bonus recovery path if the journal is ever lost).
+        let st = funded_state();
+        let c = consolidate(&sk(), &st, FEE, &mut StdRng::seed_from_u64(7)).unwrap();
+        let out = &c.transfer.outputs[0];
+        let (opening, _memo) =
+            aegis_crypto::note_encryption::decrypt_note(sk().nk(), &out.epk, &out.ct, &out.note_cm)
+                .expect("own change decrypts with nk");
+        assert_eq!(opening.value, c.outputs[0].value);
     }
 
     #[test]
