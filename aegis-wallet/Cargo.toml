@@ -16,6 +16,10 @@ license.workspace = true
 [dependencies]
 aegis-crypto = { path = "../aegis-crypto" }
 aegis-spec   = { path = "../aegis-spec" }
+# Wire types + codecs only — NOT the node binary. The wallet decodes
+# blocks and builds transfers without linking the node's network stack
+# (the whole point of a standalone, key-isolated wallet).
+aegis-types  = { path = "../aegis-types" }
 
 ark-ec        = { workspace = true }
 ark-ff        = { workspace = true }
@@ -28,4 +32,22 @@ bech32      = "0.9"
 hex         = { workspace = true }
 rand        = { workspace = true }
 thiserror   = { workspace = true }
+tracing     = { workspace = true }
 clap        = { workspace = true, features = ["derive"] }
+
+# The node seam is its read-only HTTP API. Blocking on purpose — the
+# wallet is a simple CLI, not an async service (mirrors the node's own
+# `ergo_follow`/`seed` blocking-reqwest transport).
+reqwest    = { workspace = true, features = ["blocking"] }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+# Integration tests drive a REAL node + its loopback HTTP API (ApiServer,
+# Chain, SeedCore) — a dev-dependency only, so the shipped wallet never
+# links the node.
+aegis-node    = { path = "../aegis-node" }
+aegis-crypto  = { path = "../aegis-crypto" }
+aegis-types   = { path = "../aegis-types" }
+rand          = { workspace = true }
+num-bigint    = { workspace = true }
+ark-serialize = { workspace = true }

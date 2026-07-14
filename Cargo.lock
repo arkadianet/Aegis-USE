@@ -84,7 +84,9 @@ name = "aegis-wallet"
 version = "0.5.1"
 dependencies = [
  "aegis-crypto",
+ "aegis-node",
  "aegis-spec",
+ "aegis-types",
  "ark-ec",
  "ark-ff",
  "ark-secp256k1",
@@ -94,8 +96,12 @@ dependencies = [
  "clap",
  "ergo-crypto",
  "hex",
+ "num-bigint",
  "rand",
+ "reqwest",
+ "serde_json",
  "thiserror 2.0.18",
+ "tracing",
 ]
 
 [[package]]
