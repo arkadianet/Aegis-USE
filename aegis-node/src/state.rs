@@ -12,7 +12,7 @@ use std::collections::BTreeSet;
 
 use aegis_crypto::generators::EvenPoint;
 use aegis_crypto::note::{note_cm_bytes, note_cm_from_bytes};
-use aegis_crypto::tree::tree_root;
+use aegis_crypto::tree::IncrementalCmTree;
 use aegis_spec::{Amount, NetworkParams, NF_BYTES};
 use ergo_crypto::autolykos::common::blake2b256;
 
@@ -66,16 +66,38 @@ pub struct BlockUndo {
 }
 
 /// In-memory shielded consensus state (persistence: Phase 5).
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Equality is over the logical consensus state (nullifiers, pot,
+/// digest, leaves, root). `cm_tree` is a deterministic function of
+/// `cm_leaves` (a maintained cache, not independent state), so it is
+/// excluded from `PartialEq` — two states with equal `cm_leaves`
+/// necessarily have identical trees.
+#[derive(Debug, Clone)]
 pub struct ShieldedState {
     nullifiers: BTreeSet<[u8; NF_BYTES]>,
     pot: Amount,
     digest: [u8; 32],
-    /// Note-commitment leaves in insertion order; the Curve Tree is
-    /// rebuilt from this vector per block (O(n) debt — DEFERRED.md).
+    /// Note-commitment leaves in insertion order (source of truth for
+    /// equality and for rebuilding `cm_tree` on rollback).
     cm_leaves: Vec<EvenPoint>,
+    /// The commitment tree, maintained incrementally across `apply_block`
+    /// (append-only) — avoids the O(n) per-block rebuild. Kept in lockstep
+    /// with `cm_leaves`; `cm_root` is derived from its root.
+    cm_tree: IncrementalCmTree,
     cm_root: [u8; 32],
 }
+
+impl PartialEq for ShieldedState {
+    fn eq(&self, other: &Self) -> bool {
+        self.nullifiers == other.nullifiers
+            && self.pot == other.pot
+            && self.digest == other.digest
+            && self.cm_leaves == other.cm_leaves
+            && self.cm_root == other.cm_root
+    }
+}
+
+impl Eq for ShieldedState {}
 
 impl ShieldedState {
     pub fn new() -> Self {
@@ -84,6 +106,7 @@ impl ShieldedState {
             pot: 0,
             digest: EMPTY_NULLIFIER_DIGEST,
             cm_leaves: Vec::new(),
+            cm_tree: IncrementalCmTree::new(),
             cm_root: EMPTY_TREE_ROOT_PLACEHOLDER,
         }
     }
@@ -111,11 +134,10 @@ impl ShieldedState {
     /// The consensus **anchor** tree for proofs that spend against this
     /// state, or `None` when no notes exist yet (nothing to spend).
     pub fn anchor_tree(&self) -> Option<aegis_crypto::tree::AegisTree> {
-        if self.cm_leaves.is_empty() {
-            None
-        } else {
-            Some(aegis_crypto::tree::build_tree(&self.cm_leaves))
-        }
+        // Clone the incrementally-maintained tree (byte-identical to a
+        // fresh `build_tree(&cm_leaves)`, oracle-tested) — no O(n) root
+        // recompute.
+        self.cm_tree.tree().cloned()
     }
 
     pub fn contains(&self, nf: &[u8; NF_BYTES]) -> bool {
@@ -134,16 +156,25 @@ impl ShieldedState {
         &self.cm_leaves
     }
 
-    fn recompute_cm_root(&mut self) {
-        self.cm_root = if self.cm_leaves.is_empty() {
-            EMPTY_TREE_ROOT_PLACEHOLDER
-        } else {
-            let root = tree_root(&self.cm_leaves);
-            let mut preimage = Vec::with_capacity(CM_ROOT_DOMAIN.len() + 33);
-            preimage.extend_from_slice(CM_ROOT_DOMAIN);
-            preimage.extend_from_slice(&note_cm_bytes(&root));
-            blake2b256(&preimage)
+    /// Recompute `cm_root` from the maintained tree's current root
+    /// (O(1) in the leaf count — the tree is kept up to date by
+    /// [`Self::apply_block`]).
+    fn refresh_cm_root(&mut self) {
+        self.cm_root = match self.cm_tree.root() {
+            None => EMPTY_TREE_ROOT_PLACEHOLDER,
+            Some(root) => {
+                let mut preimage = Vec::with_capacity(CM_ROOT_DOMAIN.len() + 33);
+                preimage.extend_from_slice(CM_ROOT_DOMAIN);
+                preimage.extend_from_slice(&note_cm_bytes(&root));
+                blake2b256(&preimage)
+            }
         };
+    }
+
+    /// Restore `cm_tree` from `cm_leaves` after a truncation (rollback).
+    /// O(n), but rollback is the rare reorg path.
+    fn rebuild_cm_tree(&mut self) {
+        self.cm_tree = IncrementalCmTree::from_leaves(&self.cm_leaves);
     }
 
     /// Validate and apply one block's transfers. On error the state is
@@ -207,10 +238,14 @@ impl ShieldedState {
             }
         };
         // Commitment tree: append this block's leaves (outputs + any
-        // coinbase note), refresh root.
+        // coinbase note) incrementally, then refresh the root from the
+        // maintained tree (no O(n) rebuild).
         if !new_leaves.is_empty() {
+            for leaf in &new_leaves {
+                self.cm_tree.push(*leaf);
+            }
             self.cm_leaves.extend(new_leaves);
-            self.recompute_cm_root();
+            self.refresh_cm_root();
         }
         // Credit fees, then draw the coinbase (never below zero).
         self.pot = pot_after_fees - coinbase;
@@ -225,6 +260,9 @@ impl ShieldedState {
         self.pot = undo.prev_pot;
         self.digest = undo.prev_digest;
         self.cm_leaves.truncate(undo.prev_leaf_count);
+        // The vendored tree has no truncate; rebuild from the restored
+        // leaf prefix (rare reorg path). `prev_cm_root` is authoritative.
+        self.rebuild_cm_tree();
         self.cm_root = undo.prev_cm_root;
     }
 }
@@ -242,7 +280,8 @@ impl ShieldedState {
     pub(crate) fn seeded(leaves: Vec<EvenPoint>) -> Self {
         let mut st = ShieldedState::new();
         st.cm_leaves = leaves;
-        st.recompute_cm_root();
+        st.rebuild_cm_tree();
+        st.refresh_cm_root();
         st
     }
 }
@@ -403,6 +442,73 @@ mod tests {
             !st.contains(&[10u8; NF_BYTES]),
             "rolled-back nf still present"
         );
+    }
+
+    #[test]
+    fn multiblock_incremental_cm_root_matches_from_scratch_each_height() {
+        // The incrementally-maintained `cm_root` (append-per-block) must
+        // equal the from-scratch `tree_root(&all_cm_leaves)` hash at every
+        // height, and rollback must retrace the exact root sequence.
+        use aegis_crypto::note::{note_cm_bytes, note_cm_from_bytes};
+        use aegis_crypto::tree::tree_root;
+
+        let from_scratch_root = |leaves: &[EvenPoint]| -> [u8; 32] {
+            if leaves.is_empty() {
+                return EMPTY_TREE_ROOT_PLACEHOLDER;
+            }
+            let root = tree_root(leaves);
+            let mut pre = Vec::new();
+            pre.extend_from_slice(CM_ROOT_DOMAIN);
+            pre.extend_from_slice(&note_cm_bytes(&root));
+            blake2b256(&pre)
+        };
+
+        let mut st = ShieldedState::new();
+        let mut all_leaves: Vec<EvenPoint> = Vec::new();
+        let mut undos = Vec::new();
+        let mut roots_at_height = vec![st.cm_tree_root()];
+        let mut counter: u8 = 0;
+
+        for i in 0..12u8 {
+            // Vary the number of fee-paying transfers per block (0..=2).
+            let mut txs: Vec<ShieldedTransfer> = Vec::new();
+            for _ in 0..=(i % 3) {
+                let a = 2 * counter;
+                let b = 2 * counter + 1;
+                counter += 1;
+                txs.push(transfer_with_nfs(a, b));
+            }
+            let undo = st.apply_block(&txs, params(), RewardMode::DevStub).unwrap();
+            undos.push(undo);
+
+            // Mirror the consensus leaf order (each tx's outputs in order).
+            for tx in &txs {
+                for out in &tx.outputs {
+                    all_leaves.push(note_cm_from_bytes(&out.note_cm).unwrap());
+                }
+            }
+            assert_eq!(st.leaf_count(), all_leaves.len(), "height {}", i + 1);
+            assert_eq!(
+                st.cm_tree_root(),
+                from_scratch_root(&all_leaves),
+                "incremental cm_root diverged at height {}",
+                i + 1
+            );
+            roots_at_height.push(st.cm_tree_root());
+        }
+
+        // Roll the whole chain back; the root must retrace exactly and the
+        // incremental tree must be restored (anchor tree round-trips).
+        for i in (0..12).rev() {
+            st.rollback(undos.pop().unwrap());
+            assert_eq!(
+                st.cm_tree_root(),
+                roots_at_height[i],
+                "rollback root mismatch at height {i}"
+            );
+            assert_eq!(st.cm_tree_root(), from_scratch_root(st.cm_leaves()));
+        }
+        assert_eq!(st, ShieldedState::new());
     }
 
     // ----- error paths -----
