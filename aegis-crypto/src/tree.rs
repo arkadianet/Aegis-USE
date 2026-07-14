@@ -417,6 +417,35 @@ mod tests {
         }
     }
 
+    /// SLOW (`#[ignore]`d) — the one real-L (256) transition the fast tests
+    /// cover only structurally: at `L² = 65_536` leaves the first height-3
+    /// subtree fills and a SECOND is created. Directly oracles the incremental
+    /// tree against `from_set` byte-for-byte across that boundary. Run before
+    /// mainnet: `cargo test -p aegis-crypto -- --ignored real_params_second_subtree`.
+    #[test]
+    #[ignore = "slow: builds ~65_537-leaf real-L trees; run manually pre-mainnet"]
+    fn real_params_second_subtree_matches_from_set() {
+        let checkpoints = [65_535usize, 65_536, 65_537];
+        let max = *checkpoints.iter().max().unwrap();
+        let mut inc = IncrementalCmTree::new();
+        let mut leaves: Vec<EvenPoint> = Vec::with_capacity(max);
+        let mut next = 0;
+        for i in 0..max {
+            let lf = leaf(i as u64);
+            inc.push(lf);
+            leaves.push(lf);
+            if next < checkpoints.len() && leaves.len() == checkpoints[next] {
+                assert_eq!(
+                    root_bytes(&inc.root().unwrap()),
+                    root_bytes(&tree_root(&leaves)),
+                    "incremental root diverged from from_set at n={}",
+                    leaves.len()
+                );
+                next += 1;
+            }
+        }
+    }
+
     #[test]
     fn incremental_from_leaves_equals_pushed_sequence() {
         // Cold rebuild (`from_leaves`, used on rollback) must equal the
