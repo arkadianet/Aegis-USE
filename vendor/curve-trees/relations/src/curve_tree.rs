@@ -23,6 +23,7 @@ impl<P0: SWCurveConfig + Copy, P1: SWCurveConfig + Copy> SelRerandParameters<P0,
     }
 }
 
+#[derive(Clone)]
 pub enum CurveTree<
     const L: usize, // L is te branching factor, i.e. the number of children per branch
     const M: usize, // M the maximal batch size for which efficient parallel membership proofs are supported.
@@ -137,13 +138,270 @@ impl<
         }
     }
 
-    //todo add a function to add a single/several commitments
+    /// The number of leaves currently stored in the tree.
+    pub fn num_leaves(&self) -> usize {
+        match self {
+            Self::Even(ct) => ct.elements(),
+            Self::Odd(ct) => ct.elements(),
+        }
+    }
+
+    /// Append a single leaf commitment into the leftmost open position,
+    /// recomputing only the commitments on the root-to-leaf insertion
+    /// path (O(height · L) point operations) rather than rebuilding the
+    /// whole tree from scratch as [`Self::from_set`] does (O(n)).
+    ///
+    /// Consensus invariant (oracle-tested in `aegis-crypto::tree`): for a
+    /// tree of fixed even root height `h`, appending leaves one at a time
+    /// yields a tree byte-for-byte identical to
+    /// `from_set(&all_leaves_in_insertion_order, params, Some(h))`. The
+    /// per-node commitment is recomputed with the exact expression
+    /// [`CurveTreeNode::combine`] uses, so the root point is unchanged.
+    ///
+    /// Requires an even-rooted tree (Aegis pins an even depth) with room
+    /// for one more leaf; panics otherwise.
+    pub fn append(&mut self, leaf: Affine<P0>, parameters: &SelRerandParameters<P0, P1>) {
+        match self {
+            Self::Even(root) => {
+                let position = root.elements();
+                let capacity = L.pow(root.height() as u32);
+                assert!(position < capacity, "curve tree is full");
+                insert_into_even::<L, M, F0, F1, P0, P1>(root, leaf, position, parameters);
+            }
+            Self::Odd(_) => {
+                panic!("append requires an even-rooted curve tree (Aegis depth is even)")
+            }
+        }
+    }
 
     /// The height of a node is the number of edges to reach a leaf.
     pub fn height(&self) -> usize {
         match self {
             Self::Even(ct) => ct.height(),
             Self::Odd(ct) => ct.height(),
+        }
+    }
+}
+
+// ----- Incremental append (Aegis local modification) -----
+//
+// `insert_into_even`/`insert_into_odd` are mutually recursive across the
+// two curves. They are written as free functions (not methods on
+// `CurveTreeNode`) so the leaf type stays pinned to the even/root curve
+// `Affine<P0>` at every level — a single generic method would flip the
+// leaf type each time it recursed into the opposite curve. All node
+// commitments are recomputed with the exact expression `combine` uses.
+
+/// Recompute an even-node's `M` parent commitments from its (updated)
+/// children — identical to what `CurveTreeNode::combine` computes.
+fn recompute_even_commitment<
+    const L: usize,
+    const M: usize,
+    F0: PrimeField,
+    F1: PrimeField,
+    P0: SWCurveConfig<BaseField = F1, ScalarField = F0> + Copy,
+    P1: SWCurveConfig<BaseField = F0, ScalarField = F1> + Copy,
+>(
+    children: &Children<L, M, P0, P1>,
+    parameters: &SelRerandParameters<P0, P1>,
+) -> [Affine<P0>; M] {
+    let mut commitments = [Affine::<P0>::zero(); M];
+    for (tree_index, c) in commitments.iter_mut().enumerate() {
+        *c = parameters.even_parameters.commit(
+            &x_coordinates(children, &parameters.odd_parameters.delta, tree_index),
+            P0::ScalarField::zero(),
+            tree_index,
+        );
+    }
+    commitments
+}
+
+/// Recompute an odd-node's `M` parent commitments from its (updated)
+/// children — identical to what `CurveTreeNode::combine` computes.
+fn recompute_odd_commitment<
+    const L: usize,
+    const M: usize,
+    F0: PrimeField,
+    F1: PrimeField,
+    P0: SWCurveConfig<BaseField = F1, ScalarField = F0> + Copy,
+    P1: SWCurveConfig<BaseField = F0, ScalarField = F1> + Copy,
+>(
+    children: &Children<L, M, P1, P0>,
+    parameters: &SelRerandParameters<P0, P1>,
+) -> [Affine<P1>; M] {
+    let mut commitments = [Affine::<P1>::zero(); M];
+    for (tree_index, c) in commitments.iter_mut().enumerate() {
+        *c = parameters.odd_parameters.commit(
+            &x_coordinates(children, &parameters.even_parameters.delta, tree_index),
+            P1::ScalarField::zero(),
+            tree_index,
+        );
+    }
+    commitments
+}
+
+/// A fresh even subtree of `height` (even) holding only `leaf` on its
+/// leftmost path. Structurally identical to the subtree `from_set`
+/// (+`increase_height`) builds for a single leaf at that height.
+fn new_singleton_even<
+    const L: usize,
+    const M: usize,
+    F0: PrimeField,
+    F1: PrimeField,
+    P0: SWCurveConfig<BaseField = F1, ScalarField = F0> + Copy,
+    P1: SWCurveConfig<BaseField = F0, ScalarField = F1> + Copy,
+>(
+    leaf: Affine<P0>,
+    height: usize,
+    parameters: &SelRerandParameters<P0, P1>,
+) -> CurveTreeNode<L, M, P0, P1> {
+    if height == 0 {
+        CurveTreeNode::Leaf(leaf)
+    } else {
+        let child = new_singleton_odd::<L, M, F0, F1, P0, P1>(leaf, height - 1, parameters);
+        CurveTreeNode::combine(
+            vec![child],
+            &parameters.even_parameters,
+            &parameters.odd_parameters.delta,
+        )
+    }
+}
+
+/// A fresh odd subtree of `height` (odd) holding only `leaf` on its
+/// leftmost path.
+fn new_singleton_odd<
+    const L: usize,
+    const M: usize,
+    F0: PrimeField,
+    F1: PrimeField,
+    P0: SWCurveConfig<BaseField = F1, ScalarField = F0> + Copy,
+    P1: SWCurveConfig<BaseField = F0, ScalarField = F1> + Copy,
+>(
+    leaf: Affine<P0>,
+    height: usize,
+    parameters: &SelRerandParameters<P0, P1>,
+) -> CurveTreeNode<L, M, P1, P0> {
+    let child = new_singleton_even::<L, M, F0, F1, P0, P1>(leaf, height - 1, parameters);
+    CurveTreeNode::combine(
+        vec![child],
+        &parameters.odd_parameters,
+        &parameters.even_parameters.delta,
+    )
+}
+
+/// Insert `leaf` at `position` within an even Branch node, then
+/// recompute this node's commitment. `position < L^height`.
+fn insert_into_even<
+    const L: usize,
+    const M: usize,
+    F0: PrimeField,
+    F1: PrimeField,
+    P0: SWCurveConfig<BaseField = F1, ScalarField = F0> + Copy,
+    P1: SWCurveConfig<BaseField = F0, ScalarField = F1> + Copy,
+>(
+    node: &mut CurveTreeNode<L, M, P0, P1>,
+    leaf: Affine<P0>,
+    position: usize,
+    parameters: &SelRerandParameters<P0, P1>,
+) {
+    match node {
+        CurveTreeNode::Leaf(_) => panic!("cannot append into a leaf"),
+        CurveTreeNode::Branch {
+            parent_commitment,
+            children,
+            height,
+            elements,
+        } => {
+            let child_capacity = L.pow((*height - 1) as u32);
+            let child_index = position / child_capacity;
+            let position_in_child = position % child_capacity;
+            match &mut children[child_index] {
+                None => {
+                    debug_assert_eq!(
+                        position_in_child, 0,
+                        "a freshly created subtree must start at its leftmost leaf"
+                    );
+                    children[child_index] = Some(new_singleton_odd::<L, M, F0, F1, P0, P1>(
+                        leaf,
+                        *height - 1,
+                        parameters,
+                    ));
+                }
+                Some(child) => {
+                    insert_into_odd::<L, M, F0, F1, P0, P1>(
+                        child,
+                        leaf,
+                        position_in_child,
+                        parameters,
+                    );
+                }
+            }
+            *elements += 1;
+            *parent_commitment = recompute_even_commitment(&**children, parameters);
+        }
+    }
+}
+
+/// Insert `leaf` at `position` within an odd Branch node, then recompute
+/// this node's commitment. At height 1 the children are leaves and are
+/// placed directly.
+fn insert_into_odd<
+    const L: usize,
+    const M: usize,
+    F0: PrimeField,
+    F1: PrimeField,
+    P0: SWCurveConfig<BaseField = F1, ScalarField = F0> + Copy,
+    P1: SWCurveConfig<BaseField = F0, ScalarField = F1> + Copy,
+>(
+    node: &mut CurveTreeNode<L, M, P1, P0>,
+    leaf: Affine<P0>,
+    position: usize,
+    parameters: &SelRerandParameters<P0, P1>,
+) {
+    match node {
+        CurveTreeNode::Leaf(_) => panic!("cannot append into a leaf"),
+        CurveTreeNode::Branch {
+            parent_commitment,
+            children,
+            height,
+            elements,
+        } => {
+            if *height == 1 {
+                // Children are leaves; a fresh append always lands on an
+                // empty slot (left-to-right fill).
+                debug_assert!(
+                    children[position].is_none(),
+                    "append must not overwrite an existing leaf"
+                );
+                children[position] = Some(CurveTreeNode::Leaf(leaf));
+            } else {
+                let child_capacity = L.pow((*height - 1) as u32);
+                let child_index = position / child_capacity;
+                let position_in_child = position % child_capacity;
+                match &mut children[child_index] {
+                    None => {
+                        debug_assert_eq!(
+                            position_in_child, 0,
+                            "a freshly created subtree must start at its leftmost leaf"
+                        );
+                        children[child_index] = Some(new_singleton_even::<L, M, F0, F1, P0, P1>(
+                            leaf,
+                            *height - 1,
+                            parameters,
+                        ));
+                    }
+                    Some(child) => {
+                        insert_into_even::<L, M, F0, F1, P0, P1>(
+                            child,
+                            leaf,
+                            position_in_child,
+                            parameters,
+                        );
+                    }
+                }
+            }
+            *elements += 1;
+            *parent_commitment = recompute_odd_commitment(&**children, parameters);
         }
     }
 }

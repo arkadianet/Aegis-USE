@@ -520,6 +520,45 @@ mod tests {
         verify_transfer(&fx.tree, &proof, FEE).expect("valid proof must verify");
     }
 
+    #[test]
+    fn transfer_verifies_against_incrementally_built_tree() {
+        // Proof parity: a tree built by incremental append is byte-for-byte
+        // the same tree as `build_tree`, so a proof produced against one
+        // verifies against the other. Build the fixture leaves both ways,
+        // then cross-prove / cross-verify.
+        use crate::tree::{root_point, IncrementalCmTree};
+        let in_0 = opening(1_000, 0x21, 0);
+        let in_1 = opening(500, 0x22, 1);
+        let extra = opening(77, 0x23, 2);
+        let leaves = vec![leaf_of(&in_0), leaf_of(&in_1), leaf_of(&extra)];
+        let inputs = [in_0, in_1];
+
+        let from_set = build_tree(&leaves);
+        let mut inc = IncrementalCmTree::new();
+        for l in &leaves {
+            inc.push(*l);
+        }
+        let inc_tree = inc.tree().expect("non-empty");
+        assert_eq!(
+            root_point(&from_set),
+            root_point(inc_tree),
+            "incremental root must equal from_set root"
+        );
+
+        let outs = outputs_totalling(1_500 - FEE);
+        // Prove against the incremental tree, verify against it and against
+        // from_set — both must accept.
+        let proof = prove_transfer(inc_tree, &inputs, &outs, FEE, &mut rng())
+            .expect("prove against incremental tree");
+        verify_transfer(inc_tree, &proof, FEE).expect("verify against incremental tree");
+        verify_transfer(&from_set, &proof, FEE).expect("verify against from_set tree");
+
+        // And the reverse: prove against from_set, verify against incremental.
+        let proof2 = prove_transfer(&from_set, &inputs, &outs, FEE, &mut rng())
+            .expect("prove against from_set tree");
+        verify_transfer(inc_tree, &proof2, FEE).expect("cross-verify against incremental tree");
+    }
+
     // ----- round-trips -----
 
     #[test]
