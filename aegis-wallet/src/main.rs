@@ -15,8 +15,8 @@ use std::path::{Path, PathBuf};
 
 use aegis_spec::Network;
 use aegis_wallet::{
-    consolidate, Address, NodeClient, SelfNote, SpendingKey, TrackedNote, WalletState, HRP_MAINNET,
-    HRP_TESTNET,
+    consolidate, pay, Address, NodeClient, SelfNote, SpendingKey, TrackedNote, WalletState,
+    HRP_MAINNET, HRP_TESTNET,
 };
 use clap::{Parser, Subcommand};
 
@@ -80,6 +80,23 @@ enum Cmd {
         #[arg(long)]
         fee: Option<u64>,
     },
+    /// Pay another party: build a transfer paying `amount` to a Bech32m
+    /// address (change returns to this wallet) and submit it to the node.
+    Pay {
+        #[arg(long, default_value = "wallet.json")]
+        wallet: PathBuf,
+        #[arg(long)]
+        node: String,
+        /// Recipient's Bech32m address (`use1…` / `tuse1…`).
+        #[arg(long)]
+        to: String,
+        /// Amount to pay in base units.
+        #[arg(long)]
+        amount: u64,
+        /// Fee override in base units (default: the network `sc_tx_fee`).
+        #[arg(long)]
+        fee: Option<u64>,
+    },
 }
 
 fn main() {
@@ -97,6 +114,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         Cmd::Scan { wallet, node } => cmd_scan(&wallet, &node),
         Cmd::Balance { wallet } => cmd_balance(&wallet),
         Cmd::Consolidate { wallet, node, fee } => cmd_consolidate(&wallet, &node, fee),
+        Cmd::Pay {
+            wallet,
+            node,
+            to,
+            amount,
+            fee,
+        } => cmd_pay(&wallet, &node, &to, amount, fee),
     }
 }
 
@@ -142,6 +166,10 @@ fn cmd_scan(path: &Path, node: &str) -> Result<(), Box<dyn std::error::Error>> {
         file.state.notes().len()
     );
     println!("spent:    {}", report.notes_spent);
+    println!(
+        "received: {} notes from other parties",
+        report.notes_received
+    );
     println!("balance:  {} base units", report.balance);
     Ok(())
 }
@@ -183,6 +211,45 @@ fn cmd_consolidate(
     );
     println!("nullifiers spent:");
     for nf in &consolidation.nullifiers {
+        println!("  {}", hex::encode(nf));
+    }
+    println!("confirm with: aegis-wallet scan (once mined), or GET /aegis/v1/nullifier/<hex>");
+    Ok(())
+}
+
+fn cmd_pay(
+    path: &Path,
+    node: &str,
+    to: &str,
+    amount: u64,
+    fee: Option<u64>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut file = WalletFile::load(path)?;
+    let client = NodeClient::new(node)?;
+    // Refresh first so leaf indices, spent status, and received notes are
+    // current before selecting inputs.
+    file.state.scan(&file.sk, &client)?;
+    let (_, recipient) = Address::decode(to)?;
+    let fee = fee.unwrap_or_else(|| file.network.params().sc_tx_fee);
+
+    let mut rng = rand::thread_rng();
+    let payment = pay(&file.sk, &file.state, recipient, amount, fee, &mut rng)?;
+    let outcome = client.submit(&payment.transfer)?;
+    payment.commit(&mut file.state);
+    file.save(path)?;
+
+    println!(
+        "submitted transfer {} ({})",
+        hex::encode(outcome.id),
+        outcome.admitted
+    );
+    println!("paid {amount} base units to {to}");
+    println!(
+        "change note #{} = {} base units",
+        payment.change.index, payment.change.value,
+    );
+    println!("nullifiers spent:");
+    for nf in &payment.nullifiers {
         println!("  {}", hex::encode(nf));
     }
     println!("confirm with: aegis-wallet scan (once mined), or GET /aegis/v1/nullifier/<hex>");

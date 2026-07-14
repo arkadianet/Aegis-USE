@@ -3,10 +3,10 @@
 //! The wallet rebuilds the **same** consensus Curve Tree the node does,
 //! from the same note-commitment leaves in the same order, so it can
 //! produce membership witnesses for its own notes (`wallet-design.md`
-//! §4). Slice 2 tracks only SELF-owned notes (see [`crate::notes`]); the
-//! journal of `(value, index)` records is the wallet's, and scanning
-//! *recognizes* those notes among the chain's leaves by recomputing their
-//! commitments — no ciphertext, since note encryption is held (slice 3).
+//! §4). Self-owned notes (see [`crate::notes`]) are journalled as
+//! `(value, index)` records and *recognized* among the chain's leaves by
+//! recomputing their commitments; notes another party sent are detected by
+//! trial-decrypting each output's ciphertext with `nk` (slice 3, [`scan`]).
 //!
 //! ## Leaf order (must match `aegis-node::state::ShieldedState`)
 //! Per block, in canonical height order: each transfer's two outputs
@@ -17,18 +17,19 @@
 //!
 //! [`scan`]: WalletState::scan
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use aegis_crypto::generators::EvenPoint;
 use aegis_crypto::note::{note_cm_bytes, note_cm_from_bytes, NOTE_CM_BYTES};
 use aegis_crypto::nullifier::NF_BYTES;
+use aegis_crypto::spend::NoteOpening;
 use aegis_crypto::tree::{build_tree, tree_root, AegisTree};
-use aegis_types::Block;
+use aegis_types::{Block, ShieldedOutput};
 use ergo_crypto::autolykos::common::blake2b256;
 
 use crate::client::{ClientError, NodeClient};
 use crate::keys::SpendingKey;
-use crate::notes::SelfNote;
+use crate::notes::{detect_received, ReceivedNote, SelfNote};
 
 // Header commitment-tree-root construction, mirrored from
 // `aegis-node::state` (consensus.md §5a) so the wallet can verify its
@@ -96,14 +97,40 @@ pub struct ScanReport {
     pub leaf_count: usize,
     pub notes_resolved: usize,
     pub notes_spent: usize,
+    /// Notes another party sent this wallet, detected by trial-decryption.
+    pub notes_received: usize,
     pub balance: u64,
 }
 
-/// The wallet's reconstructed view: its note journal plus the leaf vector
-/// (hence the anchor tree) from the last scan.
+/// How to mark a consumed input spent locally after a submit is accepted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpentRef {
+    /// A self-note, addressed by its derivation index.
+    SelfIndex(u64),
+    /// A received note, addressed by its (stable) leaf position.
+    ReceivedLeaf(usize),
+}
+
+/// A resolved, spendable input ready to feed the spend prover: its value,
+/// the [`NoteOpening`] to prove against, the nullifier it will reveal, and
+/// the reference to mark it spent afterwards. Unifies self-notes and
+/// received notes so a transfer can spend either source. (No `Debug`:
+/// [`NoteOpening`] carries the spend key `nk` and is deliberately not
+/// printable.)
+pub struct SpendableInput {
+    pub value: u64,
+    pub opening: NoteOpening,
+    pub nullifier: [u8; NF_BYTES],
+    pub spent_ref: SpentRef,
+}
+
+/// The wallet's reconstructed view: its self-note journal, the received
+/// notes detected on the last scan, plus the leaf vector (hence the anchor
+/// tree) from that scan.
 #[derive(Debug, Default)]
 pub struct WalletState {
     notes: Vec<TrackedNote>,
+    received: Vec<ReceivedNote>,
     next_index: u64,
     leaves: Vec<EvenPoint>,
     scanned_height: u64,
@@ -122,6 +149,9 @@ impl WalletState {
     pub fn from_parts(notes: Vec<TrackedNote>, next_index: u64, scanned_height: u64) -> Self {
         WalletState {
             notes,
+            // Received notes are not persisted: they re-derive from the
+            // chain's ciphertexts on the next scan (no `sk`+index shortcut).
+            received: Vec::new(),
             next_index,
             leaves: Vec::new(),
             scanned_height,
@@ -170,13 +200,27 @@ impl WalletState {
         self.scanned_height
     }
 
-    /// Sum of confirmed, unspent notes (the private, local balance).
+    /// Sum of confirmed, unspent notes — self-owned plus received (the
+    /// private, local balance).
     pub fn balance(&self) -> u64 {
-        self.notes
+        let own: u64 = self
+            .notes
             .iter()
             .filter(|t| t.is_spendable())
             .map(|t| t.note.value)
-            .sum()
+            .sum();
+        let received: u64 = self
+            .received
+            .iter()
+            .filter(|r| !r.spent)
+            .map(|r| r.value())
+            .sum();
+        own + received
+    }
+
+    /// Received notes detected by the last scan (read-only).
+    pub fn received(&self) -> &[ReceivedNote] {
+        &self.received
     }
 
     /// The anchor Curve Tree over the scanned leaves, or `None` if no
@@ -216,6 +260,47 @@ impl WalletState {
         }
     }
 
+    /// Locally mark a consumed input spent by its [`SpentRef`] — the
+    /// unified counterpart to [`Self::mark_spent`] for either note source.
+    pub fn mark_spent_input(&mut self, spent_ref: SpentRef) {
+        match spent_ref {
+            SpentRef::SelfIndex(index) => self.mark_spent(index),
+            SpentRef::ReceivedLeaf(leaf) => {
+                if let Some(r) = self.received.iter_mut().find(|r| r.leaf_index == leaf) {
+                    r.spent = true;
+                }
+            }
+        }
+    }
+
+    /// All spendable inputs — self-owned and received — resolved into
+    /// prover-ready [`SpendableInput`]s, largest value first (so a
+    /// zero-value reserve note naturally sorts last as filler). This is the
+    /// selection surface for a send-to-another-party transfer, which may
+    /// spend either note source.
+    pub fn spendable_inputs(&self, sk: &SpendingKey) -> Vec<SpendableInput> {
+        let mut v: Vec<SpendableInput> = Vec::new();
+        for t in self.notes.iter().filter(|t| t.is_spendable()) {
+            let leaf = t.leaf_index.expect("is_spendable ⇒ resolved leaf");
+            v.push(SpendableInput {
+                value: t.note.value,
+                opening: t.note.opening(sk, leaf),
+                nullifier: t.note.nullifier(sk),
+                spent_ref: SpentRef::SelfIndex(t.note.index),
+            });
+        }
+        for r in self.received.iter().filter(|r| !r.spent) {
+            v.push(SpendableInput {
+                value: r.value(),
+                opening: r.note_opening(sk),
+                nullifier: r.nullifier(sk),
+                spent_ref: SpentRef::ReceivedLeaf(r.leaf_index),
+            });
+        }
+        v.sort_by_key(|i| std::cmp::Reverse(i.value));
+        v
+    }
+
     /// Rebuild the note-commitment tree from the node's blocks and update
     /// every tracked note's position + spent status.
     ///
@@ -229,11 +314,12 @@ impl WalletState {
 
         let mut leaves: Vec<EvenPoint> = Vec::new();
         let mut nullifiers: BTreeSet<[u8; NF_BYTES]> = BTreeSet::new();
+        let mut outputs: Vec<(usize, ShieldedOutput)> = Vec::new();
         for height in 1..=target {
             let Some(block) = client.block_at(height)? else {
                 continue; // gap below tip — nothing to add
             };
-            collect_block(&block, height, &mut leaves, &mut nullifiers)?;
+            collect_block(&block, height, &mut leaves, &mut nullifiers, &mut outputs)?;
         }
 
         // Integrity: the wallet's rebuild must match the node's published
@@ -270,6 +356,28 @@ impl WalletState {
             }
         }
 
+        // Detect notes another party sent us: trial-decrypt each output's
+        // `ct` with `nk`. Skip our own outputs (change / self-pay), which
+        // are already tracked by re-derivation above — otherwise a
+        // change-to-self note would be double-counted as a receipt.
+        let self_cms: HashSet<[u8; NOTE_CM_BYTES]> = self
+            .notes
+            .iter()
+            .map(|t| note_cm_bytes(&t.note.commitment(sk)))
+            .collect();
+        let mut received: Vec<ReceivedNote> = Vec::new();
+        for (leaf_index, out) in &outputs {
+            if self_cms.contains(&out.note_cm) {
+                continue;
+            }
+            if let Some(mut note) = detect_received(sk, out, *leaf_index) {
+                note.spent = nullifiers.contains(&note.nullifier(sk));
+                received.push(note);
+            }
+        }
+        let notes_received = received.len();
+        self.received = received;
+
         self.leaves = leaves;
         self.scanned_height = target;
         Ok(ScanReport {
@@ -277,24 +385,30 @@ impl WalletState {
             leaf_count: self.leaves.len(),
             notes_resolved,
             notes_spent,
+            notes_received,
             balance: self.balance(),
         })
     }
 }
 
-/// Append one block's leaves (transfer outputs, then coinbase note) and
-/// nullifiers, mirroring `aegis-node::state::ShieldedState::apply_block`.
+/// Append one block's leaves (transfer outputs, then coinbase note),
+/// nullifiers, and the transfer outputs paired with their leaf positions
+/// (for receipt detection), mirroring
+/// `aegis-node::state::ShieldedState::apply_block`.
 fn collect_block(
     block: &Block,
     height: u64,
     leaves: &mut Vec<EvenPoint>,
     nullifiers: &mut BTreeSet<[u8; NF_BYTES]>,
+    outputs: &mut Vec<(usize, ShieldedOutput)>,
 ) -> Result<(), ScanError> {
     for tx in &block.body.transfers {
         for out in &tx.outputs {
             let point = note_cm_from_bytes(&out.note_cm)
                 .ok_or(ScanError::InvalidNoteCommitment { height })?;
+            let leaf_index = leaves.len();
             leaves.push(point);
+            outputs.push((leaf_index, out.clone()));
         }
         for nf in &tx.nullifiers {
             nullifiers.insert(*nf);
@@ -322,6 +436,12 @@ impl WalletState {
                 t.leaf_index = Some(*leaf_index);
             }
         }
+    }
+
+    /// Test-only: install detected received notes directly (what the
+    /// detection pass of [`Self::scan`] produces, without a node).
+    pub(crate) fn install_received_for_test(&mut self, received: Vec<ReceivedNote>) {
+        self.received = received;
     }
 }
 

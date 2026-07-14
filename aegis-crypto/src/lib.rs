@@ -11,6 +11,7 @@ pub mod h2c;
 pub mod keynote;
 pub mod mint;
 pub mod note;
+pub mod note_encryption;
 pub mod nullifier;
 pub mod payment;
 pub mod poseidon;

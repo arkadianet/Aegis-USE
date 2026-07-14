@@ -17,11 +17,14 @@
 
 use aegis_crypto::generators::EvenPoint;
 use aegis_crypto::h2c::hash_to_field_one;
-use aegis_crypto::note::EvenScalar;
+use aegis_crypto::note::{note_cm_bytes, EvenScalar};
+use aegis_crypto::note_encryption::{decrypt_note, MEMO_BYTES};
 use aegis_crypto::nullifier::{poseidon_nullifier, OddScalar, NF_BYTES};
+use aegis_crypto::payment::{recipient_note_opening, PaymentOpening};
 use aegis_crypto::spend::{
     consensus_note_commitment, consensus_note_tag, NoteOpening, TransferOutput,
 };
+use aegis_types::ShieldedOutput;
 
 use crate::keys::SpendingKey;
 
@@ -109,6 +112,83 @@ impl SelfNote {
             blinding: self.blinding(sk),
         }
     }
+
+    /// The [`PaymentOpening`] of this self-note — what a sender would
+    /// encrypt into an output's `ct` so a scanner can recover it. Used to
+    /// encrypt change-to-self (uniformity: every output carries a real
+    /// ciphertext, not zero-fill).
+    pub fn payment_opening(&self, sk: &SpendingKey) -> PaymentOpening {
+        PaymentOpening {
+            value: self.value,
+            blinding: self.blinding(sk),
+            rho: self.rho(sk),
+            r_key: self.r_key(sk),
+        }
+    }
+}
+
+/// A note another party sent to this wallet, recovered by trial-decrypting
+/// an on-chain output's `ct` with the wallet's spend key `nk` (§5). Unlike
+/// a [`SelfNote`] its secrets are NOT re-derivable from `sk`+index — they
+/// arrive inside the ciphertext — so the recovered [`PaymentOpening`] and
+/// the discovered `leaf_index` are the note's whole description.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReceivedNote {
+    /// The opening recovered from the ciphertext (value + hiding secrets).
+    pub opening: PaymentOpening,
+    /// The fixed-size memo carried alongside the opening.
+    pub memo: [u8; MEMO_BYTES],
+    /// Position of this note's commitment in the consensus leaf vector.
+    pub leaf_index: usize,
+    /// Whether the note's nullifier has appeared on-chain (spent).
+    pub spent: bool,
+}
+
+impl ReceivedNote {
+    /// The note's value in USE base units.
+    pub fn value(&self) -> u64 {
+        self.opening.value
+    }
+
+    /// The consensus nullifier this note reveals when spent, under the
+    /// receiving wallet's `nk` — the marker the wallet watches for.
+    pub fn nullifier(&self, sk: &SpendingKey) -> [u8; NF_BYTES] {
+        poseidon_nullifier(sk.nk(), self.opening.rho)
+    }
+
+    /// Everything [`aegis_crypto::spend::prove_transfer`] needs to consume
+    /// this received note: the opening bound to the wallet's own `nk`.
+    pub fn note_opening(&self, sk: &SpendingKey) -> NoteOpening {
+        recipient_note_opening(sk.nk(), &self.opening, self.leaf_index)
+    }
+}
+
+/// Trial-decrypt one on-chain `output` at `leaf_index` with the wallet's
+/// `nk`. On a valid AEAD tag, the recovered opening is accepted only if it
+/// reconstructs to the output's committed `note_cm` — i.e. the sender built
+/// a note actually payable to `nk·B`, not merely a ciphertext this wallet
+/// can open. Returns `None` for a foreign note (the common case; the
+/// Poly1305 tag fails cheaply) or a ciphertext whose opening does not match
+/// its commitment.
+pub fn detect_received(
+    sk: &SpendingKey,
+    output: &ShieldedOutput,
+    leaf_index: usize,
+) -> Option<ReceivedNote> {
+    let (opening, memo) = decrypt_note(sk.nk(), &output.epk, &output.ct, &output.note_cm)?;
+    // Bind the opening to the committed leaf: only an opening that
+    // reconstructs the on-chain note_cm is a spendable note we own.
+    let tag = consensus_note_tag(sk.nk(), opening.rho, opening.r_key);
+    let cm = consensus_note_commitment(opening.value, tag, opening.blinding);
+    if note_cm_bytes(&cm) != output.note_cm {
+        return None;
+    }
+    Some(ReceivedNote {
+        opening,
+        memo,
+        leaf_index,
+        spent: false,
+    })
 }
 
 #[cfg(test)]
