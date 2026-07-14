@@ -89,6 +89,13 @@ pub enum ContractsError {
         #[source]
         source: ergo_compiler::CompileError,
     },
+    /// The injected attester federation has a duplicated public key. The
+    /// `atLeast` k-of-n predicate has no dedup, so a repeated key lets one
+    /// secret satisfy multiple slots and collapses the threshold. Deploy
+    /// keys MUST be distinct — this is caught here because the ErgoScript
+    /// cannot enforce it (S1c review, finding D2).
+    #[error("SideChainState: attester federation has a duplicate public key")]
+    DuplicateAttesterKey,
 }
 
 // ── deploy constants ─────────────────────────────────────────────────────────
@@ -307,6 +314,16 @@ pub fn side_chain_state(
     network: NetworkPrefix,
 ) -> Result<CompiledContract, ContractsError> {
     const NAME: &str = "SideChainState";
+    // The `atLeast` predicate does not dedup its children, so a duplicated
+    // attester key would silently collapse the k-of-n threshold (one secret
+    // fills two slots). The ErgoScript cannot check this — reject it here.
+    if let Some(pks) = &consts.attester_pks {
+        for i in 0..pks.len() {
+            if pks[i + 1..].contains(&pks[i]) {
+                return Err(ContractsError::DuplicateAttesterKey);
+            }
+        }
+    }
     let src = SIDE_CHAIN_STATE_ES.to_owned();
     let mut src = inject(
         src,

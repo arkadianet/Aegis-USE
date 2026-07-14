@@ -166,10 +166,37 @@ fn sidechain_state_injects_a_real_attester_federation() {
     let injected = side_chain_state(&consts, net).unwrap();
     let placeholder = side_chain_state(&ScriptConstants::placeholder(), net).unwrap();
     assert!(!injected.tree_bytes.is_empty());
-    assert_ne!(
-        injected.tree_bytes, placeholder.tree_bytes,
-        "real attester keys must be baked into the tree"
-    );
+    assert_ne!(injected.tree_bytes, placeholder.tree_bytes);
+    // Each of the three keys is actually present in the compiled tree — not
+    // just "the tree changed" (which one injected key would also satisfy).
+    for pk in &pks {
+        assert!(
+            injected.tree_bytes.windows(33).any(|w| w == pk),
+            "an attester pubkey is missing from the compiled tree"
+        );
+    }
+}
+
+/// The harness rejects a duplicated attester key (S1c review D2): `atLeast`
+/// has no dedup, so a repeated key would collapse the k-of-n threshold.
+#[test]
+fn sidechain_state_rejects_duplicate_attester_keys() {
+    use aegis_attest::AttesterKey;
+    let pk = |seed: u8| {
+        AttesterKey::from_secret_bytes(&[seed; 32])
+            .unwrap()
+            .public()
+            .to_bytes()
+    };
+    let consts = ScriptConstants {
+        sidechain_state_nft: Some(blake2b256(b"nft")),
+        attester_pks: Some([pk(1), pk(2), pk(1)]), // #1 duplicated
+        ..ScriptConstants::placeholder()
+    };
+    assert!(matches!(
+        side_chain_state(&consts, NetworkPrefix::Testnet),
+        Err(ContractsError::DuplicateAttesterKey)
+    ));
 }
 
 /// `derive_sibling_hashes` fills exactly the three vault-pinned hash

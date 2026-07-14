@@ -97,8 +97,46 @@ Aegis consensus.
   authority predicate (the sum-accounting + tree-transition review carries
   over unchanged; only the sigma proposition is new).
 
+## Red-team review (2026-07-15) — VERDICT: SOUND
+
+An adversarial review verified against ground truth (the consensus
+interpreter's `at_least_reduce`, not the diff's own comments) and found
+**no contract bug**:
+
+- `atLeast(2, Coll(dlog1..3))` genuinely reduces to a `Cthreshold{k:2}` that
+  requires ≥2 of 3 — confirmed in `ergo-sigma`.
+- The non-authority predicates are **byte-identical** to `main` (comment-
+  stripped diff) — zero regression.
+- Single spend path, no alternate tip-advance; the payout side still binds
+  the singleton by NFT (`UnlockIntent` untouched is sufficient).
+- Injection order + the 209→225 pin are correct; trust-model claims honest.
+
+### Deploy-ceremony gates (the ErgoScript cannot enforce these — the deploy MUST)
+
+- **D1 — threshold bound.** `atLeast` treats `k ≤ 0` as *trivially true*
+  (anyone spends) and `k > n` as *unsatisfiable* (box bricked). `ATTEST_K`
+  is inlined at `2` here (safe), but any re-author MUST assert
+  `1 ≤ ATTEST_K ≤ n`, and for real security `k ≥ ⌊n/2⌋+1`.
+- **D2 — distinct keys.** `atLeast` does not dedup; a duplicated key lets one
+  secret fill multiple slots and collapse the threshold. **Now enforced in
+  the harness** (`side_chain_state` returns `DuplicateAttesterKey`; tested),
+  but the deploy must still inject keys that are on-curve *and*
+  independently held.
+- **D3 — regenerate parity vectors.** The 225-byte pin is a self-measurement;
+  `SideChainState` has no on-chain oracle until deployed. Regenerate peg
+  parity vectors against a fresh testnet `SideChainState` before value.
+
+### Tracked (do not lose)
+
+- **P2-b:** `UnlockIntent.es` lines 28–29 still say the burn set is
+  "TIP_PK-posted"; after S1c it is k-of-n-posted. The **file** stays
+  untouched on purpose (editing changes its tree hash — chain-id-breaking);
+  sweep the comment at the next `UnlockIntent` re-cut.
+
 ## Gate
 
-Present for review. External-cryptographer sign-off before real value is
-unchanged (the value gate). No merge to `main`, no redeploy, without
-operator approval.
+The red-team review stands in for design sign-off (operator delegated it).
+The **value gate is unchanged**: external-cryptographer sign-off before any
+real USE, and the deploy prerequisites above (real-key injection, fresh
+testnet `SideChainState` + parity vectors) before any redeploy. Testnet
+re-cut is free.
