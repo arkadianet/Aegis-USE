@@ -88,12 +88,16 @@ tx, query chain/state/peg), a mempool to accept + order transfers, the follower
 running continuously in the main loop, and the peg verifier wired to `Chain`.
 *(medium)*
 
-### M4 — Wallet + keys
+### M4 — Wallet + keys *(designed — [`wallet-design.md`](dev-docs/sidechain/wallet-design.md))*
 Make *send / receive / verify a payment* real: the split key hierarchy
 (`ak`/`nk`/`ivk`/`ovk`), note encryption (ChaCha20-Poly1305), incoming-viewing-key
 scanning, diversified addresses, and payment disclosures (architecture §6). This
 is what lets a recipient confirm "I received 10 USE" and a sender prove it.
-*(medium-large)*
+**Architecture decided: a standalone `aegis-wallet` binary, never linked into the
+node** (spending keys must never sit in a network-exposed process); it's a client
+of the node's read-only HTTP API (the M3/M5 seam). Slice 1 (keys + diversified
+addresses) is freeze-hold-safe and hybrid-independent; note-encryption + proving
+(slices 3–5) are held. *(medium-large)*
 
 ### M5 — Indexer + explorer ✅ DONE
 A **peg + activity + merge-mining dashboard** — the only things a private chain
