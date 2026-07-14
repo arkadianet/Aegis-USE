@@ -15,8 +15,8 @@ use std::path::{Path, PathBuf};
 
 use aegis_spec::Network;
 use aegis_wallet::{
-    consolidate, Address, Diversifier, NodeClient, SelfNote, SpendingKey, TrackedNote, WalletState,
-    HRP_MAINNET, HRP_TESTNET,
+    consolidate, Address, NodeClient, SelfNote, SpendingKey, TrackedNote, WalletState, HRP_MAINNET,
+    HRP_TESTNET,
 };
 use clap::{Parser, Subcommand};
 
@@ -42,7 +42,7 @@ enum Cmd {
         #[arg(long, default_value = "test")]
         network: String,
     },
-    /// Derive a fresh diversified address from a spending key (32-byte hex).
+    /// Print the wallet's address (`pk = nk·B`) for a spending key (32-byte hex).
     Address {
         #[arg(long)]
         sk: String,
@@ -106,7 +106,7 @@ fn cmd_init(path: &Path, network: &str) -> Result<(), Box<dyn std::error::Error>
     let sk = SpendingKey::random(&mut rng);
     let file = WalletFile::new(sk.clone(), net);
     file.save(path)?;
-    let addr = Address::derive(&sk.incoming_viewing_key(), Diversifier::random(&mut rng));
+    let addr = Address::from_spending_key(&sk);
     println!("wrote wallet: {}", path.display());
     println!("address:      {}", addr.encode(hrp_for(net)));
     println!("(the wallet file holds your spending key UNENCRYPTED — guard it like funds)");
@@ -115,8 +115,7 @@ fn cmd_init(path: &Path, network: &str) -> Result<(), Box<dyn std::error::Error>
 
 fn cmd_address(sk_hex: &str) -> Result<(), Box<dyn std::error::Error>> {
     let sk = SpendingKey::from_bytes(parse_sk(sk_hex)?);
-    let mut rng = rand::thread_rng();
-    let addr = Address::derive(&sk.incoming_viewing_key(), Diversifier::random(&mut rng));
+    let addr = Address::from_spending_key(&sk);
     println!("{}", addr.encode(HRP_TESTNET));
     Ok(())
 }

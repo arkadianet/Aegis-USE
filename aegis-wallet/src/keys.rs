@@ -7,9 +7,11 @@
 //!
 //! - **`nk` (OddScalar) — SPEND.** Whoever holds it can compute nullifiers and
 //!   prove ownership. The crown secret; never shared, never inside a viewing key.
-//! - **`ivk` (EvenScalar) — INCOMING VIEWING.** Detects + (later) decrypts notes
-//!   sent to this wallet, and generates addresses; CANNOT spend. Safe to share
-//!   for watch-only access.
+//! - **`ivk` (EvenScalar) — INCOMING VIEWING.** Reserved for detecting +
+//!   (later) decrypting notes sent to this wallet; CANNOT spend. (Addresses are
+//!   `pk = nk·B` under the adopted payment model — see `address.rs`; the
+//!   Sapling-style `ivk`-derived address was dropped with option (a). `ivk`
+//!   stays for the future encryption/detection layer.)
 //! - **`ovk` (32 bytes) — OUTGOING VIEWING.** Lets the sender recover notes it
 //!   sent (history + payment disclosure).
 //!

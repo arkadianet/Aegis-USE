@@ -1,74 +1,50 @@
-//! Diversified addresses (M4 slice 1).
+//! Wallet address (M4 — reconciled to the payment primitive, option a).
 //!
-//! One `ivk`, many unlinkable addresses. A diversifier `d` (11 random bytes)
-//! maps to a base point `g_d = hash_to_curve(d)` on the even curve; the address
-//! is `(d, pk_d = ivk·g_d)`. Encoded as **Bech32m** with an Aegis HRP (`use`
-//! mainnet / `tuse` testnet). Two addresses from one wallet are unlinkable
-//! on-chain (independent `g_d`) but both are scanned by the one `ivk`.
+//! The address is the recipient's spend key as a public point,
+//! `pk = nk·B` ([`aegis_crypto::payment::PaymentAddress`]) — the value a sender
+//! folds additively into a note so that only the `nk`-holder can spend it (see
+//! `dev-docs/sidechain/payment-primitive-design.md`). Revealing `pk` leaks
+//! nothing (recovering `nk` is the discrete log).
 //!
-//! The exact encoding is a wallet display concern (not consensus) and
-//! v1/provisional.
+//! **One address per wallet.** The `pk = nk·B` construction has no diversified
+//! addresses — that was the accepted cost of option (a) (reusing the audited
+//! spend circuit with no new gadget). On-chain notes to this address are still
+//! mutually unlinkable (per-note `rho`/`r_key` randomize the commitment), but
+//! the address itself is reused across recipients. Address-level unlinkability
+//! (Monero-style subaddresses / a viewing-key layer) is future work.
+//!
+//! Encoded as Bech32m with an Aegis HRP (`use` mainnet / `tuse` testnet). The
+//! encoding is a wallet display concern (not consensus) and v1/provisional.
 
-use aegis_crypto::generators::EvenPoint;
-use ark_ec::CurveGroup;
-use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
+use aegis_crypto::payment::{PaymentAddress, PAYMENT_ADDRESS_BYTES};
 use bech32::{FromBase32, ToBase32, Variant};
-use rand::RngCore;
 
-use crate::keys::IncomingViewingKey;
-
-const DST_DIVERSIFY: &[u8] = b"aegis:wallet:diversify:v1";
-const DIVERSIFIER_LEN: usize = 11;
-const PKD_LEN: usize = 33; // compressed even-curve point
+use crate::keys::SpendingKey;
 
 /// Bech32m human-readable prefix for a mainnet shielded address.
 pub const HRP_MAINNET: &str = "use";
 /// Bech32m human-readable prefix for a testnet shielded address.
 pub const HRP_TESTNET: &str = "tuse";
 
-/// An 11-byte diversifier — selects one of a wallet's many addresses.
+/// A wallet address: `pk = nk·B`, Bech32m-encoded.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct Diversifier(pub [u8; DIVERSIFIER_LEN]);
-
-impl Diversifier {
-    pub fn random(rng: &mut impl RngCore) -> Self {
-        let mut d = [0u8; DIVERSIFIER_LEN];
-        rng.fill_bytes(&mut d);
-        Diversifier(d)
-    }
-
-    /// The diversified base point `g_d = hash_to_curve(d)`.
-    fn base(&self) -> EvenPoint {
-        aegis_crypto::h2c::hash_to_curve::<ark_secp256k1::Config>(DST_DIVERSIFY, &self.0)
-    }
-}
-
-/// A shielded address: a diversifier plus the diversified public key `pk_d`.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct Address {
-    pub diversifier: Diversifier,
-    pub pk_d: EvenPoint,
-}
+pub struct Address(PaymentAddress);
 
 impl Address {
-    /// Derive the address for `ivk` at diversifier `d`: `pk_d = ivk·g_d`.
-    pub fn derive(ivk: &IncomingViewingKey, d: Diversifier) -> Self {
-        let pk_d = (d.base() * ivk.scalar()).into_affine();
-        Address {
-            diversifier: d,
-            pk_d,
-        }
+    /// The wallet's address, derived from its spend key: `pk = nk·B`.
+    pub fn from_spending_key(sk: &SpendingKey) -> Self {
+        Address(PaymentAddress::from_nk(sk.nk()))
+    }
+
+    /// The underlying payment address (the value a sender folds into a note).
+    pub fn payment_address(&self) -> PaymentAddress {
+        self.0
     }
 
     /// Encode as a Bech32m string under `hrp` (`use1…` / `tuse1…`).
     pub fn encode(&self, hrp: &str) -> String {
-        let mut payload = self.diversifier.0.to_vec();
-        let mut pk = Vec::with_capacity(PKD_LEN);
-        self.pk_d
-            .serialize_compressed(&mut pk)
-            .expect("even-curve point serializes to 33 bytes");
-        payload.extend_from_slice(&pk);
-        bech32::encode(hrp, payload.to_base32(), Variant::Bech32m).expect("bech32m encodes")
+        bech32::encode(hrp, self.0.to_bytes().to_base32(), Variant::Bech32m)
+            .expect("bech32m encodes")
     }
 
     /// Decode a Bech32m address, returning `(hrp, address)`.
@@ -78,20 +54,12 @@ impl Address {
             return Err(AddressError::Bech32);
         }
         let bytes = Vec::<u8>::from_base32(&data).map_err(|_| AddressError::Bech32)?;
-        if bytes.len() != DIVERSIFIER_LEN + PKD_LEN {
-            return Err(AddressError::Length);
-        }
-        let mut d = [0u8; DIVERSIFIER_LEN];
-        d.copy_from_slice(&bytes[..DIVERSIFIER_LEN]);
-        let pk_d = EvenPoint::deserialize_compressed(&bytes[DIVERSIFIER_LEN..])
-            .map_err(|_| AddressError::Point)?;
-        Ok((
-            hrp,
-            Address {
-                diversifier: Diversifier(d),
-                pk_d,
-            },
-        ))
+        let arr: [u8; PAYMENT_ADDRESS_BYTES] = bytes
+            .as_slice()
+            .try_into()
+            .map_err(|_| AddressError::Length)?;
+        let pk = PaymentAddress::from_bytes(&arr).ok_or(AddressError::Point)?;
+        Ok((hrp, Address(pk)))
     }
 }
 
@@ -101,50 +69,50 @@ pub enum AddressError {
     Bech32,
     #[error("wrong address payload length")]
     Length,
-    #[error("pk_d is not a valid curve point")]
+    #[error("not a valid curve point")]
     Point,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::keys::SpendingKey;
 
-    fn ivk(seed: u8) -> IncomingViewingKey {
-        SpendingKey::from_bytes([seed; 32]).incoming_viewing_key()
-    }
-
-    fn diversifier(byte: u8) -> Diversifier {
-        Diversifier([byte; DIVERSIFIER_LEN])
+    fn addr(seed: u8) -> Address {
+        Address::from_spending_key(&SpendingKey::from_bytes([seed; 32]))
     }
 
     // ----- round-trips -----
 
     #[test]
     fn address_bech32m_roundtrips() {
-        let addr = Address::derive(&ivk(3), diversifier(9));
-        let s = addr.encode(HRP_TESTNET);
+        let a = addr(3);
+        let s = a.encode(HRP_TESTNET);
         assert!(s.starts_with("tuse1"));
         let (hrp, back) = Address::decode(&s).expect("decodes");
         assert_eq!(hrp, HRP_TESTNET);
-        assert_eq!(back, addr);
+        assert_eq!(back, a);
     }
 
-    // ----- unlinkability / determinism -----
+    // ----- determinism / distinctness -----
 
     #[test]
-    fn distinct_diversifiers_give_distinct_addresses() {
-        let k = ivk(3);
-        let a = Address::derive(&k, diversifier(1));
-        let b = Address::derive(&k, diversifier(2));
-        assert_ne!(a.pk_d, b.pk_d, "diversified addresses are unlinkable");
+    fn address_is_deterministic_in_the_spending_key() {
+        assert_eq!(addr(7), addr(7));
     }
 
     #[test]
-    fn address_derivation_is_deterministic() {
-        let a = Address::derive(&ivk(3), diversifier(9));
-        let b = Address::derive(&ivk(3), diversifier(9));
-        assert_eq!(a, b);
+    fn distinct_wallets_have_distinct_addresses() {
+        assert_ne!(addr(1), addr(2));
+    }
+
+    #[test]
+    fn address_matches_pk_equals_nk_times_b() {
+        // The address point IS the payment primitive's pk = nk·B.
+        let sk = SpendingKey::from_bytes([9u8; 32]);
+        assert_eq!(
+            addr(9).payment_address(),
+            aegis_crypto::payment::PaymentAddress::from_nk(sk.nk())
+        );
     }
 
     // ----- error paths -----
@@ -155,7 +123,7 @@ mod tests {
             Address::decode("not-an-address"),
             Err(AddressError::Bech32)
         ));
-        // A valid bech32m string but wrong payload length.
+        // Valid bech32m but wrong payload length.
         let short = bech32::encode("tuse", [0u8; 8].to_base32(), Variant::Bech32m).unwrap();
         assert!(matches!(Address::decode(&short), Err(AddressError::Length)));
     }

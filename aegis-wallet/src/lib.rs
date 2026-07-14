@@ -20,7 +20,7 @@ pub mod notes;
 pub mod send;
 pub mod state;
 
-pub use address::{Address, AddressError, Diversifier, HRP_MAINNET, HRP_TESTNET};
+pub use address::{Address, AddressError, HRP_MAINNET, HRP_TESTNET};
 pub use client::{
     BlockSummary, BlocksPage, ChainState, ClientError, NodeClient, SubmitOutcome, Tip,
 };
