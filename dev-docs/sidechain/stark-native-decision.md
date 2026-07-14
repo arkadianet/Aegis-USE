@@ -1,10 +1,16 @@
-# STARK-native architecture decision (OPEN — spike-gated)
+# STARK-native architecture decision (RESOLVED — Curve Trees, 2026-07-14)
 
-> **Status: OPEN. Decision is gated on a bounded spike (below).** Until it reports
-> and the operator decides, the Curve Trees core stays the working prototype and
-> **the crypto core is frozen from *freezing*** — see the freeze-hold. This doc is
-> the auditable record of what we're deciding, how we measure it, and how we keep
-> the proven work clean while we do.
+> **Status: RESOLVED. Curve Trees adopted for the private layer; STARK parked.**
+> Operator decision (2026-07-14): build on Curve Trees, keep the attester/`V_cap`
+> bridge for now, and stop treating a STARK pivot as imminent. Rationale is Q1
+> below — the full pivot is gated on unshipped EIP-0045 + a non-existent prover,
+> while the scaling critique (tree lifetime + rebuild) is solvable *within* Curve
+> Trees (R1-T epoch turnstile + incremental append). **STARK is parked, not dead:**
+> it remains the coherent path to a *trustless bridge* (#6) and *quantum-safety*
+> (#5) — the two things Curve Trees can't reach — and gets revisited if/when
+> EIP-0045 advances toward mainnet. The freeze-hold is lifted (ROADMAP); the value
+> gate (external review before real USE) and mainnet-param decisions still stand.
+> The Q1 findings + spike record below are kept as the basis for that revisit.
 
 ## The decision
 

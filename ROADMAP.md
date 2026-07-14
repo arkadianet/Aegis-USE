@@ -13,14 +13,20 @@ living open-items register.
 > and runs on **testnet**. Real USE moves only after the **value gate** (below)
 > — an external-review track that is *not* a build milestone.
 
-> 🧊 **FREEZE-HOLD (active).** A [STARK-native architecture decision](dev-docs/sidechain/stark-native-decision.md)
-> is **OPEN** and gated on a bounded spike. Until it reports and the operator
-> decides: **do not** commit chain-id-breaking params (share interval, `L_final`,
-> `V_CAP`, mainnet constants), **do not** do the testnet→mainnet re-cut, **do not**
-> freeze `aegis-spec`/`note-protocol`, and **do not** harden the Curve Trees crypto
-> (esp. the deferred incremental-tree append — a pivot may discard it). Safe to keep
-> building in parallel: M3 (API/mempool), M5 (explorer), the ergo-side integration,
-> and the *non-proving* parts of M4 (key hierarchy / addresses / scan design).
+> ✅ **FREEZE-HOLD LIFTED (operator decision 2026-07-14): Curve Trees adopted for
+> the private layer; the bridge stays the attester/`V_cap` model for now.** The
+> hold existed only to avoid hardening a core a STARK pivot might discard — with
+> Curve Trees settled, that's moot, so the **whole Curve-Trees core + scaling track
+> is open to build**: the payment primitive (address-binding note), the
+> incremental-tree append, R1-T epoch-turnstile, and the full wallet. STARK is
+> **parked, not dead** — the coherent long-term option for a *trustless bridge* +
+> quantum-safety ([decision doc](dev-docs/sidechain/stark-native-decision.md)),
+> revisited if/when EIP-0045 ships. **Two gates still stand, unchanged:** (1) the
+> **value gate** — crown-jewel crypto (the payment primitive especially) needs
+> external review before *real* USE moves; testnet builds are fine; (2) **mainnet
+> params** (share interval, `L_final`, `V_CAP`, final constants) + the
+> testnet→mainnet re-cut stay operator decisions at cut time. On testnet,
+> chain-id-breaking changes are free (re-cuttable).
 
 ---
 
