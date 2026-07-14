@@ -37,6 +37,7 @@ fn producer_config(data_dir: &Path, serve: bool) -> NodeConfig {
         seed_urls: Vec::new(),
         serve_addr: serve.then(|| "127.0.0.1:0".to_string()),
         api_addr: None,
+        attester: None,
         l_final: 0,
     }
 }
@@ -51,6 +52,7 @@ fn consumer_config(data_dir: &Path, seed_url: String) -> NodeConfig {
         seed_urls: vec![seed_url],
         serve_addr: None,
         api_addr: None,
+        attester: None,
         l_final: 0,
     }
 }

@@ -98,6 +98,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         serve_addr: args.serve_addr,
         api_addr: args.api_addr,
         l_final: args.l_final,
+        // CLI attester-key wiring is a follow-up (S1b exposes the capability
+        // via NodeConfig + the API; a plain CLI node is not an attester).
+        attester: None,
     };
     let producing = config.produce && network == Network::Dev;
 
