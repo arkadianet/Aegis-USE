@@ -52,25 +52,32 @@ prove this is fine; the design's "privacy chains are DA-friendly" principle). A
 later **compact-block / ciphertext-feed** endpoint is an optimization, not a
 prerequisite; v1 scans full blocks via `/block/{id}`.
 
-## 1. Key hierarchy (Zcash-Sapling shape, over our cycle curves)
+## 1. Key hierarchy (Aegis-shaped, over our cycle curves)  *(built — slice 1)*
 
-One **spending key** `sk` deterministically derives the tree. Names follow
-Sapling so the security arguments transfer; the group is our even/odd cycle, not
-Jubjub.
+> Corrected from the first sketch: Aegis's spend authority is the **scalar `nk`**
+> the note protocol already uses in `poseidon_nullifier(nk, rho)` — there is **no
+> Sapling `ak`/`ask` point layer** (spending is a proof of knowledge of `nk`, not
+> a separate spend-auth signature). So the hierarchy is simpler and `nk`-centric.
 
-- `sk` → **`ask`** (spend authorizing) and **`nsk`** (nullifier). Kept secret.
-- `ak = ask·G_spend`, `nk = nsk·G_nf` — the **full viewing key** `(ak, nk)`.
-- **`ivk` (incoming viewing key)** = `CRH_ivk(ak, nk)` — a scalar. Detects and
-  decrypts notes *received*. Can be shared to grant *watch* access without spend.
-- **`ovk` (outgoing viewing key)** — lets the *sender* later recover the notes it
-  sent (for its own history and for disclosure).
-- **`nk`** is exactly the nullifier key the note protocol already uses
-  (`nf = Extract((nk+rho)⁻¹·G)` / the Poseidon nullifier post-N1) — so the
-  hierarchy's `nk` and consensus's `nk` are the same value; no second scheme.
+One **spending key** `sk` (a 32-byte root) derives three domain-separated,
+one-way capability tiers (`aegis-wallet::keys`):
 
-Capability tiers fall straight out: `sk` = spend; `(ak,nk)` = full view;
-`ivk` = detect-incoming; `ovk` = recover-outgoing. This is what makes selective
-disclosure (§6) possible without revealing spend authority.
+- **`nk` (OddScalar) — SPEND.** `nk = hash_to_field_one("aegis:wallet:nk:v1", sk)`.
+  Whoever holds it can compute nullifiers and prove ownership — the crown secret,
+  never shared, never inside a viewing key. It *is* the note protocol's `nk`: one
+  scheme, not two.
+- **`ivk` (EvenScalar) — INCOMING VIEWING.** `ivk = hash_to_field_one(
+  "aegis:wallet:ivk:v1", sk)`. Detects + (later) decrypts notes *received*, and
+  generates addresses; **cannot spend**. Safe to share for watch-only access.
+- **`ovk` (32 bytes) — OUTGOING VIEWING.** `blake2b256("aegis:wallet:ovk:v1"‖sk)`.
+  Lets the *sender* recover the notes it sent (history + disclosure).
+
+`ivk`/`ovk` are independent one-way functions of `sk`, so they reveal nothing
+about `nk`. Note there is an inherent Aegis property: *detecting your own spends*
+means recognizing your nullifiers, which needs `nk` = spend authority — so a
+view key that sees your spends is a spend key. The safely-shareable key is
+therefore `ivk` (incoming-only). These derivations are **wallet-local** (not
+consensus) and **v1/provisional** pending a ZIP-32-style spec + external review.
 
 ## 2. Diversified addresses
 
@@ -161,9 +168,10 @@ public read-only API — the node never receives a secret.
 
 ## 8. Build slices (when the freeze lifts)
 
-1. **Keys + addresses** (`aegis-wallet` crate skeleton, `sk`→`ak/nk/ivk/ovk`,
-   diversified-address Bech32m). *Freeze-hold-safe to build now — no encryption,
-   no proving.*
+1. ✅ **DONE — Keys + addresses.** `aegis-wallet` crate + CLI; `sk`→`nk/ivk/ovk`
+   (§1); diversified Bech32m addresses (`use1…`/`tuse1…`); redacted key Debug.
+   Standalone binary, no node contact. Built on reviewed `aegis-crypto` h2c
+   primitives; 8 tests; freeze-hold-safe + hybrid-independent.
 2. **Node client + scanning-orchestration** (fetch blocks, rebuild the tree,
    track notes) — the plumbing; the *decrypt* step stubs until slice 3.
 3. **Note encryption / IVK decrypt** (held — modular KEM).

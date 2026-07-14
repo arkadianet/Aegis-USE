@@ -1,0 +1,31 @@
+[package]
+name = "aegis-wallet"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# A STANDALONE wallet — deliberately NOT linked into aegis-node. Spending keys
+# must never live in a network-exposed process; the wallet talks to the node
+# only over its read-only HTTP API. See dev-docs/sidechain/wallet-design.md.
+#
+# Slice 1 (this crate so far): the key hierarchy + diversified addresses. No
+# note-encryption, no proving, no network — those slices are held under the
+# freeze-hold. Key DERIVATIONS here are wallet-local (not consensus) and marked
+# v1/provisional pending a ZIP-32-style spec + external review.
+
+[dependencies]
+aegis-crypto = { path = "../aegis-crypto" }
+aegis-spec   = { path = "../aegis-spec" }
+
+ark-ec        = { workspace = true }
+ark-ff        = { workspace = true }
+ark-serialize = { workspace = true }
+ark-secp256k1 = { workspace = true }
+ark-secq256k1 = { workspace = true }
+
+ergo-crypto = { workspace = true }
+bech32      = "0.9"
+hex         = { workspace = true }
+rand        = { workspace = true }
+thiserror   = { workspace = true }
+clap        = { workspace = true, features = ["derive"] }

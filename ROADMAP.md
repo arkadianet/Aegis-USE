@@ -95,9 +95,11 @@ scanning, diversified addresses, and payment disclosures (architecture §6). Thi
 is what lets a recipient confirm "I received 10 USE" and a sender prove it.
 **Architecture decided: a standalone `aegis-wallet` binary, never linked into the
 node** (spending keys must never sit in a network-exposed process); it's a client
-of the node's read-only HTTP API (the M3/M5 seam). Slice 1 (keys + diversified
-addresses) is freeze-hold-safe and hybrid-independent; note-encryption + proving
-(slices 3–5) are held. *(medium-large)*
+of the node's read-only HTTP API (the M3/M5 seam). **Slice 1 built** — the
+`aegis-wallet` crate + CLI: `sk`→`nk/ivk/ovk` key hierarchy (`nk` = the consensus
+nullifier scalar; no Sapling point layer) + diversified Bech32m addresses,
+freeze-hold-safe + hybrid-independent. Note-encryption + proving (slices 3–5) are
+held. *(medium-large — slice 1 done)*
 
 ### M5 — Indexer + explorer ✅ DONE
 A **peg + activity + merge-mining dashboard** — the only things a private chain
