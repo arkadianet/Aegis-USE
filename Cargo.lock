@@ -13,6 +13,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "aegis-attest"
+version = "0.5.1"
+dependencies = [
+ "hex",
+ "k256",
+ "rand",
+ "sha2 0.10.9",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "aegis-contracts"
 version = "0.5.1"
 dependencies = [
