@@ -12,6 +12,7 @@ pub mod keynote;
 pub mod mint;
 pub mod note;
 pub mod nullifier;
+pub mod payment;
 pub mod poseidon;
 pub mod spend;
 pub mod tree;
