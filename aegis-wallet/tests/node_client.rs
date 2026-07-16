@@ -159,6 +159,7 @@ fn block_with_output_notes(cm0: [u8; 33], cm1: [u8; 33]) -> (Block, ShieldedTran
         header,
         body: BlockBody {
             transfers: vec![tx.clone()],
+            ..Default::default()
         },
         coinbase: None,
     };
@@ -182,7 +183,7 @@ fn self_transfer_scan_consolidate_submit_and_confirm() {
     let (block, tx) = block_with_output_notes(note_cm_bytes(&leaves[0]), note_cm_bytes(&leaves[1]));
     let mut oracle = ShieldedState::new();
     oracle
-        .apply_block(&[tx], dev_params(), RewardMode::DevStub)
+        .apply_block(&[tx], &[], dev_params(), RewardMode::DevStub, None)
         .expect("apply");
     assert_eq!(oracle.leaf_count(), 2);
 

@@ -20,8 +20,10 @@ use crate::block::{Block, BlockBody};
 use crate::daa::{next_nbits, DaaParams};
 use crate::genesis::{genesis_header, EMPTY_REWARD_CLAIM};
 use crate::header::Header;
+use crate::pegmint::ComparativeAnchor;
+use crate::pegmint_steps::{read_pegmint_proof, serialize_pegmint_proof, PegMintProof, PegParams};
 use crate::state::{
-    expected_coinbase_value, BlockUndo, RewardMode, ShieldedState, StateError,
+    expected_coinbase_value, BlockUndo, PegValidation, RewardMode, ShieldedState, StateError,
     STATE_RETENTION_BLOCKS,
 };
 
@@ -87,8 +89,23 @@ pub enum ExtendError {
     ZeroCoinbase,
     #[error("reward_claim mismatch: header does not commit to the block's coinbase")]
     RewardClaimMismatch,
+    #[error("peg-mint {index} could not be decoded from the block body")]
+    PegMintDecode { index: usize },
     #[error(transparent)]
     State(#[from] StateError),
+}
+
+/// The peg-in validation configuration a chain applies to blocks that
+/// carry peg-mints: the node's followed Ergo settled view (P1-A) and the
+/// peg deploy pins. Absent (`Chain::peg == None`) ⇒ the chain rejects any
+/// block that carries peg-mints. The node resolves/refreshes the anchor
+/// from its [`crate::ergo_follow::Follower`] as the tip advances (the
+/// "followed-anchor seam"); it is owned here so `try_extend`'s signature
+/// — called from many sites — stays unchanged.
+#[derive(Debug, Clone)]
+pub struct PegConfig {
+    pub anchor: ComparativeAnchor,
+    pub params: PegParams,
 }
 
 /// In-memory block chain (linear; fork choice arrives with P2P).
@@ -101,6 +118,9 @@ pub struct Chain {
     blocks: Vec<Block>,
     state: ShieldedState,
     undo_ring: VecDeque<BlockUndo>,
+    /// Peg-in validation config (`None` ⇒ blocks carrying peg-mints are
+    /// rejected). Set by the node once it has a followed Ergo view.
+    peg: Option<PegConfig>,
 }
 
 impl Chain {
@@ -120,6 +140,7 @@ impl Chain {
             blocks: vec![genesis],
             state: ShieldedState::new(),
             undo_ring: VecDeque::new(),
+            peg: None,
         }
     }
 
@@ -149,11 +170,32 @@ impl Chain {
             }],
             state,
             undo_ring: VecDeque::new(),
+            peg: None,
         }
     }
 
     pub fn network(&self) -> Network {
         self.network
+    }
+
+    /// Attach (or replace) the peg-in validation config — the node's
+    /// followed Ergo settled view + peg deploy pins. Until set, any block
+    /// carrying peg-mints is rejected.
+    pub fn set_peg_config(&mut self, config: PegConfig) {
+        self.peg = Some(config);
+    }
+
+    /// The current peg-in validation config, if any.
+    pub fn peg_config(&self) -> Option<&PegConfig> {
+        self.peg.as_ref()
+    }
+
+    /// Borrow the peg config as a [`PegValidation`] for the apply path.
+    fn peg_validation(&self) -> Option<PegValidation<'_>> {
+        self.peg.as_ref().map(|c| PegValidation {
+            anchor: &c.anchor,
+            params: &c.params,
+        })
     }
 
     pub fn tip(&self) -> &Header {
@@ -200,7 +242,36 @@ impl Chain {
     /// dry-running `body` against the current state. Fails if the body
     /// is invalid against the state (e.g. a double spend).
     pub fn produce_next(&self, body: BlockBody, now_ms: u64) -> Result<Block, ExtendError> {
-        self.produce_inner(body, now_ms, RewardMode::DevStub, EMPTY_REWARD_CLAIM, None)
+        self.produce_inner(
+            body,
+            now_ms,
+            RewardMode::DevStub,
+            EMPTY_REWARD_CLAIM,
+            None,
+            &[],
+        )
+    }
+
+    /// Produce the next block carrying `peg_mints` (plus `body`'s
+    /// transfers): each proof is verified against the chain's peg config
+    /// and mints its note, exactly as `try_extend` will re-validate. The
+    /// canonical proof bytes are written into the produced body. Fails
+    /// (leaving the chain untouched) if any peg-mint is invalid or the
+    /// chain has no peg config.
+    pub fn produce_next_with_pegmints(
+        &self,
+        body: BlockBody,
+        now_ms: u64,
+        peg_mints: &[PegMintProof],
+    ) -> Result<Block, ExtendError> {
+        self.produce_inner(
+            body,
+            now_ms,
+            RewardMode::DevStub,
+            EMPTY_REWARD_CLAIM,
+            None,
+            peg_mints,
+        )
     }
 
     /// Produce the next block minting a coinbase note (S5b): its value is
@@ -229,19 +300,36 @@ impl Chain {
             },
             reward_claim,
             Some(proof),
+            &[],
         )
     }
 
     fn produce_inner(
         &self,
-        body: BlockBody,
+        mut body: BlockBody,
         now_ms: u64,
         reward: RewardMode,
         reward_claim: [u8; 33],
         coinbase: Option<aegis_crypto::mint::MintProof>,
+        peg_mints: &[PegMintProof],
     ) -> Result<Block, ExtendError> {
+        // Attach the canonical peg-mint envelope bytes to the body so the
+        // produced block round-trips to exactly what was verified.
+        body.peg_mints = peg_mints
+            .iter()
+            .enumerate()
+            .map(|(index, p)| {
+                serialize_pegmint_proof(p).map_err(|_| ExtendError::PegMintDecode { index })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         let mut dry = self.state.clone();
-        dry.apply_block(&body.transfers, self.network.params(), reward)?;
+        dry.apply_block(
+            &body.transfers,
+            peg_mints,
+            self.network.params(),
+            reward,
+            self.peg_validation(),
+        )?;
         let tip = self.tip();
         let header = Header {
             version: 1,
@@ -358,11 +446,29 @@ impl Chain {
                 }
             }
         };
+        // Decode the block's peg-mints from their canonical envelope
+        // bytes (before any mutation). A malformed blob rejects the block.
+        let mut peg_mints = Vec::with_capacity(block.body.peg_mints.len());
+        for (index, bytes) in block.body.peg_mints.iter().enumerate() {
+            let proof =
+                read_pegmint_proof(bytes).map_err(|_| ExtendError::PegMintDecode { index })?;
+            peg_mints.push(proof);
+        }
         // State transition — apply, then verify the header committed to
-        // exactly this post-state; roll back on any mismatch.
-        let undo = self
-            .state
-            .apply_block(&block.body.transfers, self.network.params(), reward)?;
+        // exactly this post-state; roll back on any mismatch. Split the
+        // borrow so the peg config (`self.peg`) and state (`self.state`)
+        // are taken from disjoint fields.
+        let peg_val = self.peg.as_ref().map(|c| PegValidation {
+            anchor: &c.anchor,
+            params: &c.params,
+        });
+        let undo = self.state.apply_block(
+            &block.body.transfers,
+            &peg_mints,
+            self.network.params(),
+            reward,
+            peg_val,
+        )?;
         let want_digest = self.state.nullifier_digest();
         if header.nullifier_digest != want_digest {
             let got = header.nullifier_digest;
@@ -434,7 +540,10 @@ mod tests {
     }
 
     fn body_with(transfers: Vec<crate::tx::ShieldedTransfer>) -> BlockBody {
-        BlockBody { transfers }
+        BlockBody {
+            transfers,
+            peg_mints: Vec::new(),
+        }
     }
 
     /// Extend the chain with `n` produced empty blocks, `spacing_ms`
@@ -918,5 +1027,132 @@ mod tests {
             chain.produce_next(body_with(vec![transfer_with_nfs(1, 9)]), now),
             Err(ExtendError::State(StateError::DoubleSpend { .. }))
         ));
+    }
+
+    // ----- peg-in mints (end-to-end through try_extend) -----
+
+    use crate::pegmint_steps::testutil as peg;
+    use crate::state::StateError as SErr;
+
+    fn peg_chain(cfg: PegConfig) -> Chain {
+        let mut chain = dev_chain();
+        chain.set_peg_config(cfg);
+        chain
+    }
+
+    #[test]
+    fn peg_mint_block_extends_chain_and_mints_the_note() {
+        let (proof, anchor, pp) = peg::spendable_case(50_000, 400, 0x11);
+        let box_id = crate::pegmint_steps::verify_pegmint(
+            &proof,
+            &anchor,
+            &crate::pegmint_steps::PegMintUsedSet::new(),
+            &pp,
+        )
+        .unwrap()
+        .box_id;
+        let mut chain = peg_chain(PegConfig { anchor, params: pp });
+        let now = chain.tip().timestamp_ms + T_MS;
+        let block = chain
+            .produce_next_with_pegmints(BlockBody::default(), now, &[proof])
+            .expect("produce peg-mint block");
+        // The produced block carries the canonical proof bytes and its
+        // header commits to the minted post-state.
+        assert_eq!(block.body.peg_mints.len(), 1);
+        chain
+            .try_extend(block, now)
+            .expect("peg-mint block accepted");
+        assert_eq!(chain.tip().height, 1);
+        assert_eq!(chain.state().leaf_count(), 1, "one peg-mint note minted");
+        assert!(chain.state().is_peg_used(&box_id), "receipt boxId recorded");
+        assert_eq!(chain.state().pot(), 400, "proven peg fee credited");
+        // Header commits to the peg-mint's effect (post-state roots).
+        assert_eq!(chain.tip().pot_balance, 400);
+        assert_ne!(
+            chain.tip().cm_tree_root,
+            crate::genesis_header(Network::Dev).cm_tree_root
+        );
+    }
+
+    #[test]
+    fn peg_mint_block_rolls_back_cleanly() {
+        let (proof, anchor, pp) = peg::spendable_case(50_000, 400, 0x22);
+        let mut chain = peg_chain(PegConfig { anchor, params: pp });
+        let now = chain.tip().timestamp_ms + T_MS;
+        let block = chain
+            .produce_next_with_pegmints(BlockBody::default(), now, &[proof])
+            .unwrap();
+        chain.try_extend(block, now).unwrap();
+        assert_eq!(chain.state().leaf_count(), 1);
+        assert!(chain.rollback_tip());
+        assert_eq!(chain.tip().height, 0);
+        assert_eq!(chain.state().leaf_count(), 0);
+        assert!(chain.state().peg_used().is_empty(), "used-set rolled back");
+        assert_eq!(chain.state().pot(), 0);
+    }
+
+    #[test]
+    fn tampered_peg_mint_block_rejected_state_clean() {
+        // Produce a valid peg-mint block, then corrupt the carried proof
+        // bytes: it no longer decodes, so try_extend rejects it and the
+        // chain state is untouched.
+        let (proof, anchor, pp) = peg::spendable_case(50_000, 400, 0x33);
+        let mut chain = peg_chain(PegConfig { anchor, params: pp });
+        let now = chain.tip().timestamp_ms + T_MS;
+        let mut block = chain
+            .produce_next_with_pegmints(BlockBody::default(), now, &[proof])
+            .unwrap();
+        block.body.peg_mints[0].push(0xFF); // trailing byte → decode fails
+        assert!(matches!(
+            chain.try_extend(block, now),
+            Err(ExtendError::PegMintDecode { index: 0 })
+        ));
+        assert_eq!(chain.tip().height, 0);
+        assert_eq!(chain.state().leaf_count(), 0);
+        assert!(chain.state().peg_used().is_empty());
+    }
+
+    #[test]
+    fn replayed_peg_mint_rejected_across_blocks() {
+        let (proof, anchor, pp) = peg::spendable_case(50_000, 400, 0x44);
+        let replay = proof.clone();
+        let mut chain = peg_chain(PegConfig { anchor, params: pp });
+        let mut now = chain.tip().timestamp_ms + T_MS;
+        let b1 = chain
+            .produce_next_with_pegmints(BlockBody::default(), now, &[proof])
+            .unwrap();
+        chain.try_extend(b1, now).unwrap();
+        now += T_MS;
+        // produce dry-runs against the committed used-set → AlreadyMinted.
+        assert!(matches!(
+            chain.produce_next_with_pegmints(BlockBody::default(), now, &[replay]),
+            Err(ExtendError::State(SErr::PegMint {
+                index: 0,
+                source: crate::pegmint::PegMintError::AlreadyMinted
+            }))
+        ));
+        // Chain is unchanged past block 1.
+        assert_eq!(chain.tip().height, 1);
+        assert_eq!(chain.state().leaf_count(), 1);
+    }
+
+    #[test]
+    fn peg_mint_block_without_config_is_rejected() {
+        // A chain with no peg config rejects any block carrying peg-mints
+        // (the bytes are decodable, but there is no anchor to verify them).
+        let (proof, anchor, pp) = peg::spendable_case(50_000, 400, 0x55);
+        // Build a valid block on a peg-enabled chain…
+        let enabled = peg_chain(PegConfig { anchor, params: pp });
+        let now = enabled.tip().timestamp_ms + T_MS;
+        let block = enabled
+            .produce_next_with_pegmints(BlockBody::default(), now, &[proof])
+            .unwrap();
+        // …then present it to a peg-DISABLED chain.
+        let mut disabled = dev_chain();
+        assert!(matches!(
+            disabled.try_extend(block, now),
+            Err(ExtendError::State(SErr::PegDisabled))
+        ));
+        assert_eq!(disabled.state().leaf_count(), 0);
     }
 }

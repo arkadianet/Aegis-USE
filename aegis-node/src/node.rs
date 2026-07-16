@@ -655,7 +655,10 @@ impl Node {
             .fc
             .chain()
             .produce_next_with_coinbase(
-                BlockBody { transfers },
+                BlockBody {
+                    transfers,
+                    peg_mints: Vec::new(),
+                },
                 now_ms,
                 EvenScalar::from(DEV_COINBASE_TAG),
                 EvenScalar::from(next_height),

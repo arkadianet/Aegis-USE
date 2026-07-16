@@ -44,7 +44,7 @@ pub use auxpow::{
     WitnessDecodeError, WitnessError,
 };
 pub use block::{Block, BlockBody, BlockDecodeError, BodyDecodeError};
-pub use chain::{Chain, ExtendError, PowMode, ProofMode};
+pub use chain::{Chain, ExtendError, PegConfig, PowMode, ProofMode};
 pub use daa::{next_nbits, DaaParams};
 pub use fresh_sync::{
     fresh_sync, sync_from_seeds, FreshSyncError, FreshSyncReport, FreshSyncResult, SeedSyncReport,
@@ -58,6 +58,8 @@ pub use proof::{verify_shielded_transfer, ProofError};
 pub use seed::fetch_http::{RestAegisSource, SeedClientConfig};
 pub use seed::serve_http::SeedServer;
 pub use seed::{body_self_authenticates, SeedCore, SeedFetch, SeedTips};
-pub use state::{BlockUndo, RewardMode, ShieldedState, StateError, STATE_RETENTION_BLOCKS};
+pub use state::{
+    BlockUndo, PegValidation, RewardMode, ShieldedState, StateError, STATE_RETENTION_BLOCKS,
+};
 pub use store::{load_chain, read_log, read_witness_log, save_block, save_witness, StoreError};
 pub use tx::{ShieldedOutput, ShieldedTransfer, TxDecodeError};

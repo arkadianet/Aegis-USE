@@ -1588,6 +1588,7 @@ mod tests {
         let mut forged = good.clone();
         forged.body = BlockBody {
             transfers: vec![crate::tx::testutil::sample_transfer(7)],
+            ..Default::default()
         };
         forged.header = good.header.clone();
         assert!(!body_self_authenticates(&good.id(), &forged));

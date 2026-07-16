@@ -72,8 +72,10 @@ use crate::pegmint::{
 
 // ----- §5.6 size / DoS bounds (consensus params in aegis-spec at wiring) -----
 
-/// Envelope cap on a whole serialized [`PegMintProof`].
-pub const MAX_PEGMINT_PROOF_BYTES: usize = 2 * 1024 * 1024;
+/// Envelope cap on a whole serialized [`PegMintProof`]. Single source
+/// of truth in `aegis-spec` (the block codec caps each carried proof to
+/// the same value).
+pub use aegis_spec::MAX_PEGMINT_PROOF_BYTES;
 /// Cap on the serialized NiPoPoW chain part (real continuous testnet
 /// proof at tip 442825 measures ~90 KiB — see the e2e assertion).
 pub const MAX_NIPOPOW_PROOF_BYTES: usize = 1024 * 1024;
@@ -665,7 +667,9 @@ pub fn verify_pegmint_full(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod testutil {
+    //! Shared builders for peg-mint proofs/anchors, reused by the
+    //! state- and chain-layer apply tests (crate-internal).
     use super::*;
     use crate::ergo_follow::{Follower, SettledView};
     use crate::pegmint::comparative_policy;
@@ -689,14 +693,14 @@ mod tests {
     // real PoW, and each block's single real tx with the node-reported
     // id — the oracle for txid / leaf / root parity) ==
 
-    fn vectors_dir() -> std::path::PathBuf {
+    pub(crate) fn vectors_dir() -> std::path::PathBuf {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .unwrap()
             .join("test-vectors")
     }
 
-    fn real_headers() -> Vec<Header> {
+    pub(crate) fn real_headers() -> Vec<Header> {
         let data = std::fs::read_to_string(vectors_dir().join("mainnet/headers_1_10.json"))
             .expect("read header vectors");
         let vectors: serde_json::Value = serde_json::from_str(&data).expect("parse");
@@ -714,7 +718,7 @@ mod tests {
 
     /// `(node_reported_id_hex, wire_bytes)` for the single tx of each
     /// mainnet block 1..=10, in height order (asserted in the vector).
-    fn real_txs() -> Vec<(String, Vec<u8>)> {
+    pub(crate) fn real_txs() -> Vec<(String, Vec<u8>)> {
         let data = std::fs::read_to_string(vectors_dir().join("mainnet/transactions_1_10.json"))
             .expect("read tx vectors");
         let vectors: serde_json::Value = serde_json::from_str(&data).expect("parse");
@@ -740,7 +744,7 @@ mod tests {
     /// A real `ComparativeAnchor` produced by the ACTUAL steps-1–4
     /// policy over the ACTUAL follower: mainnet headers 1..=10 followed
     /// with `n_mint = 3` → `h_ref = 7`.
-    fn real_anchor() -> ComparativeAnchor {
+    pub(crate) fn real_anchor() -> ComparativeAnchor {
         let headers = real_headers();
         let mut f = Follower::new(3);
         for h in &headers {
@@ -755,7 +759,7 @@ mod tests {
     /// tree (v1 blocks: leaves = tx ids only). The root is oracled
     /// against the PoW-committed `transactions_root` in
     /// `real_tx_root_matches_pow_committed_header`.
-    fn real_inclusion(height: usize) -> TxInclusion {
+    pub(crate) fn real_inclusion(height: usize) -> TxInclusion {
         let headers = real_headers();
         let txs = real_txs();
         let (_id, tx_bytes) = &txs[height - 1];
@@ -773,7 +777,7 @@ mod tests {
     /// as `PegMintProof.work` by composed tests. `verify_pegmint` never
     /// reads it (steps 1–4 are the caller's), but the wire struct is
     /// §5.1-complete.
-    fn real_work() -> NipopowProof {
+    pub(crate) fn real_work() -> NipopowProof {
         let raw = std::fs::read_to_string(vectors_dir().join("testnet/nipopow/proof_m6_k10.json"))
             .expect("read nipopow vector");
         ergo_rest_json::decode_nipopow_proof_json(&raw).expect("captured proof decodes")
@@ -786,14 +790,14 @@ mod tests {
     // (no `expected = my_fn(input)` assertion appears; expectations are
     // behavioral: accept/reject + effect arithmetic). ==
 
-    const USE_ID: [u8; 32] = [0xAA; 32];
-    const VAULT_NFT: [u8; 32] = [0xBB; 32];
-    const N_LOCK: u64 = 50_000;
-    const FEE_PAID: u64 = 400;
+    pub(crate) const USE_ID: [u8; 32] = [0xAA; 32];
+    pub(crate) const VAULT_NFT: [u8; 32] = [0xBB; 32];
+    pub(crate) const N_LOCK: u64 = 50_000;
+    pub(crate) const FEE_PAID: u64 = 400;
 
     /// Distinct minimal sigma-prop trees: `(has_size, value)` vary the
     /// serialized bytes, so script hashes differ per role.
-    fn sigma_tree(has_size: bool, value: bool) -> ErgoTree {
+    pub(crate) fn sigma_tree(has_size: bool, value: bool) -> ErgoTree {
         ErgoTree {
             version: 0,
             has_size,
@@ -806,25 +810,25 @@ mod tests {
         }
     }
 
-    fn receipt_tree() -> ErgoTree {
+    pub(crate) fn receipt_tree() -> ErgoTree {
         sigma_tree(true, true)
     }
 
-    fn fee_pot_tree() -> ErgoTree {
+    pub(crate) fn fee_pot_tree() -> ErgoTree {
         sigma_tree(false, true)
     }
 
-    fn other_tree() -> ErgoTree {
+    pub(crate) fn other_tree() -> ErgoTree {
         sigma_tree(true, false)
     }
 
-    fn tree_hash(tree: &ErgoTree) -> [u8; 32] {
+    pub(crate) fn tree_hash(tree: &ErgoTree) -> [u8; 32] {
         let mut w = VlqWriter::new();
         write_ergo_tree(&mut w, tree).expect("tree serializes");
         blake2b256(&w.result())
     }
 
-    fn peg_params() -> PegParams {
+    pub(crate) fn peg_params() -> PegParams {
         PegParams {
             use_token_id: USE_ID,
             peg_vault_nft: VAULT_NFT,
@@ -835,14 +839,14 @@ mod tests {
         }
     }
 
-    fn use_tokens(n: u64) -> Vec<Token> {
+    pub(crate) fn use_tokens(n: u64) -> Vec<Token> {
         vec![Token {
             token_id: TokenId::from_bytes(USE_ID),
             amount: n,
         }]
     }
 
-    fn vault_out_tokens() -> Vec<Token> {
+    pub(crate) fn vault_out_tokens() -> Vec<Token> {
         vec![
             Token {
                 token_id: TokenId::from_bytes(VAULT_NFT),
@@ -855,7 +859,7 @@ mod tests {
         ]
     }
 
-    fn r4_coll_bytes(payload: Vec<u8>) -> AdditionalRegisters {
+    pub(crate) fn r4_coll_bytes(payload: Vec<u8>) -> AdditionalRegisters {
         AdditionalRegisters {
             registers: vec![RegisterValue {
                 tpe: SigmaType::SColl(Box::new(SigmaType::SByte)),
@@ -864,11 +868,11 @@ mod tests {
         }
     }
 
-    fn dest33() -> Vec<u8> {
+    pub(crate) fn dest33() -> Vec<u8> {
         vec![0x07; 33]
     }
 
-    fn candidate(
+    pub(crate) fn candidate(
         tree: ErgoTree,
         tokens: Vec<Token>,
         regs: AdditionalRegisters,
@@ -876,7 +880,7 @@ mod tests {
         ErgoBoxCandidate::new(1_000_000_000, tree, 100, tokens, regs).expect("candidate builds")
     }
 
-    fn dummy_input(fill: u8) -> Input {
+    pub(crate) fn dummy_input(fill: u8) -> Input {
         Input {
             box_id: Digest32::from_bytes([fill; 32]),
             spending_proof: SpendingProof::new(vec![], ContextExtension::empty())
@@ -887,7 +891,7 @@ mod tests {
     /// Lock tx: output 0 = receipt (USE `n`, R4 = `regs`), output 1 =
     /// fee-pot output carrying `fee` USE (omitted when `fee == 0`),
     /// output 2 = unrelated change.
-    fn make_lock(n: u64, fee: u64, regs: AdditionalRegisters) -> Transaction {
+    pub(crate) fn make_lock(n: u64, fee: u64, regs: AdditionalRegisters) -> Transaction {
         let mut outputs = vec![candidate(receipt_tree(), use_tokens(n), regs)];
         if fee > 0 {
             outputs.push(candidate(
@@ -910,7 +914,7 @@ mod tests {
 
     /// Consolidation tx: spends `spent_box_id` at input 0 (plus a vault
     /// input at 1), OUTPUTS(0) carries `out0_tokens`.
-    fn make_cons(spent_box_id: [u8; 32], out0_tokens: Vec<Token>) -> Transaction {
+    pub(crate) fn make_cons(spent_box_id: [u8; 32], out0_tokens: Vec<Token>) -> Transaction {
         Transaction {
             inputs: vec![
                 Input {
@@ -929,18 +933,18 @@ mod tests {
         }
     }
 
-    fn wire(tx: &Transaction) -> Vec<u8> {
+    pub(crate) fn wire(tx: &Transaction) -> Vec<u8> {
         let mut w = VlqWriter::new();
         write_transaction(&mut w, tx).expect("tx serializes");
         w.result()
     }
 
-    fn txid_of(tx: &Transaction) -> [u8; 32] {
+    pub(crate) fn txid_of(tx: &Transaction) -> [u8; 32] {
         *transaction_id(tx).expect("txid").as_bytes()
     }
 
     /// Receipt boxId of `lock`'s output `index`.
-    fn receipt_id(lock: &Transaction, index: u16) -> [u8; 32] {
+    pub(crate) fn receipt_id(lock: &Transaction, index: u16) -> [u8; 32] {
         let receipt = ErgoBox {
             candidate: lock.output_candidates[usize::from(index)].clone(),
             transaction_id: ModifierId::from_bytes(txid_of(lock)),
@@ -950,7 +954,7 @@ mod tests {
     }
 
     /// v2+ witness leaf: `blake2b256(concat input proofs)[1..]` (31 B).
-    fn witness_id(tx: &Transaction) -> Vec<u8> {
+    pub(crate) fn witness_id(tx: &Transaction) -> Vec<u8> {
         let mut all = Vec::new();
         for i in &tx.inputs {
             all.extend_from_slice(&i.spending_proof.proof);
@@ -959,7 +963,7 @@ mod tests {
     }
 
     /// Block leaves under the v2+ rule: tx ids then witness ids.
-    fn block_leaves(txs: &[&Transaction]) -> Vec<Vec<u8>> {
+    pub(crate) fn block_leaves(txs: &[&Transaction]) -> Vec<Vec<u8>> {
         let mut leaves: Vec<Vec<u8>> = txs.iter().map(|t| txid_of(t).to_vec()).collect();
         leaves.extend(txs.iter().map(|t| witness_id(t)));
         leaves
@@ -967,7 +971,7 @@ mod tests {
 
     /// Real prove-side extraction (`merkle_proof_by_indices`) → wire
     /// `BatchMerkleProof` for leaf `i`.
-    fn batch_proof_over(leaves: &[Vec<u8>], i: u32) -> BatchMerkleProof {
+    pub(crate) fn batch_proof_over(leaves: &[Vec<u8>], i: u32) -> BatchMerkleProof {
         let refs: Vec<&[u8]> = leaves.iter().map(|l| l.as_slice()).collect();
         let (indices, proofs) = merkle_proof_by_indices(&refs, &[i]).expect("index in range");
         BatchMerkleProof {
@@ -985,7 +989,7 @@ mod tests {
     /// Synthetic v2 header committing `txs` (fixed shape apart from
     /// height + tx root; PoW is fake — the settled view is fabricated,
     /// which is exactly why the fabricator is cfg(test)-only).
-    fn synth_header(height: u32, txs: &[&Transaction]) -> Header {
+    pub(crate) fn synth_header(height: u32, txs: &[&Transaction]) -> Header {
         let leaves = block_leaves(txs);
         let refs: Vec<&[u8]> = leaves.iter().map(|l| l.as_slice()).collect();
         let root = ergo_crypto::merkle::merkle_tree_root(&refs);
@@ -1008,7 +1012,7 @@ mod tests {
         }
     }
 
-    fn inclusion_in(txs: &[&Transaction], i: usize, header: &Header) -> TxInclusion {
+    pub(crate) fn inclusion_in(txs: &[&Transaction], i: usize, header: &Header) -> TxInclusion {
         TxInclusion {
             header: header.clone(),
             tx_bytes: wire(txs[i]),
@@ -1016,12 +1020,12 @@ mod tests {
         }
     }
 
-    fn header_id(h: &Header) -> [u8; 32] {
+    pub(crate) fn header_id(h: &Header) -> [u8; 32] {
         let (_bytes, id) = serialize_header(h).expect("header serializes");
         *id.as_bytes()
     }
 
-    fn anchor_over(headers: &[&Header], h_ref: u32) -> ComparativeAnchor {
+    pub(crate) fn anchor_over(headers: &[&Header], h_ref: u32) -> ComparativeAnchor {
         let rows: Vec<([u8; 32], u32, u32)> = headers
             .iter()
             .map(|h| (header_id(h), h.height, 0))
@@ -1035,7 +1039,7 @@ mod tests {
     /// Baseline valid scenario: lock in block 100, consolidation in
     /// block 101, both settled (`h_ref = 101`), N = 50_000 USE base
     /// units, 400 base units paid to the fee pot.
-    fn happy() -> (PegMintProof, ComparativeAnchor, PegParams) {
+    pub(crate) fn happy() -> (PegMintProof, ComparativeAnchor, PegParams) {
         let lock = make_lock(N_LOCK, FEE_PAID, r4_coll_bytes(dest33()));
         let cons = make_cons(receipt_id(&lock, 0), vault_out_tokens());
         let lock_header = synth_header(100, &[&lock]);
@@ -1050,6 +1054,66 @@ mod tests {
         let anchor = anchor_over(&[&lock_header, &cons_header], 101);
         (proof, anchor, peg_params())
     }
+
+    /// A real, spendable receiver address core (a canonical odd-curve
+    /// `PaymentAddress`) — unlike `happy`'s `dest33()` sentinel, this
+    /// passes the state apply path's `pegmint_note` derivation, which
+    /// requires `sc_dest` to be a real curve point.
+    pub(crate) fn spendable_dest() -> Vec<u8> {
+        aegis_crypto::payment::PaymentAddress::from_nk(aegis_crypto::nullifier::OddScalar::from(
+            0x9E57u64,
+        ))
+        .to_bytes()
+        .to_vec()
+    }
+
+    /// [`happy`] with a real spendable `sc_dest`, so the minted note is
+    /// one the recipient could later spend. `n`/`fee` and a `box_seed`
+    /// (varies the receipt boxId, for distinct-receipt tests) are
+    /// parameters; the returned anchor settles both inclusion headers.
+    pub(crate) fn spendable_case(
+        n: u64,
+        fee: u64,
+        box_seed: u8,
+    ) -> (PegMintProof, ComparativeAnchor, PegParams) {
+        case_with_dest(spendable_dest(), n, fee, box_seed)
+    }
+
+    /// [`spendable_case`] with a caller-chosen R4 `sc_dest` payload — used
+    /// to exercise the non-curve-point (unspendable) reject path.
+    pub(crate) fn case_with_dest(
+        dest: Vec<u8>,
+        n: u64,
+        fee: u64,
+        box_seed: u8,
+    ) -> (PegMintProof, ComparativeAnchor, PegParams) {
+        let mut lock = make_lock(n, fee, r4_coll_bytes(dest));
+        // Vary an unrelated input's boxId so distinct cases yield distinct
+        // receipt boxIds (the receipt boxId hashes the lock tx id).
+        lock.inputs[0].box_id = ergo_primitives::digest::Digest32::from_bytes([box_seed; 32]);
+        let cons = make_cons(receipt_id(&lock, 0), vault_out_tokens());
+        let lock_header = synth_header(100, &[&lock]);
+        let cons_header = synth_header(101, &[&cons]);
+        let proof = PegMintProof {
+            work: real_work(),
+            lock: inclusion_in(&[&lock], 0, &lock_header),
+            receipt_output_index: 0,
+            consolidation: inclusion_in(&[&cons], 0, &cons_header),
+            receipt_input_index: 0,
+        };
+        let anchor = anchor_over(&[&lock_header, &cons_header], 101);
+        (proof, anchor, peg_params())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::testutil::*;
+    use super::*;
+    use crate::ergo_follow::SettledView;
+    use ergo_ser::batch_merkle_proof::{ProofEntry, Side};
+    use ergo_ser::register::{AdditionalRegisters, RegisterValue};
+    use ergo_ser::token::{Token, TokenId};
 
     // ----- happy path -----
 

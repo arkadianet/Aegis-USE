@@ -198,6 +198,59 @@ pub fn recipient_note_opening(
     }
 }
 
+// ----- peg-in mint notes (consensus) -----
+
+/// Domain tag for a peg-in note's key blinding `r_key`
+/// (chain-id-breaking; §3 rho-discipline sibling of `rho_pegmint`).
+pub const RKEY_PEGMINT_DST: &[u8] = b"aegis:rkey:pegmint:v1";
+/// Domain tag for a peg-in note's leaf `blinding` (chain-id-breaking).
+pub const BLINDING_PEGMINT_DST: &[u8] = b"aegis:blind:pegmint:v1";
+
+/// CONSENSUS: the shielded note a proven peg-in deposit mints, derived
+/// **deterministically from public data only** — the receiver address
+/// core `sc_dest` (the receipt's R4, a [`PaymentAddress`]), the public
+/// locked amount `value` (`N`), and the globally-unique Ergo receipt
+/// `box_id`. Returns the leaf commitment and the [`PaymentOpening`] the
+/// recipient reconstructs to spend it.
+///
+/// Why this is the peg-in mint (and why no `MintProof` is carried): the
+/// deposit amount `N` and recipient `sc_dest` are *already public* on
+/// the Ergo chain (the `DepositReceipt`), so the leaf need hide nothing
+/// at mint time — privacy is recovered only when the note is later spent
+/// through the §3 circuit, which re-randomizes. Because every input is
+/// public and fixed by consensus, the leaf is a pure function of
+/// `(sc_dest, N, box_id)`: consensus computes it directly.
+///
+/// - **No inflation:** the value slot is `consensus_note_commitment`'s
+///   first coordinate = exactly `N` (the verifier-proven receipt amount);
+///   nothing is miner-chosen, so there is no value slack to inflate.
+/// - **Bound to the depositor, not the miner:** the leaf is the
+///   address-binding note of [`sender_build_note`] with the recipient
+///   `pk = sc_dest`. Its tag is `(pk + rho·B + r_key·B_blinding + Δ).x`,
+///   so opening it (spending) requires `nk = dlog_B(pk)` — the discrete
+///   log the miner does not have. A miner cannot redirect the mint to
+///   itself: any leaf it substitutes would either not commit `N`
+///   (post-state root mismatch → block rejected) or not be spendable by
+///   anyone (it still cannot forge `nk`).
+/// - **`rho = rho_pegmint(box_id)`** ties note uniqueness to the unique
+///   Ergo `box_id`; `r_key`/`blinding` are the deterministic siblings so
+///   the recipient can rebuild the opening from the public `box_id`
+///   alone (no side channel needed — see [`recipient_note_opening`]).
+///
+/// `None` iff `sc_dest` is not a canonical compressed odd-curve point
+/// (an unspendable receipt address — the caller rejects the mint).
+pub fn pegmint_note(
+    sc_dest: &[u8; PAYMENT_ADDRESS_BYTES],
+    value: u64,
+    box_id: &[u8; 32],
+) -> Option<(EvenPoint, PaymentOpening)> {
+    let addr = PaymentAddress::from_bytes(sc_dest)?;
+    let rho = crate::nullifier::rho_pegmint(box_id);
+    let r_key = crate::h2c::hash_to_field_one::<OddScalar>(RKEY_PEGMINT_DST, box_id);
+    let blinding = crate::h2c::hash_to_field_one::<EvenScalar>(BLINDING_PEGMINT_DST, box_id);
+    Some(sender_build_note(&addr, value, rho, r_key, blinding))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -434,5 +487,91 @@ mod tests {
             p2.nullifiers(),
             "a note maps to exactly one nullifier regardless of proof randomness"
         );
+    }
+
+    // ----- peg-in mint notes -----
+
+    const BOX_ID: [u8; 32] = [0x5A; 32];
+
+    #[test]
+    fn pegmint_note_is_deterministic_and_input_sensitive() {
+        let addr = PaymentAddress::from_nk(recipient_nk());
+        let dest = addr.to_bytes();
+        let (cm, op) = pegmint_note(&dest, 50_000, &BOX_ID).unwrap();
+        let (cm2, op2) = pegmint_note(&dest, 50_000, &BOX_ID).unwrap();
+        assert_eq!(cm, cm2);
+        assert_eq!(op, op2);
+        // Any public input changing moves the leaf.
+        assert_ne!(cm, pegmint_note(&dest, 50_001, &BOX_ID).unwrap().0);
+        assert_ne!(cm, pegmint_note(&dest, 50_000, &[0x5B; 32]).unwrap().0);
+        let other = PaymentAddress::from_nk(odd(0xB0B)).to_bytes();
+        assert_ne!(cm, pegmint_note(&other, 50_000, &BOX_ID).unwrap().0);
+    }
+
+    #[test]
+    fn pegmint_note_rejects_non_curve_sc_dest() {
+        assert!(pegmint_note(&[0xEE; PAYMENT_ADDRESS_BYTES], 1_000, &BOX_ID).is_none());
+    }
+
+    #[test]
+    fn pegmint_note_commits_the_public_value() {
+        // Anti-inflation: the leaf's value slot is exactly N. The nk
+        // holder rebuilds the SAME leaf from N, so a mismatched N would
+        // not reproduce it.
+        let nk = recipient_nk();
+        let addr = PaymentAddress::from_nk(nk);
+        let (cm, op) = pegmint_note(&addr.to_bytes(), 50_000, &BOX_ID).unwrap();
+        assert_eq!(op.value, 50_000);
+        let tag = consensus_note_tag(nk, op.rho, op.r_key);
+        assert_eq!(cm, consensus_note_commitment(50_000, tag, op.blinding));
+    }
+
+    #[test]
+    fn recipient_reconstructs_and_spends_pegmint_note() {
+        // The depositor (holder of nk where sc_dest = nk·B) rebuilds the
+        // opening from the PUBLIC box_id alone and spends the minted note
+        // through the unchanged §3 circuit — the end-to-end peg-in claim.
+        let nk = recipient_nk();
+        let dest = PaymentAddress::from_nk(nk).to_bytes();
+        // The real minted note plus a zero-value dummy (2-in arity), both
+        // reconstructed from public box_ids only.
+        let (cm, op) = pegmint_note(&dest, 1_500, &BOX_ID).unwrap();
+        let (dummy_cm, dummy_op) = pegmint_note(&dest, 0, &[0x01; 32]).unwrap();
+        let tree = build_tree(&[cm, dummy_cm]);
+        let inputs = [
+            recipient_note_opening(nk, &op, 0),
+            recipient_note_opening(nk, &dummy_op, 1),
+        ];
+        let bob = PaymentAddress::from_nk(odd(0xB0B));
+        let (out0, _) =
+            output_to_address(&bob, 1_500 - FEE - 100, odd(0xA1), odd(0xA2), even(0xA3));
+        let (out1, _) = output_to_address(&bob, 100, odd(0xA4), odd(0xA5), even(0xA6));
+        let proof =
+            prove_transfer(&tree, &inputs, &[out0, out1], FEE, &mut rng()).expect("mint spends");
+        verify_transfer(&tree, &proof, FEE).expect("spend verifies");
+    }
+
+    #[test]
+    fn non_holder_cannot_spend_pegmint_note() {
+        // An attacker who knows the full public opening (value, blinding,
+        // rho, r_key — all derivable from box_id) but not nk cannot spend.
+        let nk = recipient_nk();
+        let dest = PaymentAddress::from_nk(nk).to_bytes();
+        let (cm, op) = pegmint_note(&dest, 1_000, &BOX_ID).unwrap();
+        let (cm1, op1) = pegmint_note(&dest, 500, &[0x02; 32]).unwrap();
+        let tree = build_tree(&[cm, cm1]);
+        let wrong_nk = odd(0x1BAD);
+        let attacker_inputs = [
+            recipient_note_opening(wrong_nk, &op, 0),
+            recipient_note_opening(wrong_nk, &op1, 1),
+        ];
+        let bob = PaymentAddress::from_nk(odd(0xB0B));
+        let (out0, _) =
+            output_to_address(&bob, 1_500 - FEE - 100, odd(0xA1), odd(0xA2), even(0xA3));
+        let (out1, _) = output_to_address(&bob, 100, odd(0xA4), odd(0xA5), even(0xA6));
+        assert!(matches!(
+            prove_transfer(&tree, &attacker_inputs, &[out0, out1], FEE, &mut rng()),
+            Err(SpendError::WrongOpening(0))
+        ));
     }
 }

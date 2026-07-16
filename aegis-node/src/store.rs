@@ -245,7 +245,10 @@ mod tests {
         transfers: Vec<crate::tx::ShieldedTransfer>,
     ) {
         let now = chain.tip().timestamp_ms + T_MS;
-        let body = BlockBody { transfers };
+        let body = BlockBody {
+            transfers,
+            peg_mints: Vec::new(),
+        };
         let block = if coinbase {
             let h = chain.tip().height + 1;
             chain

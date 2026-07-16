@@ -871,6 +871,7 @@ mod tests {
             .produce_next(
                 BlockBody {
                     transfers: vec![transfer_with_nfs(1, 2)],
+                    ..Default::default()
                 },
                 now1,
             )
@@ -1145,6 +1146,7 @@ mod tests {
         let now = chain.tip().timestamp_ms + T_MS;
         let bad_body = BlockBody {
             transfers: vec![transfer_with_nfs(1, 1)], // nf duplicated
+            ..Default::default()
         };
         let mut header = chain
             .produce_next(BlockBody::default(), now)
@@ -1188,6 +1190,7 @@ mod tests {
         let now = chain.tip().timestamp_ms + T_MS;
         let bad_body = BlockBody {
             transfers: vec![transfer_with_nfs(2, 2)],
+            ..Default::default()
         };
         let mut header = chain
             .produce_next(BlockBody::default(), now)

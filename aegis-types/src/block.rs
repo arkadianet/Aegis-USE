@@ -6,7 +6,9 @@
 //! semantics.
 
 use aegis_crypto::mint::MintProof;
-use aegis_spec::{MAX_BLOCK_BYTES, MAX_BLOCK_TXS, MAX_PROOF_BYTES};
+use aegis_spec::{
+    MAX_BLOCK_BYTES, MAX_BLOCK_PEGMINTS, MAX_BLOCK_TXS, MAX_PEGMINT_PROOF_BYTES, MAX_PROOF_BYTES,
+};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ergo_crypto::merkle::merkle_tree_root;
 use ergo_primitives::reader::{ReadError, VlqReader};
@@ -16,10 +18,21 @@ use crate::header::{Header, HeaderDecodeError};
 use crate::tx::{ShieldedTransfer, TxDecodeError};
 use crate::EMPTY_TX_ROOT;
 
-/// Ordered transfers carried by one block.
+/// Ordered transfers carried by one block, plus any peg-in mint proofs.
+///
+/// `peg_mints` are carried as **opaque canonical envelope bytes** (the
+/// `serialize_pegmint_proof` form from `aegis-node::pegmint_steps`),
+/// not a typed struct: the peg verifier — and the ergo-ser types a
+/// `PegMintProof` is built from — live in `aegis-node`, which depends on
+/// this crate, so a typed field here would be a dependency cycle. The
+/// consensus effect of each proof (the minted note leaf, the used-set
+/// boxId, the pot credit) is committed by the header's post-state roots;
+/// the bytes are parsed and verified at block-apply time. Byte-order is
+/// deterministic (length-prefixed, transfers then peg-mints).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct BlockBody {
     pub transfers: Vec<ShieldedTransfer>,
+    pub peg_mints: Vec<Vec<u8>>,
 }
 
 /// Full block: core header + body + optional coinbase mint (S5b).
@@ -43,6 +56,10 @@ pub enum BodyDecodeError {
     Tx(#[from] TxDecodeError),
     #[error("too many txs: {got} > {MAX_BLOCK_TXS}")]
     TooManyTxs { got: usize },
+    #[error("too many peg-mints: {got} > {MAX_BLOCK_PEGMINTS}")]
+    TooManyPegMints { got: usize },
+    #[error("peg-mint proof too large: {got} > {MAX_PEGMINT_PROOF_BYTES} bytes")]
+    PegMintTooLarge { got: usize },
     #[error("body too large: {got} > {MAX_BLOCK_BYTES} bytes")]
     TooLarge { got: usize },
     #[error("trailing bytes after body ({0} left)")]
@@ -68,6 +85,11 @@ impl BlockBody {
             w.put_u64(tx_bytes.len() as u64);
             w.put_bytes(&tx_bytes);
         }
+        w.put_u64(self.peg_mints.len() as u64);
+        for pm in &self.peg_mints {
+            w.put_u64(pm.len() as u64);
+            w.put_bytes(pm);
+        }
         w.result()
     }
 
@@ -87,10 +109,25 @@ impl BlockBody {
             let tx_bytes = r.get_bytes(len.min(MAX_BLOCK_BYTES))?;
             transfers.push(ShieldedTransfer::from_bytes(tx_bytes)?);
         }
+        let pm_count = usize::try_from(r.get_u64()?).unwrap_or(usize::MAX);
+        if pm_count > MAX_BLOCK_PEGMINTS {
+            return Err(BodyDecodeError::TooManyPegMints { got: pm_count });
+        }
+        let mut peg_mints = Vec::with_capacity(pm_count);
+        for _ in 0..pm_count {
+            let len = usize::try_from(r.get_u64()?).unwrap_or(usize::MAX);
+            if len > MAX_PEGMINT_PROOF_BYTES {
+                return Err(BodyDecodeError::PegMintTooLarge { got: len });
+            }
+            peg_mints.push(r.get_bytes(len)?.to_vec());
+        }
         if !r.is_empty() {
             return Err(BodyDecodeError::TrailingBytes(r.remaining()));
         }
-        Ok(BlockBody { transfers })
+        Ok(BlockBody {
+            transfers,
+            peg_mints,
+        })
     }
 }
 
@@ -226,7 +263,10 @@ mod tests {
             .collect();
         Block {
             header: sample_header(),
-            body: BlockBody { transfers },
+            body: BlockBody {
+                transfers,
+                peg_mints: Vec::new(),
+            },
             coinbase,
         }
     }
@@ -258,12 +298,15 @@ mod tests {
     fn tx_root_changes_with_content_and_order() {
         let a = BlockBody {
             transfers: vec![sample_transfer(1), sample_transfer(2)],
+            ..Default::default()
         };
         let b = BlockBody {
             transfers: vec![sample_transfer(2), sample_transfer(1)],
+            ..Default::default()
         };
         let c = BlockBody {
             transfers: vec![sample_transfer(1)],
+            ..Default::default()
         };
         assert_ne!(a.tx_root(), b.tx_root());
         assert_ne!(a.tx_root(), c.tx_root());
@@ -276,8 +319,37 @@ mod tests {
     fn body_bytes_roundtrips() {
         let body = BlockBody {
             transfers: vec![sample_transfer(1), sample_transfer(9)],
+            ..Default::default()
         };
         assert_eq!(BlockBody::from_bytes(&body.bytes()).unwrap(), body);
+    }
+
+    #[test]
+    fn body_bytes_with_peg_mints_roundtrips() {
+        // Peg-mints are opaque blobs at the wire layer (varying lengths,
+        // including empty) — the codec must preserve them exactly.
+        let body = BlockBody {
+            transfers: vec![sample_transfer(3)],
+            peg_mints: vec![vec![0xAB; 5], vec![], vec![0x01, 0x02, 0x03]],
+        };
+        let back = BlockBody::from_bytes(&body.bytes()).unwrap();
+        assert_eq!(back, body);
+        assert_eq!(back.peg_mints.len(), 3);
+    }
+
+    #[test]
+    fn peg_mints_do_not_affect_tx_root() {
+        // tx_root commits only the transfers; the peg-mints' consensus
+        // effect is committed through the post-state roots, not tx_root.
+        let base = BlockBody {
+            transfers: vec![sample_transfer(1)],
+            ..Default::default()
+        };
+        let with_peg = BlockBody {
+            transfers: vec![sample_transfer(1)],
+            peg_mints: vec![vec![0xDE, 0xAD]],
+        };
+        assert_eq!(base.tx_root(), with_peg.tx_root());
     }
 
     #[test]
@@ -375,6 +447,30 @@ mod tests {
         assert!(matches!(
             BlockBody::from_bytes(&bytes),
             Err(BodyDecodeError::TrailingBytes(1))
+        ));
+    }
+
+    #[test]
+    fn body_with_too_many_peg_mints_errors() {
+        // 0 transfers, then a peg-mint count above the cap.
+        let mut w = VlqWriter::with_capacity(8);
+        w.put_u64(0); // transfers
+        w.put_u64((MAX_BLOCK_PEGMINTS + 1) as u64);
+        assert!(matches!(
+            BlockBody::from_bytes(&w.result()),
+            Err(BodyDecodeError::TooManyPegMints { .. })
+        ));
+    }
+
+    #[test]
+    fn body_with_oversized_peg_mint_len_errors() {
+        let mut w = VlqWriter::with_capacity(16);
+        w.put_u64(0); // transfers
+        w.put_u64(1); // one peg-mint
+        w.put_u64((MAX_PEGMINT_PROOF_BYTES + 1) as u64);
+        assert!(matches!(
+            BlockBody::from_bytes(&w.result()),
+            Err(BodyDecodeError::PegMintTooLarge { .. })
         ));
     }
 }

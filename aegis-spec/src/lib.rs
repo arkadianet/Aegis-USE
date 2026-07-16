@@ -212,6 +212,18 @@ pub const MAX_PROOF_BYTES: usize = 8_192;
 pub const MAX_BLOCK_TXS: usize = 128;
 pub const MAX_BLOCK_BYTES: usize = 524_288;
 
+/// Envelope cap on a single serialized PegMint proof carried in a block
+/// body (g25 §5.6). Peg-in proofs bundle a NiPoPoW chain part plus two
+/// tx-inclusion claims, so they are large relative to a transfer; the
+/// verifier (`aegis-node::pegmint_steps`) re-checks this same cap before
+/// any hashing. Consensus constant (chain-id-breaking).
+pub const MAX_PEGMINT_PROOF_BYTES: usize = 2 * 1024 * 1024;
+
+/// Hard cap on the number of PegMint proofs one block may carry
+/// (consensus.md §7 block-weight discipline). Bounds the per-block
+/// peg-in verification cost.
+pub const MAX_BLOCK_PEGMINTS: usize = 32;
+
 #[cfg(test)]
 mod tests {
     use super::*;
