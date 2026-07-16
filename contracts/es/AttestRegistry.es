@@ -13,6 +13,16 @@
   //             federation; n = R4.size, each a 33-byte SEC1 point)
   // R5 = Int    the threshold k
   //
+  // ── DEPLOY / ROTATION CEREMONY GATES (the script CANNOT see these — the mint
+  //   and every rotation MUST get them right; S1d red-review P2) ──
+  //   * MINT SUPPLY == 1. SideChainState's dataInput-spoofing defense rests on
+  //     this NFT being a true singleton (EIP-4). NEVER mint supply > 1 — with
+  //     supply > 1 an attacker box could carry a unit + attacker-chosen R4/R5.
+  //   * Members on-curve, non-identity, and INDEPENDENTLY held (distinct OWNERS,
+  //     not merely distinct bytes) — the in-script `distinct` is byte-only.
+  //   * Pick k >= floor(n/2)+1; avoid k == n (one lost key then deadlocks BOTH
+  //     the tip and rotation). The script only enforces 1 <= k <= n <= 255.
+  //
   // Update tx convention: INPUTS(i) = SELF, OUTPUTS(0) = successor.
   //
   // ── THE ONLY SPEND PATH IS ROTATION ─────────────────────────────────────

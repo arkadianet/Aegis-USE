@@ -168,7 +168,9 @@ pub struct ScriptConstants {
 impl ScriptConstants {
     /// The all-empty placeholder env: every `fromBase64("")` stays empty.
     /// Compiling under it yields the canonical placeholder trees whose byte
-    /// sizes DESIGN.md records (138/79/74/590/209/159).
+    /// sizes the structure-pin test records: DepositReceipt 138 · DoubleRedeem
+    /// 79 · FeePot 74 · PegVault 590 · SideChainState 284 · AttestRegistry 224
+    /// · UnlockIntent 159 (SideChainState + AttestRegistry are the S1d shape).
     pub fn placeholder() -> Self {
         Self::default()
     }

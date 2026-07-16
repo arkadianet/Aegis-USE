@@ -86,7 +86,7 @@ fn testnet_v2_constants() -> ScriptConstants {
 
 /// Structure pin: placeholder-form tree sizes vs the DESIGN.md record.
 /// `DepositReceipt 138 · DoubleRedeem 79 · FeePot 74 · PegVault 590 ·
-/// SideChainState 268 · AttestRegistry 224 · UnlockIntent 159`.
+/// SideChainState 284 · AttestRegistry 224 · UnlockIntent 159`.
 ///
 /// S1d re-authors the SideChainState authority: the S1c inlined
 /// `atLeast(2, Coll(proveDlog(pk_1..3)))` (225 B) becomes
@@ -95,7 +95,9 @@ fn testnet_v2_constants() -> ScriptConstants {
 /// leave the tree (they move to the registry box's REGISTERS), but the
 /// dataInput read + `registryValid` NFT check + the `.map` lambda machinery
 /// weigh MORE than the removed 3-literal `atLeast`, so the placeholder tree
-/// GROWS 225 → 268 B. `AttestRegistry` is the new rotation box (224 B
+/// GROWS 225 → 268 → 284 B (the last +16 is the S1d-review `registryValid`
+/// `tokens(0)._2 == 1L` NFT-amount hardening). `AttestRegistry` is the new
+/// rotation box (224 B
 /// placeholder; singleton-transition checks + 1<=k<=n<=255 bound + O(n^2)
 /// distinctness forall + the current-set `atLeast`). Both are
 /// SELF-MEASUREMENTS (no on-chain oracle for these trees yet) — a change here
@@ -128,7 +130,7 @@ fn placeholder_trees_match_design_size_record() {
         (
             "SideChainState",
             side_chain_state(&consts, net).unwrap().tree_bytes.len(),
-            268,
+            284,
         ),
         (
             "AttestRegistry",

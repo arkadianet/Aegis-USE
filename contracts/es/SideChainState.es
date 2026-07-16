@@ -138,7 +138,8 @@
   val registry = CONTEXT.dataInputs(0)
   val registryValid =
     registry.tokens.size == 1 &&
-    registry.tokens(0)._1 == ATTEST_REGISTRY_NFT
+    registry.tokens(0)._1 == ATTEST_REGISTRY_NFT &&
+    registry.tokens(0)._2 == 1L                     // full singleton unit (mint MUST be supply-1)
   val attesterPks = registry.R4[Coll[GroupElement]].get
   val attestK = registry.R5[Int].get
 
