@@ -102,6 +102,17 @@ pub enum ExtendError {
 /// from its [`crate::ergo_follow::Follower`] as the tip advances (the
 /// "followed-anchor seam"); it is owned here so `try_extend`'s signature
 /// — called from many sites — stays unchanged.
+///
+/// ⚠⚠ DO NOT enable peg on a MULTI-NODE network without the anchor-deferral
+/// plumbing (peg red-review P1 — load-bearing for soundness). The apply path
+/// uses `verify_pegmint` (anchor-supplied), which treats a not-yet-followed
+/// inclusion as block-INVALID rather than DEFERRING — so two honest nodes at
+/// different Ergo-follow depths would reach DIFFERENT verdicts on the SAME
+/// Aegis block = CONSENSUS SPLIT. This is safe today ONLY because `peg == None`
+/// (set solely in tests) makes the whole path unreachable on a real node.
+/// Before enabling peg anywhere multi-node: resolve the anchor from the node's
+/// OWN `Follower` (never from block data) AND defer — not reject — a
+/// not-yet-settled mint, against a consensus-agreed anchor.
 #[derive(Debug, Clone)]
 pub struct PegConfig {
     pub anchor: ComparativeAnchor,
