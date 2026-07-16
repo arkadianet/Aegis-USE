@@ -46,6 +46,10 @@ pub const PEG_VAULT_ES: &str = include_str!("../es/PegVault.es");
 /// `SideChainState.es` — singleton tip-digest box with the insert-only
 /// burn tree.
 pub const SIDE_CHAIN_STATE_ES: &str = include_str!("../es/SideChainState.es");
+/// `AttestRegistry.es` — singleton-NFT box holding the CURRENT k-of-n
+/// attester federation (`R4` members, `R5` threshold); rotatable under the
+/// current set's quorum (S1d). SideChainState reads it as a dataInput.
+pub const ATTEST_REGISTRY_ES: &str = include_str!("../es/AttestRegistry.es");
 /// `UnlockIntent.es` — peg-out claim box (burn_id, N, claimant).
 pub const UNLOCK_INTENT_ES: &str = include_str!("../es/UnlockIntent.es");
 
@@ -89,13 +93,29 @@ pub enum ContractsError {
         #[source]
         source: ergo_compiler::CompileError,
     },
-    /// The injected attester federation has a duplicated public key. The
-    /// `atLeast` k-of-n predicate has no dedup, so a repeated key lets one
-    /// secret satisfy multiple slots and collapses the threshold. Deploy
-    /// keys MUST be distinct — this is caught here because the ErgoScript
-    /// cannot enforce it (S1c review, finding D2).
-    #[error("SideChainState: attester federation has a duplicate public key")]
+    /// The attester federation has a duplicated public key. The `atLeast`
+    /// k-of-n predicate has no dedup, so a repeated key lets one secret
+    /// satisfy multiple slots and collapses the threshold. Federation keys
+    /// MUST be distinct. Under S1d the on-chain AttestRegistry rotation script
+    /// ALSO rejects duplicates in a successor set; this guard covers the
+    /// GENESIS set (the inductive base case, which no predecessor validates).
+    #[error("AttestRegistry: attester federation has a duplicate public key")]
     DuplicateAttesterKey,
+    /// The genesis attester set's threshold is out of range. The interpreter's
+    /// `atLeast` treats `k <= 0` as trivially TRUE (anyone spends — an
+    /// irreversible tip hijack) and `k > n` / `n > 255` as unsatisfiable /
+    /// throwing (brick). A valid federation MUST have `1 <= k <= n <= 255`
+    /// (and, for real security, `k >= n/2 + 1`). The on-chain rotation script
+    /// enforces this on every successor; this guard covers the genesis set.
+    #[error(
+        "AttestRegistry: threshold k={k} out of range for n={n} members (need 1 <= k <= n <= 255)"
+    )]
+    InvalidThreshold {
+        /// The rejected threshold.
+        k: u32,
+        /// The federation size.
+        n: usize,
+    },
 }
 
 // ── deploy constants ─────────────────────────────────────────────────────────
@@ -117,7 +137,12 @@ pub enum ContractsError {
 /// | `receipt_script_hash` | `RECEIPT_SCRIPT_HASH` | PegVault |
 /// | `fee_pot_script_hash` | `FEE_POT_SCRIPT_HASH` | PegVault |
 /// | `sidechain_state_nft` | `SIDECHAIN_STATE_NFT` | SideChainState, UnlockIntent |
-/// | `attester_pks` | `ATTESTER_PK_1..3` (33-byte compressed points) | SideChainState |
+/// | `attest_registry_nft` | `ATTEST_REGISTRY_NFT` | AttestRegistry, SideChainState |
+///
+/// The attester set + threshold are NO LONGER script constants (S1d): they
+/// live in the AttestRegistry box's `R4`/`R5` registers and are chosen at
+/// box-creation time, not baked into a tree. Validate a genesis set with
+/// [`validate_attester_set`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ScriptConstants {
     /// USE token id (`tokens(0)._1` of receipts / `tokens(1)._1` of the vault).
@@ -134,10 +159,10 @@ pub struct ScriptConstants {
     pub fee_pot_script_hash: Option<[u8; 32]>,
     /// Singleton SideChainState NFT id.
     pub sidechain_state_nft: Option<[u8; 32]>,
-    /// The k-of-n attester federation's public keys (33-byte SEC1-compressed
-    /// points), injected into `ATTESTER_PK_1..3` — the S1c U1-strong tip
-    /// authority (replaces the v1 single `TIP_PK`). Canonical n = 3.
-    pub attester_pks: Option<[[u8; 33]; 3]>,
+    /// Singleton AttestRegistry NFT id (S1d). Injected into both
+    /// `AttestRegistry.es` (self-identity) and `SideChainState.es` (the id it
+    /// pins the registry dataInput by, to read the CURRENT federation).
+    pub attest_registry_nft: Option<[u8; 32]>,
 }
 
 impl ScriptConstants {
@@ -308,37 +333,78 @@ pub fn peg_vault(
 }
 
 /// Compile `SideChainState.es`. Injections: `sidechain_state_nft`,
-/// `attester_pks` (into `ATTESTER_PK_1..3`).
+/// `attest_registry_nft`. The attester set + threshold are read at spend time
+/// from the AttestRegistry dataInput (pinned by `attest_registry_nft`), not
+/// baked into this tree (S1d) — so rotating the registry changes who may
+/// advance the tip with no SideChainState redeploy.
 pub fn side_chain_state(
     consts: &ScriptConstants,
     network: NetworkPrefix,
 ) -> Result<CompiledContract, ContractsError> {
     const NAME: &str = "SideChainState";
-    // The `atLeast` predicate does not dedup its children, so a duplicated
-    // attester key would silently collapse the k-of-n threshold (one secret
-    // fills two slots). The ErgoScript cannot check this — reject it here.
-    if let Some(pks) = &consts.attester_pks {
-        for i in 0..pks.len() {
-            if pks[i + 1..].contains(&pks[i]) {
-                return Err(ContractsError::DuplicateAttesterKey);
-            }
-        }
-    }
     let src = SIDE_CHAIN_STATE_ES.to_owned();
-    let mut src = inject(
+    let src = inject(
         src,
         NAME,
         "SIDECHAIN_STATE_NFT",
         opt_slice(&consts.sidechain_state_nft),
     )?;
-    // Inject each attester pubkey into its ATTESTER_PK_i placeholder. `None`
-    // leaves all three empty (the canonical placeholder form).
-    const PK_NAMES: [&str; 3] = ["ATTESTER_PK_1", "ATTESTER_PK_2", "ATTESTER_PK_3"];
-    for (i, name) in PK_NAMES.iter().enumerate() {
-        let pk = consts.attester_pks.map(|pks| pks[i]);
-        src = inject(src, NAME, name, pk.as_ref().map(|p| p.as_slice()))?;
-    }
+    let src = inject(
+        src,
+        NAME,
+        "ATTEST_REGISTRY_NFT",
+        opt_slice(&consts.attest_registry_nft),
+    )?;
     compile_es(NAME, &src, network)
+}
+
+/// Compile `AttestRegistry.es`. Injection: `attest_registry_nft` (the box's
+/// own singleton identity). The federation itself (members `R4`, threshold
+/// `R5`) is box-register data set at deploy/rotation time, not a script
+/// constant; validate a genesis set with [`validate_attester_set`].
+pub fn attest_registry(
+    consts: &ScriptConstants,
+    network: NetworkPrefix,
+) -> Result<CompiledContract, ContractsError> {
+    const NAME: &str = "AttestRegistry";
+    let src = ATTEST_REGISTRY_ES.to_owned();
+    let src = inject(
+        src,
+        NAME,
+        "ATTEST_REGISTRY_NFT",
+        opt_slice(&consts.attest_registry_nft),
+    )?;
+    compile_es(NAME, &src, network)
+}
+
+/// Validate a GENESIS AttestRegistry federation (the `R4` members / `R5`
+/// threshold the deploy ceremony writes into the box's registers). This is
+/// the inductive BASE CASE: no predecessor box validates the genesis set, so
+/// the ceremony must. On-chain, `AttestRegistry.es` enforces the SAME
+/// invariants on every rotation successor — this mirrors them for genesis:
+///
+/// * `1 <= k <= n <= 255` — the interpreter's `atLeast` treats `k <= 0` as
+///   trivially true (anyone advances the tip — hijack), `k > n` as
+///   unsatisfiable and `n > 255` as throwing (both brick the tip)
+///   ([`ContractsError::InvalidThreshold`]);
+/// * distinct members — `atLeast` has no dedup, so a repeat collapses the
+///   threshold ([`ContractsError::DuplicateAttesterKey`]).
+///
+/// It does NOT (cannot) check that keys are on-curve or independently held —
+/// those stay ceremony gates (mirroring S1c D2). For real security also pick
+/// `k >= n/2 + 1`; the script permits any `1 <= k <= n` (unanimity included),
+/// so avoiding the lost-key-deadlock foot-gun is also a ceremony choice.
+pub fn validate_attester_set(pks: &[[u8; 33]], k: u32) -> Result<(), ContractsError> {
+    let n = pks.len();
+    if k < 1 || (k as usize) > n || n > 255 {
+        return Err(ContractsError::InvalidThreshold { k, n });
+    }
+    for i in 0..n {
+        if pks[i + 1..].contains(&pks[i]) {
+            return Err(ContractsError::DuplicateAttesterKey);
+        }
+    }
+    Ok(())
 }
 
 /// Compile `UnlockIntent.es`. Injections: `peg_vault_nft` (as `VAULT_NFT`),

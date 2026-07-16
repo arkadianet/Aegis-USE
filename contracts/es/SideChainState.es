@@ -60,7 +60,7 @@
   //   and holds no USE (successor.tokens.size == 1), so it contributes 0 to
   //   the vault's pass-2 sum-accounting and cannot perturb it.
   //
-  // ── C1 — U1-STRONG (k-of-n attesters, S1c) ─────────────────────────────
+  // ── C1 — U1-STRONG (k-of-n attesters, ROTATABLE via S1d) ───────────────
   //   Tip updates (INCLUDING every burn insert) are authorized by a k-of-n
   //   ATTESTER FEDERATION, not a single key. A fake burn now requires k
   //   colluding attesters instead of one compromised tip key, and still
@@ -69,17 +69,31 @@
   //   bounded by V_cap + T_delay. R5 (tip commitment) remains unverified
   //   DATA — k-of-n does NOT make peg-out trustless; full trust-minimization
   //   needs SPV-in-consensus / STARK settlement (S2). See attester-infra.md
-  //   §S1c (dev-docs/sidechain/s1c-attester-unlock.md) + DESIGN.md §C1.
-  // ⚠ deploy-time injections: SIDECHAIN_STATE_NFT, ATTESTER_PK_1..N (33-byte
-  //   compressed EC points). ATTEST_K (the threshold) is inlined. Canonical
-  //   form = 2-of-3 (dogfood, attest_k/n default); a different (k,n)
-  //   re-authors ATTEST_K + the ATTESTER_PK_i list + the atLeast Coll below.
+  //   §S1c/§S1d + DESIGN.md §C1.
+  //
+  //   S1d: the federation is no longer INLINED here. It is read from the
+  //   AttestRegistry singleton box (pinned by ATTEST_REGISTRY_NFT) provided as
+  //   dataInputs(0): R4 = Coll[GroupElement] members, R5 = Int threshold k.
+  //   The authority is `atLeast(k, members.map(proveDlog))` built from THOSE
+  //   registers — so ROTATING the registry (add/remove/replace an attester)
+  //   changes who may advance the tip with NO SideChainState redeploy. The
+  //   AttestRegistry contract constrains every set it can hold to
+  //   1 <= k <= n <= 255 and distinct members, so the atLeast built here can
+  //   never degenerate (k<=0 ⇒ anyone-spends; k>n / n>255 ⇒ brick).
+  //
+  //   SOUNDNESS of the dataInput read: `registryValid` (dataInputs(0) carries
+  //   the real ATTEST_REGISTRY_NFT — an UNFORGEABLE singleton) is ANDed into
+  //   the sigmaProp below. A spoofed dataInput fails registryValid, so even
+  //   though its attacker-chosen R4/R5 could satisfy the atLeast, the ANDed
+  //   sigmaProp(false) rejects the spend; the ONLY way to pass is to reference
+  //   the genuine registry, whose members/k are the real ones. dataInputs must
+  //   be UNSPENT ⇒ only the LIVE registry box qualifies (no stale-set replay).
+  // ⚠ deploy-time injections: SIDECHAIN_STATE_NFT, ATTEST_REGISTRY_NFT (the
+  //   AttestRegistry singleton NFT id). The set + threshold are NOT injected
+  //   here anymore — they live in the registry box's registers.
 
-  val SIDECHAIN_STATE_NFT = fromBase64("")         // todo state singleton NFT id
-  val ATTESTER_PK_1 = decodePoint(fromBase64(""))  // todo attester #1 pubkey
-  val ATTESTER_PK_2 = decodePoint(fromBase64(""))  // todo attester #2 pubkey
-  val ATTESTER_PK_3 = decodePoint(fromBase64(""))  // todo attester #3 pubkey
-  val ATTEST_K = 2                                 // k-of-n threshold (2-of-3)
+  val SIDECHAIN_STATE_NFT = fromBase64("")   // todo state singleton NFT id
+  val ATTEST_REGISTRY_NFT = fromBase64("")   // todo attest-registry singleton NFT id
 
   val successor = OUTPUTS(0)
 
@@ -114,14 +128,23 @@
       newTree == oldTree
     }
 
-  // U1-strong authority: k-of-n attesters must co-sign the update tx. The
-  // transition constraints below are ANDed on, so ≥k signatures are
+  // U1-strong authority (S1d, rotatable): read the CURRENT federation from the
+  // AttestRegistry singleton (dataInputs(0), pinned by its NFT) and require
+  // its k-of-n to co-sign. `registryValid` is ANDed into the sigmaProp so a
+  // spoofed dataInput cannot inject attacker keys (see SOUNDNESS note above).
+  // The transition constraints are ANDed on too, so ≥k signatures are
   // NECESSARY but not sufficient — a signed update still has to be a valid
   // append-only advance.
-  atLeast(ATTEST_K, Coll(
-    proveDlog(ATTESTER_PK_1),
-    proveDlog(ATTESTER_PK_2),
-    proveDlog(ATTESTER_PK_3)
-  )) &&
-    sigmaProp(structural && heightAdvances && tipWellFormed && rateLimited && treeTransition)
+  val registry = CONTEXT.dataInputs(0)
+  val registryValid =
+    registry.tokens.size == 1 &&
+    registry.tokens(0)._1 == ATTEST_REGISTRY_NFT
+  val attesterPks = registry.R4[Coll[GroupElement]].get
+  val attestK = registry.R5[Int].get
+
+  atLeast(attestK, attesterPks.map({ (pk: GroupElement) => proveDlog(pk) })) &&
+    sigmaProp(
+      registryValid &&
+      structural && heightAdvances && tipWellFormed && rateLimited && treeTransition
+    )
 }
