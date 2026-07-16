@@ -62,7 +62,9 @@ pub fn build_tree(leaves: &[EvenPoint]) -> AegisTree {
         "empty set has no Curve Tree root — use the consensus sentinel"
     );
     assert!(
-        leaves.len() <= TREE_L.pow(TREE_DEPTH as u32),
+        // Capacity is `TREE_L^TREE_DEPTH` = 256^4 = 2^32, which overflows a
+        // 32-bit `usize` (e.g. a RISC0 guest); compute it in u64.
+        leaves.len() as u64 <= (TREE_L as u64).pow(TREE_DEPTH as u32),
         "leaf count exceeds tree capacity"
     );
     CurveTree::from_set(leaves, tree_params(), Some(TREE_DEPTH))
@@ -126,7 +128,8 @@ impl IncrementalCmTree {
     /// Panics beyond tree capacity (mirrors [`build_tree`]).
     pub fn push(&mut self, leaf: EvenPoint) {
         assert!(
-            self.len < TREE_L.pow(TREE_DEPTH as u32),
+            // 2^32 capacity overflows a 32-bit `usize`; compute in u64.
+            (self.len as u64) < (TREE_L as u64).pow(TREE_DEPTH as u32),
             "leaf count exceeds tree capacity"
         );
         match &mut self.tree {
