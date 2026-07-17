@@ -373,12 +373,40 @@ in-field proof verification (~52 ms/proof native).
   wallet rescan recovers the exact balance → the reopened node accepts a fresh
   spend (stable vk). Balances reconcile exactly (fees burn).
 
-**Deferred (explicitly NEXT, per the milestone):** fold the hash-native tx type
-into the LIVE block/P2P/fork-choice + mining pipeline and the HTTP API surface
-(the subsystem is wired but not yet the node's primary consensus); testnet cut +
-multi-node + merge-mining against the STARK devnet; coinbase value/emission
-policy + fee-to-miner (fees burn today); peg-in enablement; mempool DoS
-hardening.
+### Primary-consensus promotion (economics, hardening, remote wallet)
+
+- **RNG split (privacy must-fix)**: the deterministic-keys shortcut for a stable
+  vk was replaced by a structural split — a FIXED internal salt for the PUBLIC
+  preprocessed commitment (→ vk stable across instances/restarts) + FRESH OS
+  masks per proof (the privacy). One constructor `SpendCircuit::new()`, no seed
+  arg. Tested: two instances' vks cross-verify each other's proofs (⇒ identical)
+  while two proofs of one statement differ (⇒ fresh masks).
+- **Emission + fee-to-miner**: `produce_block` mints coinbase =
+  `EMISSION_PER_BLOCK` (flat 50, documented; a real chain halves) + all mempool
+  fees; fees go to the miner via the deterministic coinbase note (no burning).
+  `fund()` is a genesis/faucet allocation (immediately spendable);
+  `HnBlock.coinbase_is_reward` distinguishes mined vs genesis.
+- **Coinbase maturity**: `OutputRecord` carries `height` + `is_coinbase`; the
+  wallet won't select an immature coinbase note (`COINBASE_MATURITY`);
+  `spendable_balance(tip)` excludes them. (A consensus-enforced maturity over
+  HIDDEN inputs is a documented hard problem — wallet-side for now.)
+- **Mempool hardening**: `validate_tx` is cheap-checks-first — shape, §6
+  ciphertext sizes, the `MIN_FEE` floor (from public fee limbs), the anchor
+  window, and the nullifier index all BEFORE the ~52 ms proof verify.
+- **HTTP surface + remote wallet**: `hn::api::HnApiServer` exposes the
+  `ChainView` reads (GET) + tx submit / mine (POST) on the node's minimalist
+  std-`TcpListener` pattern; `hn::http_client::HttpChain` (reqwest blocking) is a
+  remote `ChainView` a wallet drives with only its keys + a node URL. **Promoted
+  e2e** (`hn_http_e2e.rs`): a REMOTE wallet over HTTP does the full flow
+  (scan → pay by address → submit+mine → double-spend rejected → restart → rescan
+  → fresh spend), plus the in-process e2e's emission/fee/maturity checks.
+
+**Deferred (explicitly NEXT):** fold the hash-native tx into the LIVE
+P2P-gossip + aux-PoW merge-mining + fork-choice consensus (the block-production
+step + HTTP service exist and are tested; wiring them into the live networked
+consensus + chain-profile selection is the testnet-cut milestone); testnet cut +
+multi-node; per-peer unverified-tx rate limiting; consensus-enforced coinbase
+maturity over hidden inputs; peg-in enablement.
 
 ## Next (in order)
 1. ~~Wallet~~ DONE (see the wallet section above). ~~Node integration (single,
