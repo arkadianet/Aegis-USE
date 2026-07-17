@@ -8,7 +8,7 @@
 //! shipped with the software; here [`SpendCircuit::new`] builds them and both
 //! the wallet and the in-memory chain borrow it.
 
-use aegis_engine::config::{hiding_config, HidingEngineConfig};
+use aegis_engine::config::{hiding_config, make_hiding_config, HidingEngineConfig};
 use aegis_engine::merkle::MerklePath;
 use aegis_engine::poseidon::{Digest, F};
 use aegis_engine::spend::monolith::{
@@ -19,6 +19,8 @@ use p3_uni_stark::{
     prove_with_preprocessed, setup_preprocessed, verify_with_preprocessed, PreprocessedProverData,
     PreprocessedVerifierKey, Proof,
 };
+use rand::SeedableRng;
+use rand_chacha::ChaCha20Rng;
 
 /// The verifying-key half, shareable with a node.
 pub type SpendVk = PreprocessedVerifierKey<HidingEngineConfig>;
@@ -40,7 +42,24 @@ impl Default for SpendCircuit {
 impl SpendCircuit {
     /// Build fresh circuit keys (OS-seeded hiding masks).
     pub fn new() -> Self {
-        let config = hiding_config();
+        Self::from_config(hiding_config())
+    }
+
+    /// Build REPRODUCIBLE circuit keys from a fixed seed — the published vk is
+    /// then stable across restarts and identical for every party (a node
+    /// reloads the same vk from disk-less reconstruction; the wallet and node
+    /// agree). ⚠ REVIEW ITEM: a fixed seed makes the hiding masks deterministic
+    /// across instances/restarts, weakening privacy; production must separate
+    /// the PUBLIC preprocessed-salt (fixed → stable vk) from FRESH per-proof
+    /// main-trace masks (an engine refinement — the two currently share one RNG).
+    pub fn deterministic(seed: u64) -> Self {
+        Self::from_config(make_hiding_config(
+            ChaCha20Rng::seed_from_u64(seed),
+            ChaCha20Rng::seed_from_u64(seed ^ 0x9e37_79b9_7f4a_7c15),
+        ))
+    }
+
+    fn from_config(config: HidingEngineConfig) -> Self {
         let air = SpendAir;
         let degree_bits = N_ROWS.trailing_zeros() as usize;
         let (pd, vk) = setup_preprocessed::<HidingEngineConfig, _>(&config, &air, degree_bits)

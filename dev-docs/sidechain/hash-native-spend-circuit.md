@@ -322,8 +322,67 @@ Deferred: keystore file format/serde + CLI, out_ct sender recovery, note-store
 persistence, fee-to-miner accounting (fees burn in the rehearsal), in-circuit
 dummy-input flag.
 
+## aegis-node integration (single node, local) — `aegis-node/src/hn/`
+
+The sidechain itself runs hash-native. A self-contained subsystem in aegis-node,
+ALONGSIDE the existing Curve-Trees consensus (which stays the baseline); path
+deps into the isolated `engine/` workspace pull Plonky3 into the node for
+in-field proof verification (~52 ms/proof native).
+
+- **`hn::state` (`HnState`)** mirrors the Curve-Trees `ShieldedState`: the
+  Poseidon-Merkle tree + `cm_leaves` (for rebuild), the nullifier set, and the
+  recent-roots window (`ROOT_WINDOW=100`). `apply_block`/`rollback` are EXACT
+  inverses (validate-then-mutate; `HnBlockUndo` captures leaf count, added
+  nullifiers, output count, height, and any evicted window root) — reorg-safe,
+  tested `apply→rollback→apply = identity`.
+- **Reorg strategy (documented)**: rollback truncates `cm_leaves` and rebuilds
+  the tree from the prefix (the tree has no truncate — the rare reorg path is
+  O(n), exactly the Curve-Trees choice); nullifiers/outputs/window roll back
+  from the undo. The block header commits both `prev_root` (anchor) and
+  `state_root` (tip after applying), so a light client verifies a state
+  transition as *verify each proof + check the two roots*.
+- **Tx validation (mempool AND block, `validate_tx`)**: verify the hiding proof
+  against the published `SpendVk`; anchor root ∈ window; both nullifiers unseen
+  on-chain OR pending (the mempool's pending-nullifier index rejects
+  conflicting txs); exactly 2×152 B ciphertexts (§6 at consensus); canonical
+  public-values shape. **Mempool DoS posture (honest)**: admission costs one
+  ~52 ms proof verify — cheap for block validation, but a spam vector at scale;
+  the standard defenses (a proof-carrying fee bond checked before verify, per-
+  peer rate limits, verify-after-cheap-checks ordering) are a flagged follow-up.
+- **Mint derivation (`hn::mint`)**: coinbase / (INERT) peg-in notes are
+  DETERMINISTIC from `(dest, amount, unique id)`, domain-separated (`rho`/`r`
+  from the id under distinct domains; a purpose tag separates coinbase from
+  peg-in) — a miner cannot redirect value (dest is bound into `cm`) or double-
+  mint (id on a used-set / one-per-block). A ciphertext is attached so the
+  standard wallet scanner finds a mint like any output (§6 uniformity). Peg-in
+  stays INERT (as on `main`) but its derivation exists.
+- **Node boundary (`hn::chain::HnChain`)**: implements the wallet's `ChainView`
+  (current_root / authentication_path / nullifier_seen / outputs_since /
+  output_count) + `submit` (mempool) + `produce_block` (local production) over a
+  **persisted block log** (`hn_blocks.log`, framed `len‖postcard(block)` — "the
+  block sequence IS the state", mirroring `store.rs`). Restart = `open()` replays
+  the log to rebuild state.
+- **Published vk stability**: node + wallet share reproducible circuit keys
+  (`SpendCircuit::deterministic(seed)`) so the vk survives restarts. ⚠ REVIEW:
+  a fixed seed makes the hiding masks deterministic across instances — production
+  must split the public preprocessed-salt (fixed → stable vk) from fresh per-
+  proof masks (a coupled-RNG engine refinement).
+- **Real-node e2e (passing)**: `aegis-node/tests/hn_e2e.rs` — coinbase/faucet
+  mint → A pays B by address → B finds+spends → double-spend from a stale
+  instance rejected at the REAL mempool → node restart (reload from disk) →
+  wallet rescan recovers the exact balance → the reopened node accepts a fresh
+  spend (stable vk). Balances reconcile exactly (fees burn).
+
+**Deferred (explicitly NEXT, per the milestone):** fold the hash-native tx type
+into the LIVE block/P2P/fork-choice + mining pipeline and the HTTP API surface
+(the subsystem is wired but not yet the node's primary consensus); testnet cut +
+multi-node + merge-mining against the STARK devnet; coinbase value/emission
+policy + fee-to-miner (fees burn today); peg-in enablement; mempool DoS
+hardening.
+
 ## Next (in order)
-1. ~~Wallet~~ DONE (see the wallet section above).
+1. ~~Wallet~~ DONE (see the wallet section above). ~~Node integration (single,
+   local)~~ DONE (see the aegis-node integration section).
 2. Sender-recovery slot (`out_ct`, N7 analog) + memo semantics.
 3. Peg contract wiring on the settlement guest; narrow-trace optimization
    (client prove < 1 s AND cheaper settlement).

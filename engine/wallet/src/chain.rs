@@ -30,7 +30,7 @@ pub const ROOT_WINDOW: usize = 100;
 /// An on-chain shielded transaction: the hiding spend proof, its public values
 /// (canonical `u32` limbs), and the two fixed-size output ciphertexts (§6
 /// uniformity — always exactly two, always [`NOTE_CT_BYTES`] each).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Tx {
     pub proof_bytes: Vec<u8>,
     pub public_values: Vec<u32>,
@@ -38,7 +38,7 @@ pub struct Tx {
 }
 
 /// A committed output as the scan feed surfaces it.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct OutputRecord {
     /// The leaf index of this output's commitment in the accumulator.
     pub leaf_index: u64,

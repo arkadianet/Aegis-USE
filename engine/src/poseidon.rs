@@ -148,6 +148,16 @@ pub fn digest_from_bytes(bytes: &[u8; 32]) -> Option<Digest> {
     Some(out)
 }
 
+/// Hash `(domain, n: u64, limbs)` to 32 bytes — a compact engine-native id
+/// (e.g. a block id from height ‖ prev-root limbs).
+pub fn hash_id_domain(domain: u32, n: u64, limbs: &[F; DIGEST_ELEMS]) -> [u8; 32] {
+    let mut input = [F::ZERO; DIGEST_ELEMS + 2];
+    input[0] = F::from_u64(n & 0xFFFF_FFFF);
+    input[1] = F::from_u64(n >> 32);
+    input[2..].copy_from_slice(limbs);
+    digest_to_bytes(&hash_domain(domain, &input))
+}
+
 /// Domain-separated fixed-length hash to a digest: add-absorb sponge over
 /// rate-8 chunks (one permutation per chunk), squeeze the first 8 lanes.
 ///

@@ -52,6 +52,7 @@ dependencies = [
  "pbkdf2",
  "postcard",
  "rand",
+ "serde",
  "sha2",
  "x25519-dalek",
 ]
