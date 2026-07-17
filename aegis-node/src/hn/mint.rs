@@ -70,9 +70,17 @@ pub fn coinbase_cm_expected(owner: &Digest, amount: u64, block_id: &[u8; 32]) ->
     note_commitment(amount, owner, &rho, &r)
 }
 
-/// The (INERT) peg-in note for `amount` to `dest`, unique per `box_id`. The
-/// derivation exists so the peg-in mint path is defined; enabling it is gated at
-/// the node exactly as on `main` (a used-`box_id` set + anchor deferral).
+/// The commitment a peg-in mint note MUST have for `(owner, amount, box_id)` —
+/// validators recompute it from the block's PUBLIC peg-in claim exactly as for
+/// the coinbase.
+pub fn pegmint_cm_expected(owner: &Digest, amount: u64, box_id: &[u8; 32]) -> Digest {
+    let (rho, r) = mint_nonces(box_id, PURPOSE_PEGIN);
+    note_commitment(amount, owner, &rho, &r)
+}
+
+/// The peg-in note for `amount` to `dest`, unique per `box_id`. Consensus
+/// mints it for a confirmed vault deposit; the used-`box_id` set makes it
+/// once-per-deposit, ever.
 pub fn pegmint_note(dest: &Address, amount: u64, box_id: &[u8; 32]) -> MintOut {
     mint_out(dest, amount, box_id, PURPOSE_PEGIN)
 }

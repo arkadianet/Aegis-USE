@@ -291,6 +291,99 @@ impl Wallet {
     }
 }
 
+impl Wallet {
+    /// Build a peg-out BURN spend: out0 is the deterministic burn note of
+    /// `burn_value` (= withdrawal + peg fee; owner/nonces per
+    /// [`aegis_engine::burn`], derived from this spend's first nullifier),
+    /// out1 is change to self. The caller wraps the returned `Tx` with the
+    /// public withdrawal record; the chain validates the burn commitment
+    /// against it. Marks the inputs spent locally on success.
+    pub fn burn_spend(
+        &mut self,
+        chain: &impl ChainView,
+        circuit: &SpendCircuit,
+        burn_value: u64,
+        fee: u64,
+    ) -> Result<Tx, PayError> {
+        use aegis_engine::burn::{burn_nonces, burn_owner};
+
+        let need = burn_value + fee;
+        let sel = self.select(need, chain.tip_height())?;
+        let root = chain.current_root();
+        let paths: [MerklePath; 2] = [
+            chain
+                .authentication_path(sel[0].leaf_index)
+                .ok_or(PayError::MissingPath)?,
+            chain
+                .authentication_path(sel[1].leaf_index)
+                .ok_or(PayError::MissingPath)?,
+        ];
+        let inputs: [InputNote; 2] = core::array::from_fn(|i| InputNote {
+            value: sel[i].value,
+            nk: self.keys.nk,
+            rho: sel[i].rho,
+            r: sel[i].r,
+            index: sel[i].leaf_index,
+        });
+        // The burn nonces derive from nf0 = nullifier(nk, rho of input 0) —
+        // known before proving, unique forever.
+        let nf0 = nullifier(&self.keys.nk, &sel[0].rho);
+        let (rho_burn, r_burn) = burn_nonces(&nf0);
+        let owner_burn = burn_owner();
+
+        let change = sel[0].value + sel[1].value - need;
+        let (rho_chg, r_chg) = (random_digest(), random_digest());
+        let outputs: [OutputNote; 2] = [
+            OutputNote {
+                value: burn_value,
+                owner: owner_burn,
+                rho: rho_burn,
+                r: r_burn,
+            },
+            OutputNote {
+                value: change,
+                owner: self.owner,
+                rho: rho_chg,
+                r: r_chg,
+            },
+        ];
+        let (proof_bytes, publics) = circuit.prove(&inputs, &paths, root, &outputs, fee);
+
+        // §6 uniformity: both output slots carry a fixed-size ciphertext. The
+        // burn note has no recipient; encrypt its opening to SELF (bound to
+        // the burn cm, so our own scanner rejects it as not-ours).
+        let cm_burn = note_commitment(burn_value, &owner_burn, &rho_burn, &r_burn);
+        let cm_chg = note_commitment(change, &self.owner, &rho_chg, &r_chg);
+        let pt_burn = NotePlaintext {
+            value: burn_value,
+            rho: rho_burn,
+            r: r_burn,
+            memo: [0u8; MEMO_BYTES],
+        };
+        let pt_chg = NotePlaintext {
+            value: change,
+            rho: rho_chg,
+            r: r_chg,
+            memo: [0u8; MEMO_BYTES],
+        };
+        let ct_burn =
+            encrypt_note(&self.address, &cm_burn, &pt_burn).expect("own address is contributory");
+        let ct_chg =
+            encrypt_note(&self.address, &cm_chg, &pt_chg).expect("own address is contributory");
+
+        for s in &sel {
+            if let Some(n) = self.notes.iter_mut().find(|n| n.leaf_index == s.leaf_index) {
+                n.spent = true;
+            }
+        }
+        Ok(Tx {
+            proof_bytes,
+            public_values: publics,
+            out_ciphertexts: [ct_burn, ct_chg],
+        })
+    }
+}
+
 /// A fresh random digest (per-note nonce / blinding), from OS entropy.
 fn random_digest() -> Digest {
     let mut rng = rand::rng();

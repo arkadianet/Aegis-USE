@@ -23,9 +23,9 @@ use aegis_engine::address::{Address, WalletKeys, HRP_TEST};
 
 /// The hn testnet chain id / network magic. Distinct from the Curve-Trees
 /// profiles so the two networks can never confuse blocks or peers.
-/// v2: the spec-economics port (flat fee → pot, pot-funded coinbase) —
-/// chain-id-breaking vs the v1 placeholder-economy testnet.
-pub const HN_TESTNET_CHAIN_ID: u32 = 0x484E_0002; // "HN" ‖ v2
+/// v3: the trustless-bridge cut (peg-in mints, peg-out burns in the block
+/// format) — chain-id-breaking vs the v2 spec-economics testnet.
+pub const HN_TESTNET_CHAIN_ID: u32 = 0x484E_0003; // "HN" ‖ v3
 
 /// Base-unit scale: 1 USE = 100 base units ("cents"). All amounts in the
 /// engine, wallet, and chain are integer cents.
@@ -68,6 +68,15 @@ pub struct HnChainParams {
     /// Genesis allocation: `(recipient, amount)` faucet notes minted at height 0
     /// — the pinned non-reward blocks; a validator rejects any deviation.
     pub genesis: Vec<(Address, u64)>,
+    /// Peg fee, both directions: percent of the moved amount (min 1 base
+    /// unit), credited to the POT.
+    pub peg_fee_percent: u64,
+    /// Devnet confirmations a vault deposit needs before consensus mints it
+    /// (the reorg-safety depth; below it a claim is DEFERRED, not rejected).
+    pub pegin_confirmations: u64,
+    /// hn blocks a recorded withdrawal waits before it is settleable
+    /// (T_delay batching: the settle loop only proves withdrawals this deep).
+    pub pegout_delay: u64,
 }
 
 /// The seed the genesis faucet's keys derive from — its address funds the e2e
@@ -105,7 +114,16 @@ impl HnChainParams {
                 (faucet_address(), 500_000_000),
                 (faucet_address(), 500_000_000),
             ],
+            peg_fee_percent: 1,
+            pegin_confirmations: 10,
+            pegout_delay: 10,
         }
+    }
+
+    /// The peg fee for moving `amount` across the bridge:
+    /// `peg_fee_percent`% of it, at least 1 base unit. Credited to the pot.
+    pub fn peg_fee(&self, amount: u64) -> u64 {
+        (amount.saturating_mul(self.peg_fee_percent) / 100).max(1)
     }
 
     /// This profile with a custom genesis allocation + pot (tests / local

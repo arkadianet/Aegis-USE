@@ -10,7 +10,7 @@ use aegis_engine::address::{WalletKeys, HRP_TEST};
 use aegis_hn_wallet::SpendCircuit;
 use aegis_node::hn::auxpow::fetch_devnet_anchor;
 use aegis_node::hn::params::faucet_address_string;
-use aegis_node::hn::{HnApiServer, HnApiState, HnChain, HnChainParams, HttpChain};
+use aegis_node::hn::{HnApiServer, HnApiState, HnChain, HnChainParams, HttpChain, VaultWatch};
 use clap::Parser;
 
 #[derive(Parser)]
@@ -43,6 +43,16 @@ struct Args {
     /// Loop tick (ms).
     #[arg(long, default_value_t = 2000)]
     tick_ms: u64,
+    /// PegVault ErgoTree bytes (hex). With --use-token, enables the peg-in
+    /// watcher: confirmed vault deposits are minted on the hn chain.
+    #[arg(long)]
+    vault_tree: Option<String>,
+    /// The test-USE token id (hex, 32 bytes) deposits must carry.
+    #[arg(long)]
+    use_token: Option<String>,
+    /// Devnet height the vault watcher starts scanning from.
+    #[arg(long, default_value_t = 0)]
+    pegin_start: u64,
 }
 
 fn main() {
@@ -51,12 +61,37 @@ fn main() {
 
     let params = HnChainParams::testnet();
     let log_exists = args.data_dir.join("hn_blocks.log").exists();
-    let chain = if log_exists {
-        HnChain::open(&args.data_dir, circuit, params).expect("open chain")
+    let mut chain = if log_exists {
+        HnChain::open(&args.data_dir, circuit, params.clone()).expect("open chain")
     } else if args.genesis {
-        HnChain::create_genesis(&args.data_dir, circuit, params).expect("create genesis chain")
+        HnChain::create_genesis(&args.data_dir, circuit, params.clone())
+            .expect("create genesis chain")
     } else {
-        HnChain::create(&args.data_dir, circuit, params).expect("create chain")
+        HnChain::create(&args.data_dir, circuit, params.clone()).expect("create chain")
+    };
+
+    // Peg-in watcher: only with BOTH the vault tree and the USE token id.
+    let mut watch = match (&args.vault_tree, &args.use_token) {
+        (Some(tree_hex), Some(token_hex)) => {
+            let tree = hex::decode(tree_hex).expect("--vault-tree is hex");
+            let token: [u8; 32] = hex::decode(token_hex)
+                .expect("--use-token is hex")
+                .try_into()
+                .expect("--use-token is 32 bytes");
+            let watch = VaultWatch::new(
+                args.devnet_url.clone(),
+                args.devnet_key.clone(),
+                tree,
+                token,
+                params.pegin_confirmations,
+                args.pegin_start,
+                params.clone(),
+            );
+            chain.set_pegin_check(watch.checker());
+            Some(watch)
+        }
+        (None, None) => None,
+        _ => panic!("--vault-tree and --use-token must be set together"),
     };
 
     let miner = WalletKeys::from_seed(args.miner_seed.as_bytes()).address();
@@ -89,9 +124,29 @@ fn main() {
         );
     }
 
+    if watch.is_some() {
+        eprintln!(
+            "hn-node: peg-in watcher on (vault tree {} bytes, from devnet height {})",
+            args.vault_tree.as_deref().map(|t| t.len() / 2).unwrap_or(0),
+            args.pegin_start
+        );
+    }
+
     let peer = args.peer_url.as_deref().map(HttpChain::new);
     let mut last_status = std::time::Instant::now();
     loop {
+        // Peg-in: scan the devnet for vault deposits (network I/O — the chain
+        // Mutex is NOT held here), then queue confirmed ones for production.
+        // Each locked call is `let`-bound / statement-scoped so no guard
+        // lives across I/O (see the produce-loop deadlock note below).
+        if let Some(w) = watch.as_mut() {
+            w.poll();
+            if args.produce {
+                for c in w.confirmed_claims() {
+                    shared.lock().unwrap().queue_pegin(c);
+                }
+            }
+        }
         // Follow: sync blocks + gossip mempool from the peer.
         if let Some(p) = &peer {
             let applied = shared.lock().unwrap().sync_from(p);

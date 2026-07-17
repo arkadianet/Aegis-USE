@@ -469,6 +469,61 @@ pot-exhausted chain advances with 0-coinbase blocks; the multi-block multi-tx
 e2e asserts `pot + shielded_total == genesis_pot + genesis_sum` after every
 block and that the pot equals `genesis + fees − coinbases` exactly.
 
+## The trustless bridge (peg-in / peg-out, verifyStark settlement)
+
+Chain id `0x484E_0003` (block format gained peg fields — chain-id-breaking).
+Peg params pinned in `HnChainParams`: `peg_fee_percent` 1 (min 1 base unit,
+both directions, credited to the POT), `pegin_confirmations` 10,
+`pegout_delay` 10.
+
+### Peg-in (devnet vault deposit → consensus mint)
+
+- A deposit = a box AT THE VAULT ADDRESS carrying the USE token + `R4 =`
+  64 bytes `sc_dest` (hn owner `digest_to_bytes` ‖ `enc_pk`). The node's
+  `hn::pegin_watch::VaultWatch` follows devnet blocks (API-only) and records
+  deposits; at `pegin_confirmations` depth the producer queues a
+  `PegInClaim { box_id, dest_owner, dest_enc_pk, amount, ciphertext }`.
+- Consensus (`apply_block`): box-id uniqueness FOREVER (`used_pegins`, undone
+  exactly on rollback), mint = `amount − 1% fee`, fee → pot, and the minted
+  note's commitment is recomputed from the claim
+  (`mint::pegmint_cm_expected`) — a producer cannot redirect or reprice a
+  deposit. Dust (`amount ≤ fee`) is invalid.
+- **Reorg/deferral policy**: a follower re-checks every claim against ITS OWN
+  devnet view; a claim not yet confirmed there is `PegInNotConfirmed`, which
+  DEFERS the sync (retry next tick) rather than rejecting the block — a devnet
+  reorg above the depth threshold simply stalls ingestion until the follower's
+  view settles; below the threshold nothing mints anywhere.
+
+### Peg-out (shielded burn → public withdrawal)
+
+- `PegOutTx { tx, amount, recipient_prop }`: a normal 2-in/2-out spend whose
+  **out0 is the deterministic burn note** — value `amount + 1% fee`, owner =
+  `aegis_engine::burn::burn_owner()` (no known `nk` preimage ⇒ no nullifier ⇒
+  provably unspendable), nonces derived from the spend's first nullifier
+  (unique forever). Validators recompute the commitment from the PUBLIC
+  withdrawal; any mismatch (wrong amount, wrong burn, replayed proof under a
+  different withdrawal) is `BadPegOut`. Flat fee applies as for any spend.
+- Effects: peg fee → pot; the burn value leaves `shielded_total`; the
+  withdrawal `{nf0, amount, recipient_prop, hn_height}` is appended to the
+  pending set (settleable after `pegout_delay`; the VAULT's root/counter
+  continuity is what prevents double-settlement on Ergo).
+- Conservation (I1-extended with bridge flows, ENFORCED per block):
+  `Δ(shielded_total + pot) == Σ deposits − Σ withdrawals` — value enters and
+  leaves the system only through the vault.
+
+### Settlement + PegVault (Ergo side)
+
+Journal (byte-exact, guest ↔ contract): `b"AEGISPO3"` ‖ prev_root(32) ‖
+new_root(32) ‖ amount u64-BE ‖ counter_next u64-BE ‖ recipient ErgoTree bytes.
+The PegVault predicate CONSTRUCTS the journal from the spending tx itself
+(vault R4/R5, successor R4/R5+1, recipient output's token amount +
+propositionBytes) and passes it to `verifyStark` — a valid proof can therefore
+authorize exactly one tx shape (the EIP-0045 binding footgun closed by
+construction). Root continuity in vault R4 + the R5 counter are the
+anti-replay. Deposits share the vault address, so deposited USE is only
+spendable inside a valid release (consolidation for free). Details + deploy
+state in the bridge report / `bridge-tools/`.
+
 ## Networked testnet cut (multi-node, merge-mined)
 
 The hash-native subsystem now runs as a **networked, multi-node, merge-mined

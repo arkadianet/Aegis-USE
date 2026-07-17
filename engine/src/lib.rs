@@ -22,6 +22,7 @@
 //! the current engine. Not wired into any consensus path.
 
 pub mod address;
+pub mod burn;
 pub mod commit;
 pub mod config;
 pub mod merkle;

@@ -18,10 +18,12 @@ pub mod chain;
 pub mod http_client;
 pub mod mint;
 pub mod params;
+pub mod pegin_watch;
 pub mod state;
 
 pub use api::{HnApiServer, HnApiState};
-pub use chain::HnChain;
+pub use chain::{HnChain, PegInCheck};
 pub use http_client::HttpChain;
 pub use params::HnChainParams;
-pub use state::{HnBlock, HnError, HnState};
+pub use pegin_watch::VaultWatch;
+pub use state::{HnBlock, HnError, HnState, PegInClaim, PegOutTx, Withdrawal};

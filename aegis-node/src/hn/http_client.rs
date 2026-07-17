@@ -79,6 +79,30 @@ impl HttpChain {
         }
     }
 
+    /// Submit a peg-out (`POST /hn/v1/pegout`).
+    pub fn submit_pegout(&self, po: &super::state::PegOutTx) -> Result<(), String> {
+        let body = postcard::to_allocvec(po).expect("pegout serializes");
+        let resp = self
+            .client
+            .post(format!("{}/hn/v1/pegout", self.base))
+            .body(body)
+            .send()
+            .map_err(|e| e.to_string())?;
+        if resp.status().is_success() {
+            Ok(())
+        } else {
+            Err(resp.text().unwrap_or_default())
+        }
+    }
+
+    /// The node's recorded withdrawals (`GET /hn/v1/withdrawals`).
+    pub fn withdrawals(&self) -> Vec<super::state::Withdrawal> {
+        match self.get_hex("/hn/v1/withdrawals") {
+            Some(bytes) => postcard::from_bytes(&bytes).unwrap_or_default(),
+            None => Vec::new(),
+        }
+    }
+
     /// Fetch the peer's mempool (tx gossip pull).
     pub fn fetch_mempool(&self) -> Vec<Tx> {
         match self.get_hex("/hn/v1/mempool") {

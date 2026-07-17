@@ -19,6 +19,8 @@ use aegis_engine::address::Address;
 use aegis_engine::poseidon::{digest_from_bytes, digest_to_bytes};
 use aegis_hn_wallet::{ChainView, Tx};
 
+use super::state::PegOutTx;
+
 use super::chain::HnChain;
 
 const SOCKET_TIMEOUT: Duration = Duration::from_secs(10);
@@ -192,6 +194,13 @@ fn handle_get(s: &mut TcpStream, state: &HnApiState, target: &str) -> std::io::R
         "/hn/v1/tipheight" => respond(s, 200, chain.tip_height().to_string().as_bytes()),
         // ----- P2P block feed (a syncing peer pulls blocks from `from`) -----
         "/hn/v1/blockcount" => respond(s, 200, chain.block_count().to_string().as_bytes()),
+        // Recorded withdrawals (hex postcard Vec<Withdrawal>) — the settle
+        // loop's feed.
+        "/hn/v1/withdrawals" => respond(
+            s,
+            200,
+            hex::encode(postcard::to_allocvec(&chain.withdrawals()).unwrap()).as_bytes(),
+        ),
         "/hn/v1/mempool" => respond(
             s,
             200,
@@ -266,6 +275,17 @@ fn handle_post(
             };
             let mut chain = state.chain.lock().unwrap();
             match chain.submit(tx) {
+                Ok(()) => respond(s, 200, b"ok"),
+                Err(e) => respond(s, 409, e.to_string().as_bytes()),
+            }
+        }
+        // Submit a peg-out (postcard PegOutTx: burn spend + public withdrawal).
+        "/hn/v1/pegout" => {
+            let Ok(po) = postcard::from_bytes::<PegOutTx>(body) else {
+                return respond(s, 400, b"bad pegout");
+            };
+            let mut chain = state.chain.lock().unwrap();
+            match chain.submit_pegout(po) {
                 Ok(()) => respond(s, 200, b"ok"),
                 Err(e) => respond(s, 409, e.to_string().as_bytes()),
             }

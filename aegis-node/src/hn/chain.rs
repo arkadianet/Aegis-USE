@@ -20,10 +20,24 @@ use aegis_hn_wallet::{ChainView, SpendCircuit, Tx};
 use super::mint::{coinbase_note, MintOut};
 use super::params::HnChainParams;
 use super::state::{
-    block_id, digest_to_limbs, limbs_to_digest, AuxAnchor, HnBlock, HnError, HnState,
+    block_id, digest_to_limbs, limbs_to_digest, AuxAnchor, HnBlock, HnError, HnState, PegInClaim,
+    PegOutTx, Withdrawal,
 };
 
 const BLOCK_LOG: &str = "hn_blocks.log";
+
+/// A node-local view of the devnet vault used to admit peg-in claims. The
+/// producer queues only claims its own view confirms; a FOLLOWER re-checks
+/// every claim in an ingested block against ITS view — a claim not yet
+/// confirmed there is a DEFERRAL (sync retries next tick), never a hard
+/// reject, which is exactly the anchor-deferral posture for a devnet reorg
+/// under the deposit: below the pinned depth nothing mints, and a busy
+/// follower simply waits until its own devnet view is deep enough.
+pub trait PegInCheck: Send {
+    /// Is this exact claim (box id, dest, amount) a vault deposit CONFIRMED at
+    /// the required depth in our own devnet view?
+    fn confirmed(&self, claim: &PegInClaim) -> bool;
+}
 
 /// The node's hash-native chain: state + circuit keys + mempool + the block
 /// log (kept in memory for P2P serving), persisted to `dir`.
@@ -32,6 +46,12 @@ pub struct HnChain {
     circuit: SpendCircuit,
     dir: PathBuf,
     mempool: Vec<Tx>,
+    mempool_pegouts: Vec<PegOutTx>,
+    /// Confirmed deposits queued for the next produced block.
+    pegin_queue: Vec<PegInClaim>,
+    /// The devnet-vault view claims are checked against (None = no peg-in
+    /// admission; blocks with claims are deferred until a view is set).
+    pegin_check: Option<Box<dyn PegInCheck>>,
     mempool_nfs: HashSet<[u32; DIGEST_ELEMS]>,
     /// Every applied block (index == height) — served to syncing peers.
     blocks: Vec<HnBlock>,
@@ -54,6 +74,9 @@ impl HnChain {
             circuit,
             dir: dir.as_ref().to_path_buf(),
             mempool: Vec::new(),
+            mempool_pegouts: Vec::new(),
+            pegin_queue: Vec::new(),
+            pegin_check: None,
             mempool_nfs: HashSet::new(),
             blocks: Vec::new(),
         })
@@ -114,6 +137,58 @@ impl HnChain {
         self.state.shielded_total()
     }
 
+    /// The recorded withdrawals (the settle loop reads these; settleable once
+    /// `hn_height + pegout_delay <= tip`).
+    pub fn withdrawals(&self) -> Vec<Withdrawal> {
+        self.state.withdrawals().to_vec()
+    }
+
+    /// Wire the devnet-vault view peg-in claims are admitted against.
+    pub fn set_pegin_check(&mut self, check: Box<dyn PegInCheck>) {
+        self.pegin_check = Some(check);
+    }
+
+    /// Queue a CONFIRMED deposit for the next produced block (producer path;
+    /// the claim is still fully re-validated at apply). Skips already-minted
+    /// and already-queued box ids.
+    pub fn queue_pegin(&mut self, claim: PegInClaim) {
+        if self.state.pegin_used(&claim.box_id)
+            || self.pegin_queue.iter().any(|c| c.box_id == claim.box_id)
+        {
+            return;
+        }
+        if let Some(check) = &self.pegin_check {
+            if !check.confirmed(&claim) {
+                return;
+            }
+        }
+        self.pegin_queue.push(claim);
+    }
+
+    /// Admit a peg-out to the mempool: the inner spend is fully validated
+    /// (proof, flat fee, anchor, nullifiers) and the burn commitment must
+    /// match the public withdrawal exactly.
+    pub fn submit_pegout(&mut self, po: PegOutTx) -> Result<(), HnError> {
+        let nfs = self
+            .state
+            .validate_tx(&po.tx, &self.circuit, &self.mempool_nfs)?;
+        let fee = self.state.params().peg_fee(po.amount);
+        let burn_value = po.amount.checked_add(fee).ok_or(HnError::BadPegOut)?;
+        if po.amount == 0 || po.recipient_prop.is_empty() || po.recipient_prop.len() > 4096 {
+            return Err(HnError::BadPegOut);
+        }
+        let cm0 = digest_at_pub(&po.tx, aegis_engine::spend::monolith::PUB_CMO0);
+        if aegis_engine::burn::burn_cm_expected(burn_value, &nfs[0]) != cm0 {
+            return Err(HnError::BadPegOut);
+        }
+        for nf in &nfs {
+            self.mempool_nfs
+                .insert(core::array::from_fn(|i| nf_limb(nf, i)));
+        }
+        self.mempool_pegouts.push(po);
+        Ok(())
+    }
+
     /// Sync from a peer over HTTP: pull every block the peer has beyond our tip
     /// and ingest it (IBD from genesis if we are empty). Returns the number of
     /// blocks applied. Invalid peer blocks stop the sync (a peer can withhold,
@@ -163,6 +238,21 @@ impl HnChain {
     pub fn ingest_block(&mut self, block: HnBlock) -> Result<bool, HnError> {
         if block.height < self.state.height() {
             return Ok(false); // already have it
+        }
+        // Peg-in claims must be confirmed in OUR OWN devnet view too. A claim
+        // our view has not (yet) confirmed is a DEFERRAL — the sync loop stops
+        // and retries next tick — never a hard reject (devnet-reorg posture).
+        if !block.pegins.is_empty() {
+            match &self.pegin_check {
+                None => return Err(HnError::PegInNotConfirmed),
+                Some(check) => {
+                    for pi in &block.pegins {
+                        if !check.confirmed(pi) {
+                            return Err(HnError::PegInNotConfirmed);
+                        }
+                    }
+                }
+            }
         }
         self.state.apply_block(&block, &self.circuit)?;
         self.blocks.push(block.clone());
@@ -252,20 +342,40 @@ impl HnChain {
         anchor: AuxAnchor,
     ) -> Result<(), HnError> {
         let params = self.state.params();
-        let coinbase_amount = params.coinbase_amount(self.state.pot(), self.mempool.len());
-        let fees = params.flat_fee * self.mempool.len() as u64;
-        let pot_after = self.state.pot() + fees - coinbase_amount;
+        let n_spends = self.mempool.len() + self.mempool_pegouts.len();
+        let coinbase_amount = params.coinbase_amount(self.state.pot(), n_spends);
+        let fees = params.flat_fee * n_spends as u64;
+        let peg_fees: u64 = self
+            .mempool_pegouts
+            .iter()
+            .map(|po| params.peg_fee(po.amount))
+            .chain(self.pegin_queue.iter().map(|pi| params.peg_fee(pi.amount)))
+            .sum();
+        let pot_after = self.state.pot() + fees + peg_fees - coinbase_amount;
         let block_id = self.block_id();
         let MintOut {
             cm: coinbase_cm,
             ciphertext: coinbase_ct,
         } = coinbase_note(miner, coinbase_amount, &block_id);
 
-        // The block's committed leaves, in consensus order: tx outputs, coinbase.
+        // The block's committed leaves, in consensus order: tx outputs,
+        // peg-out outputs, peg-in mints, coinbase.
         let mut cms: Vec<Digest> = Vec::new();
-        for tx in &self.mempool {
+        for tx in self
+            .mempool
+            .iter()
+            .chain(self.mempool_pegouts.iter().map(|p| &p.tx))
+        {
             cms.push(digest_at_pub(tx, aegis_engine::spend::monolith::PUB_CMO0));
             cms.push(digest_at_pub(tx, aegis_engine::spend::monolith::PUB_CMO1));
+        }
+        for pi in &self.pegin_queue {
+            let minted = pi.amount - params.peg_fee(pi.amount);
+            cms.push(super::mint::pegmint_cm_expected(
+                &limbs_to_digest(&pi.dest_owner),
+                minted,
+                &pi.box_id,
+            ));
         }
         cms.push(coinbase_cm);
         let state_root = self.state.simulate_state_root(&cms);
@@ -275,6 +385,8 @@ impl HnChain {
             prev_root: self.state.tip_root_limbs(),
             state_root,
             txs: std::mem::take(&mut self.mempool),
+            pegouts: std::mem::take(&mut self.mempool_pegouts),
+            pegins: std::mem::take(&mut self.pegin_queue),
             miner_owner: digest_to_limbs(&miner.owner),
             coinbase_amount,
             coinbase_cm: digest_to_limbs(&coinbase_cm),
@@ -306,6 +418,8 @@ impl HnChain {
             prev_root: self.state.tip_root_limbs(),
             state_root,
             txs: vec![],
+            pegouts: vec![],
+            pegins: vec![],
             miner_owner: digest_to_limbs(&dest.owner),
             coinbase_amount: amount,
             coinbase_cm: digest_to_limbs(&coinbase_cm),

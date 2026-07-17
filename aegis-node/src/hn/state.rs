@@ -28,8 +28,9 @@ use aegis_hn_wallet::{ChainView, SpendCircuit};
 use p3_field::{PrimeCharacteristicRing, PrimeField32};
 use serde::{Deserialize, Serialize};
 
-use super::mint::coinbase_cm_expected;
+use super::mint::{coinbase_cm_expected, pegmint_cm_expected};
 use super::params::HnChainParams;
+use aegis_engine::burn::burn_cm_expected;
 
 const DOMAIN_BLOCK_ID: u32 = 0x0B10;
 
@@ -68,6 +69,52 @@ impl AuxAnchor {
     }
 }
 
+/// A peg-in claim: a CONFIRMED devnet vault deposit consensus mints on the hn
+/// chain. Everything is public; validators recompute the deterministic mint
+/// commitment (`pegmint_cm_expected`) from `(dest_owner, amount − fee,
+/// box_id)`, enforce box-id uniqueness (one mint per deposit, ever), and check
+/// the deposit against their OWN devnet view at the pinned confirmation depth
+/// (chain layer; a not-yet-confirmed claim is DEFERRED, not rejected).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PegInClaim {
+    /// The devnet deposit box id (the unique-mint key).
+    pub box_id: [u8; 32],
+    /// The Aegis destination's spend component (from the deposit's R4).
+    pub dest_owner: [u32; DIGEST_ELEMS],
+    /// The destination's encryption component (R4 second half).
+    pub dest_enc_pk: [u8; 32],
+    /// The DEPOSITED amount (base units); the mint is `amount − peg fee`.
+    pub amount: u64,
+    /// Note ciphertext to the destination (producer-built; size-checked).
+    pub ciphertext: Vec<u8>,
+}
+
+/// A peg-out: a normal shielded spend whose output 0 is the deterministic
+/// BURN note (value = `amount + peg fee`, unspendable owner, nonces derived
+/// from the spend's first nullifier), plus the PUBLIC withdrawal it funds.
+/// Validators recompute the burn commitment and reject any mismatch — the
+/// shielded value provably left the pool for exactly this withdrawal.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PegOutTx {
+    /// The 2-in/2-out spend (out0 = burn note, out1 = change).
+    pub tx: aegis_hn_wallet::Tx,
+    /// The USE to release on Ergo.
+    pub amount: u64,
+    /// The Ergo recipient's ErgoTree (proposition) bytes.
+    pub recipient_prop: Vec<u8>,
+}
+
+/// A recorded withdrawal awaiting settlement (the epoch's pending set).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Withdrawal {
+    /// Unique id = the burning spend's first nullifier.
+    pub nf0: [u32; DIGEST_ELEMS],
+    pub amount: u64,
+    pub recipient_prop: Vec<u8>,
+    /// hn height the peg-out landed at (settleable after `pegout_delay`).
+    pub hn_height: u64,
+}
+
 /// Digest ↔ 8 canonical `u32` limbs (the block/header wire form).
 pub fn digest_to_limbs(d: &Digest) -> [u32; DIGEST_ELEMS] {
     core::array::from_fn(|i| d[i].as_canonical_u32())
@@ -87,6 +134,11 @@ pub struct HnBlock {
     pub prev_root: [u32; DIGEST_ELEMS],
     pub state_root: [u32; DIGEST_ELEMS],
     pub txs: Vec<aegis_hn_wallet::Tx>,
+    /// Peg-out spends (each also a full spend proof; leaf order after `txs`).
+    pub pegouts: Vec<PegOutTx>,
+    /// Confirmed devnet deposits minted in this block (leaf order after
+    /// peg-out outputs, before the coinbase).
+    pub pegins: Vec<PegInClaim>,
     /// The coinbase destination's spend component (`owner = H(nk)`), public so
     /// validators can recompute the coinbase commitment. The miner reveals
     /// where their reward went — payments stay private; block production does
@@ -118,6 +170,8 @@ pub struct HnBlockUndo {
     prev_anchor_height: u64,
     prev_pot: u64,
     prev_shielded_total: u64,
+    added_pegin_box_ids: Vec<[u8; 32]>,
+    prev_withdrawal_count: usize,
     /// A root evicted from the front of the window when this block's tip root
     /// was pushed (restored on rollback so the window is exact).
     evicted_root: Option<Digest>,
@@ -154,6 +208,14 @@ pub enum HnError {
     BadGenesis,
     #[error("conservation violated: shielded total + pot changed")]
     ConservationViolated,
+    #[error("peg-in claim reuses an already-minted deposit box id")]
+    DuplicatePegIn,
+    #[error("peg-in claim is malformed (amount, ciphertext, or commitment)")]
+    BadPegIn,
+    #[error("peg-out burn note does not match the public withdrawal")]
+    BadPegOut,
+    #[error("peg-in deposit not yet confirmed at the required depth (defer)")]
+    PegInNotConfirmed,
 }
 
 /// The pool state.
@@ -170,9 +232,14 @@ pub struct HnState {
     /// `params.genesis_pot`, credits fees, funds coinbases.
     pot: u64,
     /// Total value in the shielded pool, tracked from PUBLIC deltas (coinbase
-    /// amounts, genesis mints, fees) — the other half of the conservation
-    /// invariant. Individual note values stay hidden.
+    /// amounts, genesis mints, fees, peg flows) — the other half of the
+    /// conservation invariant. Individual note values stay hidden.
     shielded_total: u64,
+    /// Devnet deposit box ids already minted (one mint per deposit, ever).
+    used_pegins: HashSet<[u8; 32]>,
+    /// Recorded withdrawals awaiting settlement (append-only; the VAULT's
+    /// root/counter continuity prevents double-settlement on the Ergo side).
+    pending_withdrawals: Vec<Withdrawal>,
     params: HnChainParams,
 }
 
@@ -191,8 +258,20 @@ impl HnState {
             anchor_height: 0,
             pot: params.genesis_pot,
             shielded_total: 0,
+            used_pegins: HashSet::new(),
+            pending_withdrawals: Vec::new(),
             params,
         }
+    }
+
+    /// A deposit box id already minted?
+    pub fn pegin_used(&self, box_id: &[u8; 32]) -> bool {
+        self.used_pegins.contains(box_id)
+    }
+
+    /// The recorded withdrawals (the settle loop reads these).
+    pub fn withdrawals(&self) -> &[Withdrawal] {
+        &self.pending_withdrawals
     }
 
     pub fn height(&self) -> u64 {
@@ -321,7 +400,62 @@ impl HnState {
                 all_nfs.push(k);
             }
         }
-        let fees = self.params.flat_fee * block.txs.len() as u64;
+        // ---- peg-outs: full spends whose out0 is the bound burn note ----
+        let mut pegout_outflow: u64 = 0; // Σ withdrawal amounts (leaves the system)
+        let mut pegout_fees: u64 = 0; // Σ peg fees (→ pot)
+        let mut burn_total: u64 = 0; // Σ (amount + fee) — dead value in the tree
+        for po in &block.pegouts {
+            let nfs = self.validate_tx(&po.tx, circuit, &seen)?;
+            let fee = self.params.peg_fee(po.amount);
+            let burn_value = po.amount.checked_add(fee).ok_or(HnError::BadPegOut)?;
+            if po.amount == 0 || po.recipient_prop.is_empty() || po.recipient_prop.len() > 4096 {
+                return Err(HnError::BadPegOut);
+            }
+            // out0 MUST be the deterministic burn note for exactly this
+            // withdrawal (value amount+fee, unspendable owner, nf0-derived
+            // nonces) — the shielded value provably left for this recipient.
+            let cm0 = digest_at(
+                &po.tx.public_values,
+                aegis_engine::spend::monolith::PUB_CMO0,
+            );
+            if burn_cm_expected(burn_value, &nfs[0]) != cm0 {
+                return Err(HnError::BadPegOut);
+            }
+            for nf in &nfs {
+                let k = Self::nf_key(nf);
+                seen.insert(k);
+                all_nfs.push(k);
+            }
+            pegout_outflow += po.amount;
+            pegout_fees += fee;
+            burn_total += burn_value;
+        }
+        // ---- peg-ins: confirmed deposits, one mint per box id, ever ----
+        let mut pegin_inflow: u64 = 0; // Σ deposited (enters the system)
+        let mut pegin_fees: u64 = 0; // Σ peg fees (→ pot)
+        let mut pegin_cms: Vec<Digest> = Vec::with_capacity(block.pegins.len());
+        {
+            let mut in_block: HashSet<[u8; 32]> = HashSet::new();
+            for pi in &block.pegins {
+                if self.used_pegins.contains(&pi.box_id) || !in_block.insert(pi.box_id) {
+                    return Err(HnError::DuplicatePegIn);
+                }
+                if pi.ciphertext.len() != NOTE_CT_BYTES {
+                    return Err(HnError::BadPegIn);
+                }
+                let fee = self.params.peg_fee(pi.amount);
+                let minted = pi
+                    .amount
+                    .checked_sub(fee)
+                    .filter(|m| *m > 0)
+                    .ok_or(HnError::BadPegIn)?;
+                let cm = pegmint_cm_expected(&limbs_to_digest(&pi.dest_owner), minted, &pi.box_id);
+                pegin_cms.push(cm);
+                pegin_inflow += pi.amount;
+                pegin_fees += fee;
+            }
+        }
+        let fees = self.params.flat_fee * (block.txs.len() + block.pegouts.len()) as u64;
 
         // ---- coinbase economics + pot arithmetic (all on the PARENT state) ----
         let n_genesis = self.params.genesis.len() as u64;
@@ -330,28 +464,40 @@ impl HnState {
             if self.height < n_genesis {
                 return Err(HnError::BadGenesis);
             }
-            let expected = self.params.coinbase_amount(self.pot, block.txs.len());
+            let n_spends = block.txs.len() + block.pegouts.len();
+            let expected = self.params.coinbase_amount(self.pot, n_spends);
             if block.coinbase_amount != expected {
                 return Err(HnError::CoinbaseMismatch);
             }
-            // expected <= pot by construction; fees credit, coinbase draws.
-            let pot_next = self.pot + fees - expected;
+            // expected <= pot by construction; flat + peg fees credit,
+            // coinbase draws.
+            let pot_next = self.pot + fees + pegout_fees + pegin_fees - expected;
             if block.pot_after != pot_next {
                 return Err(HnError::PotMismatch);
             }
-            // Conservation (I1-extended): the pool gains the coinbase and loses
-            // the fees; the pot does the exact opposite. Enforced, not assumed.
-            let shielded_next = (self.shielded_total + expected)
-                .checked_sub(fees)
+            // Conservation (I1-extended, with bridge flows): the system total
+            // (shielded + pot) changes by exactly (peg-in deposits − peg-out
+            // withdrawals) — value entering from / leaving to the vault on
+            // Ergo. Enforced, not assumed.
+            let shielded_next = (self.shielded_total + expected + (pegin_inflow - pegin_fees))
+                .checked_sub(fees + burn_total)
                 .ok_or(HnError::ConservationViolated)?;
-            if shielded_next + pot_next != self.shielded_total + self.pot {
+            if shielded_next + pot_next
+                != (self.shielded_total + self.pot + pegin_inflow)
+                    .checked_sub(pegout_outflow)
+                    .ok_or(HnError::ConservationViolated)?
+            {
                 return Err(HnError::ConservationViolated);
             }
             (pot_next, shielded_next)
         } else {
             // A genesis allocation block: only within the pinned prefix, no
-            // txs, and (dest, amount) must match the params exactly.
-            if self.height >= n_genesis || !block.txs.is_empty() {
+            // txs/pegs, and (dest, amount) must match the params exactly.
+            if self.height >= n_genesis
+                || !block.txs.is_empty()
+                || !block.pegouts.is_empty()
+                || !block.pegins.is_empty()
+            {
                 return Err(HnError::BadGenesis);
             }
             let (dest, amount) = &self.params.genesis[self.height as usize];
@@ -379,8 +525,12 @@ impl HnState {
         }
 
         // ---- the committed state root (simulated BEFORE mutating) ----
-        let mut cms: Vec<Digest> = Vec::with_capacity(2 * block.txs.len() + 1);
-        for tx in &block.txs {
+        // Consensus leaf order: tx outputs, peg-out outputs, peg-in mints,
+        // coinbase.
+        let mut cms: Vec<Digest> = Vec::with_capacity(
+            2 * (block.txs.len() + block.pegouts.len()) + block.pegins.len() + 1,
+        );
+        for tx in block.txs.iter().chain(block.pegouts.iter().map(|p| &p.tx)) {
             cms.push(digest_at(
                 &tx.public_values,
                 aegis_engine::spend::monolith::PUB_CMO0,
@@ -390,6 +540,7 @@ impl HnState {
                 aegis_engine::spend::monolith::PUB_CMO1,
             ));
         }
+        cms.extend(pegin_cms.iter().copied());
         cms.push(limbs_to_digest(&block.coinbase_cm));
         if self.simulate_state_root(&cms) != block.state_root {
             return Err(HnError::StateRootMismatch);
@@ -404,13 +555,30 @@ impl HnState {
             prev_anchor_height: self.anchor_height,
             prev_pot: self.pot,
             prev_shielded_total: self.shielded_total,
+            added_pegin_box_ids: block.pegins.iter().map(|p| p.box_id).collect(),
+            prev_withdrawal_count: self.pending_withdrawals.len(),
             evicted_root: None,
         };
-        for tx in &block.txs {
+        for tx in block.txs.iter().chain(block.pegouts.iter().map(|p| &p.tx)) {
             let cm0 = digest_at(&tx.public_values, aegis_engine::spend::monolith::PUB_CMO0);
             let cm1 = digest_at(&tx.public_values, aegis_engine::spend::monolith::PUB_CMO1);
             self.append_leaf(cm0, tx.out_ciphertexts[0].clone(), false);
             self.append_leaf(cm1, tx.out_ciphertexts[1].clone(), false);
+        }
+        for (pi, cm) in block.pegins.iter().zip(pegin_cms.iter()) {
+            self.append_leaf(*cm, pi.ciphertext.clone(), false);
+        }
+        for pi in &block.pegins {
+            self.used_pegins.insert(pi.box_id);
+        }
+        for po in &block.pegouts {
+            let nf0 = digest_at(&po.tx.public_values, PUB_NF0);
+            self.pending_withdrawals.push(Withdrawal {
+                nf0: digest_to_limbs(&nf0),
+                amount: po.amount,
+                recipient_prop: po.recipient_prop.clone(),
+                hn_height: self.height,
+            });
         }
         self.append_leaf(
             limbs_to_digest(&block.coinbase_cm),
@@ -447,6 +615,11 @@ impl HnState {
         self.anchor_height = undo.prev_anchor_height;
         self.pot = undo.prev_pot;
         self.shielded_total = undo.prev_shielded_total;
+        for b in &undo.added_pegin_box_ids {
+            self.used_pegins.remove(b);
+        }
+        self.pending_withdrawals
+            .truncate(undo.prev_withdrawal_count);
     }
 
     /// Compute a block's `state_root` given the current tip and the block's
@@ -525,6 +698,8 @@ mod tests {
             prev_root: st.tip_root_limbs(),
             state_root: st.simulate_state_root(&[mint.cm]),
             txs: vec![],
+            pegouts: vec![],
+            pegins: vec![],
             miner_owner: digest_to_limbs(&miner.owner),
             coinbase_amount: amount,
             coinbase_cm: digest_to_limbs(&mint.cm),
@@ -626,6 +801,8 @@ mod tests {
             prev_root: st.tip_root_limbs(),
             state_root: st.simulate_state_root(&[mint.cm]),
             txs: vec![],
+            pegouts: vec![],
+            pegins: vec![],
             miner_owner: digest_to_limbs(&miner.owner),
             coinbase_amount: amount,
             coinbase_cm: digest_to_limbs(&mint.cm),
@@ -654,6 +831,8 @@ mod tests {
             prev_root: st.tip_root_limbs(),
             state_root: st.simulate_state_root(&[mint.cm]),
             txs: vec![],
+            pegouts: vec![],
+            pegins: vec![],
             miner_owner: digest_to_limbs(&miner.owner),
             coinbase_amount: 1,
             coinbase_cm: digest_to_limbs(&mint.cm),
@@ -680,6 +859,8 @@ mod tests {
             prev_root: st.tip_root_limbs(),
             state_root: st.simulate_state_root(&[mint.cm]),
             txs: vec![],
+            pegouts: vec![],
+            pegins: vec![],
             miner_owner: digest_to_limbs(&miner.owner),
             coinbase_amount: 0,
             coinbase_cm: digest_to_limbs(&mint.cm),
@@ -757,6 +938,8 @@ mod tests {
             prev_root: st.tip_root_limbs(),
             state_root: st.simulate_state_root(&[m1.cm]),
             txs: vec![],
+            pegouts: vec![],
+            pegins: vec![],
             miner_owner: digest_to_limbs(&thief.owner),
             coinbase_amount: 100,
             coinbase_cm: digest_to_limbs(&m1.cm),
@@ -777,6 +960,8 @@ mod tests {
             prev_root: st.tip_root_limbs(),
             state_root: st.simulate_state_root(&[m2.cm]),
             txs: vec![],
+            pegouts: vec![],
+            pegins: vec![],
             miner_owner: digest_to_limbs(&faucet.owner),
             coinbase_amount: 999,
             coinbase_cm: digest_to_limbs(&m2.cm),
@@ -797,6 +982,8 @@ mod tests {
             prev_root: st.tip_root_limbs(),
             state_root: st.simulate_state_root(&[m3.cm]),
             txs: vec![],
+            pegouts: vec![],
+            pegins: vec![],
             miner_owner: digest_to_limbs(&faucet.owner),
             coinbase_amount: 100,
             coinbase_cm: digest_to_limbs(&m3.cm),
