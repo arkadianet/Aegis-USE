@@ -119,6 +119,12 @@ type HidingPcs = HidingFriPcs<F, Dft, HidingValMmcs, HidingChallengeMmcs, ChaCha
 /// The hiding (zero-knowledge) STARK config for the engine's spend proofs.
 pub type HidingEngineConfig = StarkConfig<HidingPcs, EF, Challenger>;
 
+/// The hiding PCS commitment type — the (serde) content of a preprocessed
+/// verifying key. Exposed so a settlement verifier can carry the published vk
+/// (`PreprocessedVerifierKey { width, degree_bits, commitment }`) across a wire
+/// or into a guest, since the vk struct itself is not `Serialize`.
+pub type HidingCommitment = <HidingPcs as p3_commit::Pcs<EF, Challenger>>::Commitment;
+
 /// Build the hiding engine config from caller-supplied mask/salt RNGs.
 ///
 /// The RNGs generate the trace/codeword masks and leaf salts — they must be

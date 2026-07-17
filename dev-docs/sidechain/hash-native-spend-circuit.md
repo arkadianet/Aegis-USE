@@ -197,10 +197,14 @@ zero via the Σ-correction — they cancel in the constraint/FRI relations.
 | client prove | 251 ms | **754 ms** (~3×, from log_blowup 1→2) |
 | verify (native) | 41 ms | **52 ms** |
 | proof size | 1.33 MB | **1.46 MB** (+10%) |
+| settlement guest (RISC0, in-field) | 963 M cycles | **1.045 B cycles** (+8.5%) |
 
 Phone-class prove extrapolation ~**1.5–4 s** — **above** the ~1 s target; the
 narrow-trace lever (the same one that cheapens settlement) is the mitigation and
-is the recommended next optimization. Settlement-guest re-measure: see RESULTS.
+is the recommended next optimization. The settlement guest verifies the hiding
+proof in-field at **+8.5%** (measured: `aegis-settlement-guest-spike` mode 2,
+1209 vs 1127 segments) — privacy costs settlement almost nothing; the 963 M path
+is not broken, it is superseded by a 1.045 B hiding path.
 
 ### Residual ZK review items
 - Hiding is **conjectured** (statistical, standard ZK-STARK model), not proven.
