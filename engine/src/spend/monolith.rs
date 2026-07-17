@@ -688,6 +688,94 @@ mod tests {
         assert!(ok, "an honest 2-in/2-out spend must verify");
     }
 
+    // ----- zero-knowledge (hiding) tests -----
+    //
+    // The plain config above is SOUND but NOT hiding: FRI query openings are pure
+    // functions of the witness trace, so a proof + public values leaks witness
+    // columns (nk, rho, values, the Merkle path → which note was spent). The
+    // hiding config masks this (see crate::config + the leakage model in
+    // dev-docs/sidechain/hash-native-spend-circuit.md). These tests demonstrate
+    // (a) the hiding proof still verifies, and (b) it is randomized — proving the
+    // SAME statement twice yields different proofs and different openings, the
+    // observable signature of the masking; the argument that the k openings are
+    // independent of the witness is in the design doc.
+    use crate::config::{make_hiding_config, HidingEngineConfig};
+    use rand::SeedableRng;
+    use rand_chacha::ChaCha20Rng;
+
+    fn hiding_cfg(seed: u64) -> HidingEngineConfig {
+        // Distinct mask + salt streams; distinct `seed` ⇒ distinct masks.
+        make_hiding_config(
+            ChaCha20Rng::seed_from_u64(seed),
+            ChaCha20Rng::seed_from_u64(seed ^ 0x5a5a_5a5a),
+        )
+    }
+
+    fn hiding_prove(seed: u64) -> (Vec<u8>, Vec<F>) {
+        let (tree, inputs, outputs, fee) = scenario();
+        let air = SpendAir;
+        let degree_bits = N_ROWS.trailing_zeros() as usize;
+        let config = hiding_cfg(seed);
+        let (pd, _vk) =
+            setup_preprocessed::<HidingEngineConfig, _>(&config, &air, degree_bits).unwrap();
+        let (trace, pis) = build_spend_trace(&inputs, &tree, &outputs, fee);
+        let proof = prove_with_preprocessed(&config, &air, trace, &pis, Some(&pd));
+        (postcard::to_allocvec(&proof).unwrap(), pis)
+    }
+
+    #[test]
+    fn hiding_spend_verifies() {
+        let (tree, inputs, outputs, fee) = scenario();
+        let air = SpendAir;
+        let degree_bits = N_ROWS.trailing_zeros() as usize;
+        // The preprocessed (pd, vk) are a matched pair from ONE setup — the vk
+        // is the published verifying key (a salted commitment to the PUBLIC
+        // schedule). The prover masks the MAIN trace with fresh randomness.
+        let pcfg = hiding_cfg(1);
+        let (pd, vk) =
+            setup_preprocessed::<HidingEngineConfig, _>(&pcfg, &air, degree_bits).unwrap();
+        let (trace, pis) = build_spend_trace(&inputs, &tree, &outputs, fee);
+        let proof = prove_with_preprocessed(&pcfg, &air, trace, &pis, Some(&pd));
+
+        // The verifier draws no randomness (fixed-seed config, e.g. the guest)
+        // and checks against the published vk.
+        let vcfg = crate::config::hiding_config_for_verify();
+        assert!(
+            verify_with_preprocessed(&vcfg, &air, &proof, &pis, Some(&vk)).is_ok(),
+            "a hiding 2-in/2-out spend must verify"
+        );
+    }
+
+    #[test]
+    fn hiding_is_randomized_same_statement_differs() {
+        // Same witness + same public values, different mask seeds ⇒ the proofs
+        // (and their openings) must differ. This is the observable signature that
+        // the config injects witness-independent randomness — the plain config,
+        // by contrast, is deterministic.
+        let (p1, pis1) = hiding_prove(1);
+        let (p2, pis2) = hiding_prove(2);
+        assert_eq!(pis1, pis2, "same public statement");
+        assert_ne!(p1, p2, "two hiding proofs of one statement must differ");
+
+        // The non-hiding proof of the same statement IS deterministic (contrast).
+        let det = |()| {
+            let (tree, inputs, outputs, fee) = scenario();
+            let air = SpendAir;
+            let db = N_ROWS.trailing_zeros() as usize;
+            let cfg = make_config();
+            let (pd, _) = setup_preprocessed::<_, _>(&cfg, &air, db).unwrap();
+            let (trace, pis) = build_spend_trace(&inputs, &tree, &outputs, fee);
+            let proof = prove_with_preprocessed(&cfg, &air, trace, &pis, Some(&pd));
+            (postcard::to_allocvec(&proof).unwrap(), pis)
+        };
+        let (d1, _) = det(());
+        let (d2, _) = det(());
+        assert_eq!(
+            d1, d2,
+            "the non-hiding config is deterministic (no masking)"
+        );
+    }
+
     // ----- adversarial binding tests -----
     //
     // Each builds a stitched witness — one that satisfies the sub-circuits it
@@ -896,6 +984,37 @@ mod tests {
         bad[PUB_ROOT] += F::ONE;
         assert!(verify_with_preprocessed(&config, &air, &proof, &bad, Some(&vk)).is_err());
     }
+
+    #[test]
+    #[ignore = "measurement, not a correctness check"]
+    fn report_hiding_cost() {
+        let (tree, inputs, outputs, fee) = scenario();
+        let air = SpendAir;
+        let degree_bits = N_ROWS.trailing_zeros() as usize;
+        let pcfg = crate::config::hiding_config();
+        let (pd, vk) =
+            setup_preprocessed::<HidingEngineConfig, _>(&pcfg, &air, degree_bits).unwrap();
+
+        let t0 = std::time::Instant::now();
+        let (trace, pis) = build_spend_trace(&inputs, &tree, &outputs, fee);
+        let proof = prove_with_preprocessed(&pcfg, &air, trace, &pis, Some(&pd));
+        let prove_ms = t0.elapsed().as_secs_f64() * 1e3;
+
+        let vcfg = crate::config::hiding_config_for_verify();
+        let t1 = std::time::Instant::now();
+        verify_with_preprocessed(&vcfg, &air, &proof, &pis, Some(&vk)).unwrap();
+        let verify_ms = t1.elapsed().as_secs_f64() * 1e3;
+
+        let bytes = postcard::to_allocvec(&proof).unwrap().len();
+        println!(
+            "HIDING monolith 2-in/2-out: prove {prove_ms:.1} ms, verify {verify_ms:.1} ms, \
+             proof {} bytes ({:.2} MB); log_blowup=2, {NUM_RANDOM_CODEWORDS} random codewords, \
+             {SALT_ELEMS}-elem leaf salts",
+            bytes,
+            bytes as f64 / 1e6,
+        );
+    }
+    use crate::config::{NUM_RANDOM_CODEWORDS, SALT_ELEMS};
 
     #[test]
     #[ignore = "measurement, not a correctness check"]

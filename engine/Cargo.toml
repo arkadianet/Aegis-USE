@@ -39,7 +39,12 @@ p3-merkle-tree   = { git = "https://github.com/Plonky3/Plonky3", rev = "4aed8fe4
 p3-symmetric     = { git = "https://github.com/Plonky3/Plonky3", rev = "4aed8fe4195d40305175d55e58690f46171258d9" }
 p3-util          = { git = "https://github.com/Plonky3/Plonky3", rev = "4aed8fe4195d40305175d55e58690f46171258d9" }
 
-rand = "0.9"
+# rand 0.10 to match Plonky3's rand (the hiding PCS/MMCS take an `R: rand::Rng`);
+# a mismatched rand major would fail the trait bound on the mask/salt RNG.
+rand = { version = "0.10", default-features = false, features = ["std", "std_rng", "sys_rng", "thread_rng"] }
+# ChaCha20 is the mask/salt RNG: a CSPRNG (the masks ARE the privacy) that is
+# also `Clone` (the hiding MMCS requires it); rand's StdRng is not `Clone` in 0.10.
+rand_chacha = { version = "0.10", default-features = false }
 
 [dev-dependencies]
 hex = "0.4"

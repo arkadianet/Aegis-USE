@@ -119,11 +119,9 @@ concatenation (the bounded Poseidon2 parameter/round-count review item).
    choice NOT to domain-separate Merkle levels (leaf-vs-node / per-height).
 4. **`AMOUNT_BITS=28`** vs a full 64-bit amount (limbs + carrying adder).
 5. **`EMPTY_LEAF`** nothing-up-my-sleeve value.
-6. **Zero-knowledge.** uni-STARK proofs are not ZK by default; keeping secrets
-   out of the public inputs is necessary but the hiding wrapper (`is_zk`, or a
-   recursive ZK layer) is a separate, later axis. Until then a proof is *sound*
-   but not *hiding*: a witness-carrying proof could leak note data even though
-   the public values do not — the ZK wrapper is required before real value.
+6. **Zero-knowledge — NOW IMPLEMENTED (hiding config).** See the dedicated
+   section below. Residual: the hiding is *conjectured* (statistical, standard
+   ZK-STARK model) and the masking-budget inequality is a pinned constraint.
 7. **Monolith soundness items:** (a) the `nf0 ≠ nf1` one-hot/inverse in-circuit
    guard is best-effort — the authoritative double-spend defense is the consensus
    nullifier set (cross-tx); (b) the fixed transaction shape is exactly 2-in/2-out
@@ -131,6 +129,91 @@ concatenation (the bounded Poseidon2 parameter/round-count review item).
    approach, but the padding/uniformity story wants review); (c) fee is a public
    input and is not itself range-checked here (assumed set by an honest wallet /
    bounded at consensus).
+
+## Zero-knowledge (hiding) — leakage model + fix (`engine/src/config.rs`)
+
+A uni-STARK is a **sound but not hiding** argument: for a *privacy* chain the
+hiding is the product, not hardening. This is now addressed by a hiding config.
+
+### Leakage model — what a PLAIN uni-STARK proof reveals (our config: rev
+`4aed8fe`, BabyBear, Poseidon2 FRI, `TwoAdicFriPcs`, **no PCS blinding**)
+The proof carries, for each of `k = 100` FRI query points, the **opened LDE rows**
+of the committed trace (main + quotient) plus a few out-of-domain (OOD)
+evaluations. These openings are **deterministic functions of the witness trace**:
+- **Concrete total leak:** a *constant* trace column has a constant LDE, so it is
+  revealed **verbatim by any single query**. The monolith's **value bus is
+  constant across all 128 rows** ⇒ the transfer amounts leak directly. Low-degree
+  columns leak similarly.
+- **General recovery:** the trace polynomials have degree `< N = 128`; `k = 100`
+  openings over a rate-1/2 code, plus the OOD point and the quotient relations,
+  over-determine them — an adversary reconstructs the witness columns (`nk`,
+  `rho`, values, the Merkle path) and thus **which note was spent**.
+- **Verdict:** leakage is effectively **total** for a privacy adversary. A
+  non-hiding spend proof is NOT private — even though the *public values* hide the
+  note, the *proof body* does not. (This is empirically confirmed: the non-hiding
+  proof is byte-deterministic in the witness — `hiding_is_randomized…` test.)
+
+### The fix — Plonky3's ZK-STARK masking (no hand-rolled crypto)
+Our rev ships the standard construction; we turn it on (`HidingEngineConfig`):
+- **Random trace interleaving** (ethSTARK, [ePrint 2021/582]): `HidingFriPcs`
+  interleaves the committed matrix with an equal number of **uniformly random
+  rows** and adds `NUM_RANDOM_CODEWORDS` random columns, giving each column
+  polynomial ~`h` random degrees of freedom.
+- **Random-codeword + quotient masking** ([ePrint 2024/1037] §4.2): the batched
+  FRI codeword is blinded by appended random codewords (their openings travel
+  beside the proof, hidden from the verifier's statement); quotient chunks are
+  masked by `v_H·t_i` with a Σ-correcting last chunk.
+- **Salted Merkle leaves** (`MerkleTreeHidingMmcs`, `SALT_ELEMS = 4`): each leaf
+  is salted, so the commitment itself is hiding (no dictionary attack on
+  low-entropy rows).
+- **`FriParameters::new_benchmark_zk`**: `log_blowup = 2`, 100 queries, 16-bit
+  query PoW (conjectured soundness `2·100 + 16 = 216` bits, ethSTARK conjecture).
+- Masks + salts from a **CSPRNG (ChaCha20)**, OS-seeded at the client
+  (`hiding_config()`). **The masks ARE the privacy** — a weak/predictable seed
+  breaks hiding entirely.
+
+### Why the k queries reveal nothing (the argument, not vibes)
+Masking budget: `k` queries + O(1) OOD points must be **≤ the number of random
+rows** added (= the trace height `h = 128`). The interleaved random rows give each
+committed column `h` independent uniform coefficients off the constraint-enforced
+trace domain; any ≤ `h` evaluations *off* that domain are a full-rank linear image
+of ≥ that many independent uniform masks, hence **jointly uniform and
+statistically independent of the witness**. `100 + few < 128` ⇒ satisfied, so the
+queried openings are uniform regardless of the witness. Verification still passes
+because the masks live off the enforced domain and the codeword masks integrate to
+zero via the Σ-correction — they cancel in the constraint/FRI relations.
+
+### Adversarial verification (tests, all green)
+- `hiding_spend_verifies` — a hiding 2-in/2-out proof verifies (fixed-seed
+  verifier vk = the settlement-guest path).
+- `hiding_is_randomized_same_statement_differs` — same witness + same public
+  values, two mask seeds ⇒ **different proofs and openings**; the non-hiding
+  config is **byte-identical** (deterministic). This is the observable signature
+  that the masking injects real, witness-independent randomness.
+
+### Cost (measured, this machine)
+| | non-hiding | **hiding** |
+|---|--:|--:|
+| client prove | 251 ms | **754 ms** (~3×, from log_blowup 1→2) |
+| verify (native) | 41 ms | **52 ms** |
+| proof size | 1.33 MB | **1.46 MB** (+10%) |
+
+Phone-class prove extrapolation ~**1.5–4 s** — **above** the ~1 s target; the
+narrow-trace lever (the same one that cheapens settlement) is the mitigation and
+is the recommended next optimization. Settlement-guest re-measure: see RESULTS.
+
+### Residual ZK review items
+- Hiding is **conjectured** (statistical, standard ZK-STARK model), not proven.
+- The masking-budget inequality (`queries + OOD ≤ random rows`) is **tight-ish**
+  and pinned — a larger circuit / more queries needs more random rows.
+- `NUM_RANDOM_CODEWORDS = 4`, `SALT_ELEMS = 4` adequacy.
+- The mask CSPRNG **must** be OS-seeded in production; `hiding_config_for_verify`
+  uses a fixed seed but is verify-only (the RNG is never drawn from in verify).
+- The preprocessed vk is a **salted commitment to the PUBLIC schedule**, published
+  once and used by both prover and verifier (a matched `(pd, vk)` pair).
+
+[ePrint 2021/582]: https://eprint.iacr.org/2021/582
+[ePrint 2024/1037]: https://eprint.iacr.org/2024/1037
 
 ## Next (in order)
 1. Note encryption (hash/KEM-based DH replacement) — deferred this pass.
