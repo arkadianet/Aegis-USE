@@ -27,10 +27,10 @@
 use std::sync::OnceLock;
 
 use p3_baby_bear::{
-    default_babybear_poseidon2_16, BabyBear, BABYBEAR_POSEIDON2_HALF_FULL_ROUNDS,
-    BABYBEAR_POSEIDON2_PARTIAL_ROUNDS_16, BABYBEAR_POSEIDON2_RC_16_EXTERNAL_FINAL,
-    BABYBEAR_POSEIDON2_RC_16_EXTERNAL_INITIAL, BABYBEAR_POSEIDON2_RC_16_INTERNAL,
-    Poseidon2BabyBear,
+    default_babybear_poseidon2_16, BabyBear, Poseidon2BabyBear,
+    BABYBEAR_POSEIDON2_HALF_FULL_ROUNDS, BABYBEAR_POSEIDON2_PARTIAL_ROUNDS_16,
+    BABYBEAR_POSEIDON2_RC_16_EXTERNAL_FINAL, BABYBEAR_POSEIDON2_RC_16_EXTERNAL_INITIAL,
+    BABYBEAR_POSEIDON2_RC_16_INTERNAL,
 };
 use p3_field::PrimeCharacteristicRing;
 use p3_poseidon2::ExternalLayerConstants;
@@ -61,8 +61,7 @@ pub const PARTIAL_ROUNDS: usize = BABYBEAR_POSEIDON2_PARTIAL_ROUNDS_16;
 pub type Digest = [F; DIGEST_ELEMS];
 
 /// The AIR's concrete `RoundConstants` shape for BabyBear-t16.
-pub type AegisRoundConstants =
-    RoundConstants<F, WIDTH, HALF_FULL_ROUNDS, PARTIAL_ROUNDS>;
+pub type AegisRoundConstants = RoundConstants<F, WIDTH, HALF_FULL_ROUNDS, PARTIAL_ROUNDS>;
 
 // ----- domain-separation tags (pinned; REVIEW ITEM) -----
 // Layout: high byte 0x0A = "Aegis", low byte = purpose. Placed in capacity
@@ -218,9 +217,8 @@ mod tests {
     #[test]
     fn compress_matches_truncated_permutation_oracle() {
         use p3_symmetric::{PseudoCompressionFunction, TruncatedPermutation};
-        let oracle = TruncatedPermutation::<_, 2, DIGEST_ELEMS, WIDTH>::new(
-            default_babybear_poseidon2_16(),
-        );
+        let oracle =
+            TruncatedPermutation::<_, 2, DIGEST_ELEMS, WIDTH>::new(default_babybear_poseidon2_16());
         let l = digest(100);
         let r = digest(200);
         let expected = oracle.compress([l, r]);

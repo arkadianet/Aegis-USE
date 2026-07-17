@@ -43,6 +43,7 @@ rand = "0.9"
 
 [dev-dependencies]
 hex = "0.4"
+postcard = { version = "1", features = ["alloc"] }
 
 # The FRI/STARK stack is unusably slow at opt-level 0; keep it optimized even in
 # dev/test so the prove/verify tests run in seconds, not minutes (mirrors the

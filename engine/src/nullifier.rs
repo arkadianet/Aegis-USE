@@ -13,6 +13,7 @@
 //!   ([`crate::commit`]), and the circuit proves `cm` is a member of the
 //!   accumulator — so `rho` is pinned by the note.
 //! - `nk` is pinned by `owner = H_OWNER(nk)`, itself an input to that same `cm`.
+//!
 //! So both `nk` and `rho` are determined by the (unique) note; the prover has no
 //! freedom to present a different `(nk, rho)` and mint a second nullifier for one
 //! note. One note ⇒ exactly one `nf`. Unlike the retired `Poseidon(nk + rho)`
@@ -21,8 +22,8 @@
 //! collision/preimage security of `H_NF` on the concatenation is exactly what
 //! must be reviewed (the one bounded parameter/round-count review item).
 
-use crate::poseidon::{hash_domain, Digest, DIGEST_ELEMS, DOMAIN_NULLIFIER};
 use crate::commit::{Nk, Rho};
+use crate::poseidon::{hash_domain, Digest, DIGEST_ELEMS, DOMAIN_NULLIFIER};
 
 /// The two rate-8 sponge blocks of a nullifier, in absorption order: `nk`, `rho`.
 pub fn nullifier_blocks(nk: &Nk, rho: &Rho) -> [[crate::poseidon::F; DIGEST_ELEMS]; 2] {

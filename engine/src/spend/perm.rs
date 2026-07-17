@@ -96,29 +96,26 @@ pub fn eval_permutation<AB: AirBuilder<F = BabyBear>>(
 ) -> [AB::Expr; WIDTH] {
     let mut state: [AB::Expr; WIDTH] = cols.inputs.map(|x| x.into());
     GenericPoseidon2LinearLayersBabyBear::external_linear_layer(&mut state);
-    for round in 0..HALF_FULL_ROUNDS {
-        eval_full_round(
-            builder,
-            &mut state,
-            &cols.beginning_full_rounds[round],
-            &BABYBEAR_POSEIDON2_RC_16_EXTERNAL_INITIAL[round],
-        );
+    for (round, rc) in cols
+        .beginning_full_rounds
+        .iter()
+        .zip(BABYBEAR_POSEIDON2_RC_16_EXTERNAL_INITIAL.iter())
+    {
+        eval_full_round(builder, &mut state, round, rc);
     }
-    for round in 0..PARTIAL_ROUNDS {
-        eval_partial_round(
-            builder,
-            &mut state,
-            &cols.partial_rounds[round],
-            BABYBEAR_POSEIDON2_RC_16_INTERNAL[round],
-        );
+    for (round, &rc) in cols
+        .partial_rounds
+        .iter()
+        .zip(BABYBEAR_POSEIDON2_RC_16_INTERNAL.iter())
+    {
+        eval_partial_round(builder, &mut state, round, rc);
     }
-    for round in 0..HALF_FULL_ROUNDS {
-        eval_full_round(
-            builder,
-            &mut state,
-            &cols.ending_full_rounds[round],
-            &BABYBEAR_POSEIDON2_RC_16_EXTERNAL_FINAL[round],
-        );
+    for (round, rc) in cols
+        .ending_full_rounds
+        .iter()
+        .zip(BABYBEAR_POSEIDON2_RC_16_EXTERNAL_FINAL.iter())
+    {
+        eval_full_round(builder, &mut state, round, rc);
     }
     state
 }

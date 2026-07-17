@@ -50,7 +50,10 @@ pub type Blinding = [F; DIGEST_ELEMS];
 /// If `value >= 2^AMOUNT_BITS` — an out-of-range amount is a programming error
 /// (the circuit also rejects it via the range constraint).
 pub fn amount(value: u64) -> F {
-    assert!(value < AMOUNT_BOUND, "amount {value} exceeds 2^{AMOUNT_BITS}");
+    assert!(
+        value < AMOUNT_BOUND,
+        "amount {value} exceeds 2^{AMOUNT_BITS}"
+    );
     F::from_u64(value)
 }
 
@@ -68,7 +71,12 @@ pub fn owner_key(nk: &Nk) -> Digest {
 /// `[value ‖ 0×7]`, `owner`, `rho`, `r`. Component-aligned (one component per
 /// block) so the in-circuit sponge chain ([`crate::spend`]) absorbs exactly one
 /// component per row — no component straddles a block boundary.
-pub fn commitment_blocks(value: F, owner: &Digest, rho: &Rho, r: &Blinding) -> [[F; DIGEST_ELEMS]; 4] {
+pub fn commitment_blocks(
+    value: F,
+    owner: &Digest,
+    rho: &Rho,
+    r: &Blinding,
+) -> [[F; DIGEST_ELEMS]; 4] {
     let mut value_block = [F::ZERO; DIGEST_ELEMS];
     value_block[0] = value;
     [value_block, *owner, *rho, *r]

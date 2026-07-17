@@ -40,9 +40,9 @@ use p3_baby_bear::BabyBear;
 use p3_field::PrimeCharacteristicRing;
 use p3_matrix::dense::RowMajorMatrix;
 
+use super::perm::{eval_permutation, fill_permutation, PermCols, PERM_COLS};
 use crate::merkle::{MerklePath, DEPTH};
 use crate::poseidon::{Digest, DIGEST_ELEMS, F};
-use super::perm::{eval_permutation, fill_permutation, PermCols, PERM_COLS};
 
 /// Offset of the `child[8]` columns within a membership row.
 pub const CHILD_OFF: usize = PERM_COLS;
@@ -84,8 +84,14 @@ impl<AB: AirBuilder<F = BabyBear>> Air<AB> for MerkleMembershipAir {
         for j in 0..DIGEST_ELEMS {
             let c: AB::Expr = cur[CHILD_OFF + j].into();
             let s: AB::Expr = cur[SIB_OFF + j].into();
-            builder.assert_eq(cols.inputs[j], c.clone() + bit.clone() * (s.clone() - c.clone()));
-            builder.assert_eq(cols.inputs[j + DIGEST_ELEMS], s.clone() + bit.clone() * (c - s));
+            builder.assert_eq(
+                cols.inputs[j],
+                c.clone() + bit.clone() * (s.clone() - c.clone()),
+            );
+            builder.assert_eq(
+                cols.inputs[j + DIGEST_ELEMS],
+                s.clone() + bit.clone() * (c - s),
+            );
         }
 
         let output = eval_permutation(builder, cols);
@@ -190,6 +196,35 @@ mod tests {
         assert!(
             verify(&config, &air, &proof, &bad).is_err(),
             "membership must not verify against a root the leaf is not under"
+        );
+    }
+
+    // ----- measurement (run: cargo test --release -- --ignored --nocapture) -----
+
+    #[test]
+    #[ignore = "measurement, not a correctness check"]
+    fn report_membership_cost_depth32() {
+        let (tree, target, idx) = tree_with_leaf();
+        let path = tree.authentication_path(idx);
+        let pis = tree.root().to_vec();
+        let config = make_config();
+        let air = MerkleMembershipAir;
+
+        let t0 = std::time::Instant::now();
+        let trace = membership_trace(target, &path);
+        let proof = prove(&config, &air, trace, &pis);
+        let prove_ms = t0.elapsed().as_secs_f64() * 1e3;
+
+        let t1 = std::time::Instant::now();
+        verify(&config, &air, &proof, &pis).expect("verifies");
+        let verify_ms = t1.elapsed().as_secs_f64() * 1e3;
+
+        let bytes = postcard::to_allocvec(&proof).unwrap().len();
+        println!(
+            "depth-32 Merkle membership: prove {prove_ms:.1} ms, verify {verify_ms:.1} ms, \
+             proof {} bytes ({:.2} MB), row width {MEMB_ROW_W} cols",
+            bytes,
+            bytes as f64 / 1e6,
         );
     }
 }

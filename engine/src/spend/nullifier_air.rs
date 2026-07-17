@@ -34,10 +34,10 @@ use p3_baby_bear::BabyBear;
 use p3_field::PrimeCharacteristicRing;
 use p3_matrix::dense::RowMajorMatrix;
 
+use super::perm::{eval_permutation, fill_permutation, PermCols, PERM_COLS};
 use crate::commit::{Nk, Rho};
 use crate::nullifier::nullifier;
 use crate::poseidon::{sponge_init, Digest, DIGEST_ELEMS, DOMAIN_NULLIFIER, F, WIDTH};
-use super::perm::{eval_permutation, fill_permutation, PermCols, PERM_COLS};
 
 /// Absorbed-block width (one rate-8 block per row).
 const BLOCK_OFF: usize = PERM_COLS;
@@ -76,9 +76,10 @@ impl<AB: AirBuilder<F = BabyBear>> Air<AB> for NullifierAir {
                 .when_first_row()
                 .assert_eq(cols.inputs[j], cur[BLOCK_OFF + j].into());
         }
-        builder
-            .when_first_row()
-            .assert_eq(cols.inputs[DIGEST_ELEMS], AB::Expr::from_u32(DOMAIN_NULLIFIER));
+        builder.when_first_row().assert_eq(
+            cols.inputs[DIGEST_ELEMS],
+            AB::Expr::from_u32(DOMAIN_NULLIFIER),
+        );
         for j in (DIGEST_ELEMS + 1)..(WIDTH - 1) {
             builder.when_first_row().assert_zero(cols.inputs[j]);
         }
@@ -96,10 +97,13 @@ impl<AB: AirBuilder<F = BabyBear>> Air<AB> for NullifierAir {
                 output[j].clone() + next[BLOCK_OFF + j].into(),
             );
         }
-        for j in DIGEST_ELEMS..WIDTH {
+        for (inp, out) in next_cols.inputs[DIGEST_ELEMS..]
+            .iter()
+            .zip(output[DIGEST_ELEMS..].iter())
+        {
             builder
                 .when_transition()
-                .assert_eq(next_cols.inputs[j].into(), output[j].clone());
+                .assert_eq((*inp).into(), out.clone());
         }
 
         // Public binding: block0 == nk, block1 == rho (last row), digest == nf.
