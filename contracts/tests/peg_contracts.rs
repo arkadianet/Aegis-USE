@@ -13,9 +13,8 @@
 //!   the captured vectors + README — never from this crate's own output.
 
 use aegis_contracts::{
-    attest_registry, deposit_receipt, double_redeem, fee_pot, peg_mint_pins, peg_vault,
-    side_chain_state, unlock_intent, validate_attester_set, ContractsError, NetworkPrefix,
-    ScriptConstants,
+    deposit_receipt, double_redeem, fee_pot, peg_mint_pins, peg_vault, side_chain_state,
+    unlock_intent, ContractsError, NetworkPrefix, ScriptConstants,
 };
 use ergo_crypto::autolykos::common::blake2b256;
 
@@ -78,7 +77,6 @@ fn testnet_v2_constants() -> ScriptConstants {
         receipt_script_hash: Some(hex32(RECEIPT_SCRIPT_HASH_V2)),
         fee_pot_script_hash: Some(blake2b256(b"aegis-testnet-dummy-feepot")),
         sidechain_state_nft: None,
-        attest_registry_nft: None,
     }
 }
 
@@ -86,22 +84,16 @@ fn testnet_v2_constants() -> ScriptConstants {
 
 /// Structure pin: placeholder-form tree sizes vs the DESIGN.md record.
 /// `DepositReceipt 138 · DoubleRedeem 79 · FeePot 74 · PegVault 590 ·
-/// SideChainState 284 · AttestRegistry 224 · UnlockIntent 159`.
+/// SideChainState 210 · UnlockIntent 159`.
 ///
-/// S1d re-authors the SideChainState authority: the S1c inlined
-/// `atLeast(2, Coll(proveDlog(pk_1..3)))` (225 B) becomes
-/// `atLeast(k, registryPks.map(proveDlog))` reading the set + threshold from
-/// the AttestRegistry dataInput (pinned by its NFT). The three inline points
-/// leave the tree (they move to the registry box's REGISTERS), but the
-/// dataInput read + `registryValid` NFT check + the `.map` lambda machinery
-/// weigh MORE than the removed 3-literal `atLeast`, so the placeholder tree
-/// GROWS 225 → 268 → 284 B (the last +16 is the S1d-review `registryValid`
-/// `tokens(0)._2 == 1L` NFT-amount hardening). `AttestRegistry` is the new
-/// rotation box (224 B
-/// placeholder; singleton-transition checks + 1<=k<=n<=255 bound + O(n^2)
-/// distinctness forall + the current-set `atLeast`). Both are
-/// SELF-MEASUREMENTS (no on-chain oracle for these trees yet) — a change here
-/// is source/compiler drift; investigate, do NOT just update the pin.
+/// SideChainState is the placeholder-authority shape: the retired k-of-n
+/// attester authority (S1d registry read + `atLeast`, 284 B — preserved at
+/// git tag `attester-bridge-final`) is reduced to the unsatisfiable
+/// `sigmaProp(false)` slot (284 → 210 B) awaiting the trustless verifyStark
+/// settlement predicate (`dev-docs/sidechain/stark-settlement-design.md`); the
+/// transition constraints are unchanged. These are SELF-MEASUREMENTS (no
+/// on-chain oracle for these trees yet) — a change here is source/compiler
+/// drift; investigate, do NOT just update the pin.
 #[test]
 fn placeholder_trees_match_design_size_record() {
     let consts = ScriptConstants::placeholder();
@@ -130,12 +122,7 @@ fn placeholder_trees_match_design_size_record() {
         (
             "SideChainState",
             side_chain_state(&consts, net).unwrap().tree_bytes.len(),
-            284,
-        ),
-        (
-            "AttestRegistry",
-            attest_registry(&consts, net).unwrap().tree_bytes.len(),
-            224,
+            210,
         ),
         (
             "UnlockIntent",
@@ -164,109 +151,27 @@ fn partial_injection_compiles() {
     assert!(!c.tree_bytes.is_empty());
 }
 
-/// S1d: `AttestRegistry` compiles with a real singleton NFT injected (its own
-/// identity), and the injected id is baked into the tree (differs from the
-/// empty-placeholder form). The federation itself is NOT in the tree — it
-/// lives in the box's R4/R5 registers — so a "rotation to a new set" is
-/// expressed purely as box-register data spent under this (unchanged) script.
+/// `SideChainState` compiles with a real singleton NFT injected, and the
+/// injected id is baked into the tree (differs from the empty-placeholder
+/// form). The update authority is the deliberately unsatisfiable placeholder
+/// slot (attester bridge retired — tag `attester-bridge-final`; successor:
+/// the verifyStark settlement predicate).
 #[test]
-fn attest_registry_injects_its_singleton_nft() {
-    let nft = blake2b256(b"aegis-testnet-attest-registry-nft");
+fn sidechain_state_injects_its_singleton_nft() {
+    let nft = blake2b256(b"aegis-testnet-sidechain-state-nft");
     let consts = ScriptConstants {
-        attest_registry_nft: Some(nft),
-        ..ScriptConstants::placeholder()
-    };
-    let net = NetworkPrefix::Testnet;
-    let injected = attest_registry(&consts, net).unwrap();
-    let placeholder = attest_registry(&ScriptConstants::placeholder(), net).unwrap();
-    assert!(!injected.tree_bytes.is_empty());
-    assert_ne!(injected.tree_bytes, placeholder.tree_bytes);
-    assert!(
-        injected.tree_bytes.windows(32).any(|w| w == nft),
-        "the registry NFT id is missing from the compiled AttestRegistry tree"
-    );
-}
-
-/// S1d: `SideChainState` reads the CURRENT set from the AttestRegistry
-/// dataInput (pinned by `attest_registry_nft`) instead of inlining pks. A real
-/// deployment injects the SAME registry NFT into BOTH contracts; the id must
-/// bake into the SideChainState tree (that is how it identifies the trusted
-/// registry). The attester pubkeys must NOT appear in the SideChainState tree.
-#[test]
-fn sidechain_state_references_registry_by_nft() {
-    use aegis_attest::AttesterKey;
-    // A real 2-of-3 federation — the genesis registry's R4/R5 content. It is
-    // validated (below) and written into the registry BOX, never into a tree.
-    let pks: [[u8; 33]; 3] = std::array::from_fn(|i| {
-        AttesterKey::from_secret_bytes(&[(i as u8) + 1; 32])
-            .unwrap()
-            .public()
-            .to_bytes()
-    });
-    validate_attester_set(&pks, 2).expect("a real distinct 2-of-3 set is valid");
-
-    let registry_nft = blake2b256(b"aegis-testnet-attest-registry-nft");
-    let consts = ScriptConstants {
-        sidechain_state_nft: Some(blake2b256(b"aegis-testnet-sidechain-state-nft")),
-        attest_registry_nft: Some(registry_nft),
+        sidechain_state_nft: Some(nft),
         ..ScriptConstants::placeholder()
     };
     let net = NetworkPrefix::Testnet;
     let injected = side_chain_state(&consts, net).unwrap();
     let placeholder = side_chain_state(&ScriptConstants::placeholder(), net).unwrap();
+    assert!(!injected.tree_bytes.is_empty());
     assert_ne!(injected.tree_bytes, placeholder.tree_bytes);
     assert!(
-        injected.tree_bytes.windows(32).any(|w| w == registry_nft),
-        "SideChainState tree does not pin the AttestRegistry NFT"
+        injected.tree_bytes.windows(32).any(|w| w == nft),
+        "the state NFT id is missing from the compiled SideChainState tree"
     );
-    // The set moved off-tree: no attester pubkey is baked into SideChainState.
-    for pk in &pks {
-        assert!(
-            !injected.tree_bytes.windows(33).any(|w| w == pk),
-            "an attester pubkey leaked into the SideChainState tree (should be \
-             in the registry box registers, not the script)"
-        );
-    }
-    // Same NFT compiles the registry too — the two-contract deploy pair.
-    assert!(attest_registry(&consts, net).is_ok());
-}
-
-/// S1d genesis-set validation (the inductive base case the ceremony must
-/// gate; on-chain rotation enforces the same on every successor).
-/// `validate_attester_set` rejects a duplicated key (threshold collapse) and
-/// an out-of-range threshold (k<=0 hijack / k>n / n>255 brick), and accepts a
-/// well-formed distinct majority set.
-#[test]
-fn validate_attester_set_guards_genesis_federation() {
-    use aegis_attest::AttesterKey;
-    let pk = |seed: u8| {
-        AttesterKey::from_secret_bytes(&[seed; 32])
-            .unwrap()
-            .public()
-            .to_bytes()
-    };
-    let good = [pk(1), pk(2), pk(3)];
-
-    // happy: distinct 2-of-3.
-    validate_attester_set(&good, 2).unwrap();
-
-    // duplicate key (#1 twice) — collapses the threshold.
-    assert!(matches!(
-        validate_attester_set(&[pk(1), pk(2), pk(1)], 2),
-        Err(ContractsError::DuplicateAttesterKey)
-    ));
-
-    // k = 0 ⇒ atLeast trivially true (anyone advances the tip — hijack).
-    assert!(matches!(
-        validate_attester_set(&good, 0),
-        Err(ContractsError::InvalidThreshold { k: 0, n: 3 })
-    ));
-
-    // k > n ⇒ unsatisfiable (brick).
-    assert!(matches!(
-        validate_attester_set(&good, 4),
-        Err(ContractsError::InvalidThreshold { k: 4, n: 3 })
-    ));
 }
 
 /// `derive_sibling_hashes` fills exactly the three vault-pinned hash
@@ -414,7 +319,6 @@ fn testnet_v3_constants() -> ScriptConstants {
         receipt_script_hash: Some(hex32(RECEIPT_SCRIPT_HASH_V3)),
         fee_pot_script_hash: Some(blake2b256(b"aegis-testnet-dummy-feepot")),
         sidechain_state_nft: None,
-        attest_registry_nft: None,
     }
 }
 

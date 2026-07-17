@@ -4,6 +4,20 @@
 **Stage: design — nothing is frozen.** "Decided" means current-best-reasoning, revisable until scaffold; revisions go through these docs so the trail stays coherent.  
 **Archive:** Superseded notes live under [`notes/archive/`](./notes/archive/) — do not use as primary.
 
+> **Bridge status (2026-07-17, operator decision):** the Aegis bridge is the
+> **trustless verifyStark settlement design** —
+> [stark-settlement-design.md](./stark-settlement-design.md). The k-of-n
+> **attester committee bridge (S1a–S1d) is RETIRED**: the `aegis-attest` crate,
+> the node attestation service, `AttestRegistry.es`, and the committee authority
+> in `SideChainState.es` were removed from `main` and are preserved at git tag
+> `attester-bridge-final` (its design docs `attester-infra.md` /
+> `s1c-attester-unlock.md` live there too). `SideChainState.es` keeps its
+> transition-constrained shape with a placeholder authority slot where the
+> verifyStark predicate plugs in. Mainnet activation of the trustless bridge
+> awaits upstream EIP-0045 (ergoplatform/eips#103, sigmastate-interpreter#1116).
+> Older docs below that describe attester/`V_cap` peg-out mechanics are
+> historical context, not the current plan.
+
 ## Start here
 
 | Doc | Contents |

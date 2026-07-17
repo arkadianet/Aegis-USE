@@ -4,6 +4,15 @@
 **Status:** canon  
 **Params:** [params.md](./params.md) · **Security:** [security.md](./security.md) · **Gaps:** [contracts/GAPS.md](./contracts/GAPS.md)
 
+> **Retirement note (2026-07-17, operator decision):** the U1-strong **k-of-n
+> attester** peg-out authority described below is **RETIRED** — the bridge is
+> the trustless verifyStark settlement design
+> ([stark-settlement-design.md](./stark-settlement-design.md)); the committee
+> machinery is preserved at git tag `attester-bridge-final`.
+> `SideChainState.es` keeps its transition-constrained shape with a placeholder
+> authority slot for the verifyStark predicate. Attester references below are
+> historical.
+
 ---
 
 ## 1. Stance

@@ -36,7 +36,6 @@ use std::sync::{Arc, RwLock};
 
 use num_bigint::BigUint;
 
-use crate::attest::AttesterContext;
 use crate::mempool::{AdmissionView, AdmitError, Admitted, Mempool};
 use crate::seed::{Id, SeedCore};
 use crate::tx::ShieldedTransfer;
@@ -88,9 +87,6 @@ pub struct ApiState {
     /// Admission snapshot (spend anchor + spent set + fee), republished
     /// by the node on each tip change.
     admission: Arc<RwLock<Arc<AdmissionView>>>,
-    /// This node's attester identity, if the operator configured one.
-    /// `None` on a plain (non-attester) node — `/attest/tip` 404s.
-    attester: Option<Arc<AttesterContext>>,
 }
 
 impl ApiState {
@@ -108,14 +104,7 @@ impl ApiState {
             core,
             mempool,
             admission: Arc::new(RwLock::new(Arc::new(admission))),
-            attester: None,
         }
-    }
-
-    /// Attach this node's attester identity, enabling `/attest/tip`.
-    pub fn with_attester(mut self, ctx: AttesterContext) -> Self {
-        self.attester = Some(Arc::new(ctx));
-        self
     }
 
     /// Replace the published snapshot (called once per tick).
@@ -310,13 +299,6 @@ mod serve {
             "/aegis/v1/state" => json(&mut stream, &state_json(&snap)),
             "/aegis/v1/mm/status" => json(&mut stream, &mm_status_json(&snap)),
             "/aegis/v1/mm/commitment" => json(&mut stream, &mm_commitment_json(&snap)),
-            "/aegis/v1/attest/tip" => match &state.attester {
-                Some(ctx) => json(
-                    &mut stream,
-                    &crate::attest::tip_attestation_json(ctx, &snap),
-                ),
-                None => respond(&mut stream, 404, b"node is not an attester"),
-            },
             "/aegis/v1/mempool" => json(
                 &mut stream,
                 &serde_json::json!({ "size": state.mempool_len() }),
@@ -775,51 +757,6 @@ mod tests {
         assert_eq!(v["id"], hex::encode([0xAB; 32]));
         assert_eq!(v["cumulative_work"], "7000");
         assert_eq!(v["is_final"], false);
-    }
-
-    #[test]
-    fn attest_tip_serves_a_verifiable_attestation() {
-        use aegis_attest::{Attestation, AttesterKey, AttesterSet, PublicKey, Purpose};
-        // A 2-of-3 federation; this node holds member #1's key.
-        let keys: Vec<AttesterKey> = (1u8..=3)
-            .map(|s| AttesterKey::from_secret_bytes(&[s; 32]).unwrap())
-            .collect();
-        let set = AttesterSet::new(keys.iter().map(|k| k.public()).collect(), 2).unwrap();
-        let ctx = crate::attest::AttesterContext::new(keys[0].clone(), set.clone()).unwrap();
-        let server = ApiServer::spawn("127.0.0.1:0", state().with_attester(ctx)).expect("spawn");
-
-        let (code, body) = get(&server.base_url(), "/aegis/v1/attest/tip");
-        assert_eq!(code, 200);
-        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
-        assert_eq!(v["purpose"], "tip");
-        assert_eq!(v["height"], 7);
-        assert_eq!(v["k"], 2);
-        assert_eq!(v["n"], 3);
-
-        // Reconstruct the attestation and verify it against the federation.
-        let payload = hex::decode(v["payload"].as_str().unwrap()).unwrap();
-        let signer_bytes: [u8; 33] = hex::decode(v["signer"].as_str().unwrap())
-            .unwrap()
-            .try_into()
-            .unwrap();
-        let sig: [u8; 64] = hex::decode(v["signature"].as_str().unwrap())
-            .unwrap()
-            .try_into()
-            .unwrap();
-        let att = Attestation {
-            signer: PublicKey::from_bytes(&signer_bytes).unwrap(),
-            sig,
-        };
-        assert!(set.verify(Purpose::Tip, &payload, &att));
-        // The same signature must not verify a different tip statement.
-        assert!(!set.verify(Purpose::Tip, b"some other tip", &att));
-    }
-
-    #[test]
-    fn attest_tip_404_on_a_non_attester_node() {
-        let server = ApiServer::spawn("127.0.0.1:0", state()).expect("spawn");
-        let (code, _) = get(&server.base_url(), "/aegis/v1/attest/tip");
-        assert_eq!(code, 404);
     }
 
     #[test]

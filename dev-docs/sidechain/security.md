@@ -75,6 +75,13 @@ Full catalog: [security-appendix.md](./security-appendix.md).
 
 ### Strong (required to raise `V_cap`)
 
+> **Retirement note (2026-07-17, operator decision):** S1 (k-of-n attesters)
+> was built (S1a–S1d), red-reviewed SOUND, and then **RETIRED from `main`** —
+> the bridge is the trustless verifyStark settlement design
+> ([stark-settlement-design.md](./stark-settlement-design.md)); the committee
+> machinery is preserved at git tag `attester-bridge-final`. S1 below is
+> historical.
+
 **S1 (preferred):** k-of-n attesters sign `(network_id, aegis_height, tip_digest, burn_id, N)`; unlock requires threshold + DoubleRedeem + delay. Attester set lives in SideChainState or an **AttestRegistry** NFT box. Threshold progression: dogfood **2/3** → testnet **3/5** (params start at 2/3). Attesters run `aegis-node`; **≠** sole vault spenders.
 
 **S2:** Ergo extension commits Aegis header (parallel spike).  

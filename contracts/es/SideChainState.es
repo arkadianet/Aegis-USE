@@ -12,7 +12,8 @@
   // R4 = Long       Aegis sidechain height h (strictly increasing; jumps
   //                 allowed — many Aegis blocks per Ergo block)
   // R5 = Coll[Byte] Aegis tip commitment at h (32-byte block id / state
-  //                 digest) — DATA, not verified on-chain (see C1 below)
+  //                 digest) — DATA, not verified on-chain until the
+  //                 verifyStark settlement predicate lands (see AUTHORITY)
   // R6 = AvlTree    burn tree: key = burn_id (32 bytes), value =
   //                 longToByteArray(N) (8 bytes, burned USE base units).
   //                 Genesis = empty tree, keyLength 32, valueLength Some(8),
@@ -32,16 +33,16 @@
   // `insert` verifies the proof against the OLD digest and returns the NEW
   // tree; `.get` fails if any key already exists or the proof is invalid.
   // Consequence: every digest this box can ever hold is an insert-descendant
-  // of the genesis empty tree — the updater (even a k-of-n attester quorum)
-  // CANNOT
+  // of the genesis empty tree — the updater (whoever satisfies the authority
+  // slot) CANNOT
   //   * swap in a fresh/foreign tree (it is not the insert-image of SELF.R6),
   //   * delete or mutate a recorded burn (insert-only; re-inserting an
   //     existing burn_id fails ⇒ a burn's N is immutable once posted),
   //   * change tree params/flags (AvlTree == compares digest AND keyLength/
   //     valueLength/enabledOperations; both branches pin them to SELF's).
-  // History is append-only: a fake burn is possible only via a k-of-n
-  // attester quorum (C1) and leaves a permanent, attributable on-chain
-  // insert record (fraud evidence).
+  // History is append-only: even a compromised authority can only APPEND a
+  // fake burn, leaving a permanent, attributable on-chain insert record
+  // (fraud evidence).
   // NB `==` on AvlTree compares whole authenticated-tree values — no manual
   // digest byte-slicing anywhere (sidesteps the 0..32 vs 1..33 question).
   //
@@ -50,8 +51,7 @@
   //   dataInputs must be UNSPENT; only the current successor carries the NFT.
   // * Height rollback: successor.R4 > SELF.R4 (strict). An Aegis reorg below
   //   the posted tip therefore CANNOT be represented — v1 policy: post burns
-  //   only at ≥ M_conf Aegis depth; an inserted-then-rolled-back burn is a
-  //   C1 fraud event (halt). See DESIGN.md GAP-3.
+  //   only at ≥ M_conf Aegis depth. See DESIGN.md GAP-3.
   // * Fee siphon: successor.value >= SELF.value — updates cannot bleed the
   //   box's ERG endowment for tx fees; the updater funds fees externally.
   // * Rate limit: successor.R7 == HEIGHT && HEIGHT > SELF.R7 — at most one
@@ -60,40 +60,26 @@
   //   and holds no USE (successor.tokens.size == 1), so it contributes 0 to
   //   the vault's pass-2 sum-accounting and cannot perturb it.
   //
-  // ── C1 — U1-STRONG (k-of-n attesters, ROTATABLE via S1d) ───────────────
-  //   Tip updates (INCLUDING every burn insert) are authorized by a k-of-n
-  //   ATTESTER FEDERATION, not a single key. A fake burn now requires k
-  //   colluding attesters instead of one compromised tip key, and still
-  //   leaves a permanent, attributable append-only insert record (fraud
-  //   evidence). Burn authenticity is therefore majority-honest-trusted,
-  //   bounded by V_cap + T_delay. R5 (tip commitment) remains unverified
-  //   DATA — k-of-n does NOT make peg-out trustless; full trust-minimization
-  //   needs SPV-in-consensus / STARK settlement (S2). See attester-infra.md
-  //   §S1c/§S1d + DESIGN.md §C1.
+  // ── AUTHORITY (placeholder slot — the verifyStark successor plugs in here)
+  //   The k-of-n attester-federation authority (S1c/S1d, "U1-strong" C1) was
+  //   RETIRED 2026-07-17 (operator decision): the Aegis bridge is the
+  //   TRUSTLESS verifyStark settlement design — an on-chain STARK proof
+  //   (EIP-0045 `verifyStark`) that the posted tip / burn-tree transition is
+  //   the honest Aegis chain's, replacing committee trust entirely. See
+  //   dev-docs/sidechain/stark-settlement-design.md. The retired committee
+  //   machinery (AttestRegistry.es, aegis-attest, the S1b node service) is
+  //   preserved at git tag `attester-bridge-final`.
   //
-  //   S1d: the federation is no longer INLINED here. It is read from the
-  //   AttestRegistry singleton box (pinned by ATTEST_REGISTRY_NFT) provided as
-  //   dataInputs(0): R4 = Coll[GroupElement] members, R5 = Int threshold k.
-  //   The authority is `atLeast(k, members.map(proveDlog))` built from THOSE
-  //   registers — so ROTATING the registry (add/remove/replace an attester)
-  //   changes who may advance the tip with NO SideChainState redeploy. The
-  //   AttestRegistry contract constrains every set it can hold to
-  //   1 <= k <= n <= 255 and distinct members, so the atLeast built here can
-  //   never degenerate (k<=0 ⇒ anyone-spends; k>n / n>255 ⇒ brick).
-  //
-  //   SOUNDNESS of the dataInput read: `registryValid` (dataInputs(0) carries
-  //   the real ATTEST_REGISTRY_NFT — an UNFORGEABLE singleton) is ANDed into
-  //   the sigmaProp below. A spoofed dataInput fails registryValid, so even
-  //   though its attacker-chosen R4/R5 could satisfy the atLeast, the ANDed
-  //   sigmaProp(false) rejects the spend; the ONLY way to pass is to reference
-  //   the genuine registry, whose members/k are the real ones. dataInputs must
-  //   be UNSPENT ⇒ only the LIVE registry box qualifies (no stale-set replay).
-  // ⚠ deploy-time injections: SIDECHAIN_STATE_NFT, ATTEST_REGISTRY_NFT (the
-  //   AttestRegistry singleton NFT id). The set + threshold are NOT injected
-  //   here anymore — they live in the registry box's registers.
+  //   Until that predicate lands, `authority` below is a deliberately
+  //   UNSATISFIABLE placeholder (`sigmaProp(false)`): the box compiles and
+  //   can be deployed structurally, but its tip can NEVER be advanced.
+  //   Splice the real settlement predicate into this slot before any
+  //   deployment that must update. The transition constraints stay ANDed
+  //   on — whatever authority fills the slot, a signed/proven update still
+  //   has to be a valid append-only advance.
+  // ⚠ deploy-time injection: SIDECHAIN_STATE_NFT.
 
   val SIDECHAIN_STATE_NFT = fromBase64("")   // todo state singleton NFT id
-  val ATTEST_REGISTRY_NFT = fromBase64("")   // todo attest-registry singleton NFT id
 
   val successor = OUTPUTS(0)
 
@@ -128,24 +114,13 @@
       newTree == oldTree
     }
 
-  // U1-strong authority (S1d, rotatable): read the CURRENT federation from the
-  // AttestRegistry singleton (dataInputs(0), pinned by its NFT) and require
-  // its k-of-n to co-sign. `registryValid` is ANDed into the sigmaProp so a
-  // spoofed dataInput cannot inject attacker keys (see SOUNDNESS note above).
-  // The transition constraints are ANDed on too, so ≥k signatures are
-  // NECESSARY but not sufficient — a signed update still has to be a valid
-  // append-only advance.
-  val registry = CONTEXT.dataInputs(0)
-  val registryValid =
-    registry.tokens.size == 1 &&
-    registry.tokens(0)._1 == ATTEST_REGISTRY_NFT &&
-    registry.tokens(0)._2 == 1L                     // full singleton unit (mint MUST be supply-1)
-  val attesterPks = registry.R4[Coll[GroupElement]].get
-  val attestK = registry.R5[Int].get
+  // AUTHORITY SLOT (see the AUTHORITY block above): PLACEHOLDER, unsatisfiable
+  // by design until the verifyStark settlement predicate replaces it
+  // (dev-docs/sidechain/stark-settlement-design.md).
+  val authority = sigmaProp(false)
 
-  atLeast(attestK, attesterPks.map({ (pk: GroupElement) => proveDlog(pk) })) &&
+  authority &&
     sigmaProp(
-      registryValid &&
       structural && heightAdvances && tipWellFormed && rateLimited && treeTransition
     )
 }

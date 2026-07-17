@@ -14,5 +14,4 @@ ergo-crypto   = { workspace = true }
 thiserror     = { workspace = true }
 
 [dev-dependencies]
-aegis-attest = { path = "../aegis-attest" }
 hex = { workspace = true }

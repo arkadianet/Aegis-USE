@@ -14,7 +14,13 @@ living open-items register.
 > — an external-review track that is *not* a build milestone.
 
 > ✅ **FREEZE-HOLD LIFTED (operator decision 2026-07-14): Curve Trees adopted for
-> the private layer; the bridge stays the attester/`V_cap` model for now.** The
+> the private layer; the bridge stays the attester/`V_cap` model for now.**
+> *(Superseded 2026-07-17, operator decision: the attester k-of-n bridge is
+> **RETIRED** — the bridge is the trustless **verifyStark** design,
+> [stark-settlement-design.md](dev-docs/sidechain/stark-settlement-design.md).
+> The committee machinery is preserved at git tag `attester-bridge-final`;
+> mainnet activation of the trustless bridge awaits upstream EIP-0045 —
+> ergoplatform/eips#103, sigmastate-interpreter#1116.)* The
 > hold existed only to avoid hardening a core a STARK pivot might discard — with
 > Curve Trees settled, that's moot, so the **whole Curve-Trees core + scaling track
 > is open to build**: the payment primitive (address-binding note), the
@@ -144,8 +150,11 @@ track completes. These are calendar/human-gated, not code:
 - **Poseidon-over-F_p parameters** — round counts / constants sign-off.
 - **`delta ⊥ {B, B_blinding}` (NUMS)** ownership-binding assumption.
 - **Peg-in objectivity margins** — the absolute-work floor + `N_mint` reorg margin.
-- **Peg-out C1** — move off the v1 `V_cap`-bounded trusted attester to U1-strong
-  attesters or SPV-in-consensus.
+- **Peg-out C1** — move off the v1 `V_cap`-bounded trusted attester to the
+  trustless verifyStark settlement predicate
+  ([stark-settlement-design.md](dev-docs/sidechain/stark-settlement-design.md);
+  the U1-strong attester interim was retired 2026-07-17, tag
+  `attester-bridge-final`).
 
 A **functionally complete testnet chain (M0–M6) is reachable without any of
 these** — which is the point: build and prove the whole thing on testnet, get it

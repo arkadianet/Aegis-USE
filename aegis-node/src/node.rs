@@ -135,10 +135,6 @@ pub struct NodeConfig {
     /// Bind address for the read-only node API (M3), e.g.
     /// `127.0.0.1:8750`. Unset: no API server.
     pub api_addr: Option<String>,
-    /// This node's attester identity (S1b). Set on a federation member to
-    /// serve signed tip attestations at `/attest/tip`; `None` on a plain
-    /// node. Requires `api_addr` to have any effect.
-    pub attester: Option<crate::attest::AttesterContext>,
 }
 
 /// Node boot/config failure.
@@ -308,7 +304,6 @@ impl Node {
         }
 
         let api_addr = config.api_addr.clone();
-        let attester = config.attester;
         let mut node = Node {
             network,
             daa: DaaParams::for_network(network),
@@ -341,15 +336,12 @@ impl Node {
         if let Some(addr) = api_addr {
             node.refresh_snapshots();
             let mempool = Arc::new(RwLock::new(Mempool::new()));
-            let mut state = ApiState::new(
+            let state = ApiState::new(
                 node.build_status(),
                 Arc::clone(&node.core),
                 Arc::clone(&mempool),
                 node.admission_view(),
             );
-            if let Some(ctx) = attester {
-                state = state.with_attester(ctx);
-            }
             let server = ApiServer::spawn(&addr, state.clone())?;
             tracing::info!(addr = %server.local_addr(), "node API serving");
             node.api_state = Some(state);

@@ -11,7 +11,6 @@
 
 pub mod anchor_watch;
 pub mod api;
-pub mod attest;
 pub mod auxpow;
 pub mod chain;
 pub mod daa;

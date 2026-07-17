@@ -8,7 +8,6 @@ repository.workspace = true
 publish     = false
 
 [dependencies]
-aegis-attest    = { path = "../aegis-attest" }
 aegis-crypto    = { path = "../aegis-crypto" }
 aegis-spec      = { path = "../aegis-spec" }
 aegis-types     = { path = "../aegis-types" }
