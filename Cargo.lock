@@ -81,6 +81,7 @@ dependencies = [
  "p3-util",
  "rand 0.10.2",
  "rand_chacha 0.10.0",
+ "serde",
  "sha2 0.10.9",
  "x25519-dalek",
 ]

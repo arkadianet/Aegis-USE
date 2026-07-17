@@ -37,7 +37,7 @@ pub const EMPTY_LEAF: Digest = [F::ZERO; 8];
 /// A membership proof for a leaf: the sibling at each level (bottom→top) and the
 /// leaf's index (the path bits `= (index >> level) & 1`; bit 1 ⇒ the node is a
 /// right child, so its sibling is on the left).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct MerklePath {
     pub siblings: [Digest; DEPTH],
     pub index: u64,
