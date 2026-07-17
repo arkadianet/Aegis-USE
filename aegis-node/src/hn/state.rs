@@ -292,7 +292,7 @@ mod tests {
     /// apply → rollback → apply is the identity (reorg-safety).
     #[test]
     fn apply_rollback_is_exact_inverse() {
-        let circuit = SpendCircuit::deterministic(1);
+        let circuit = SpendCircuit::new();
         let miner = WalletKeys::from_seed(b"miner").address();
 
         let mut st = HnState::new();
@@ -334,7 +334,7 @@ mod tests {
 
     #[test]
     fn block_with_wrong_prev_root_is_rejected() {
-        let circuit = SpendCircuit::deterministic(1);
+        let circuit = SpendCircuit::new();
         let miner = WalletKeys::from_seed(b"m").address();
         let mut st = HnState::new();
         let mint = coinbase_note(&miner, 1, &[9u8; 32]);

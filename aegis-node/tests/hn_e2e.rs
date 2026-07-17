@@ -8,8 +8,6 @@ use aegis_hn_wallet::{SpendCircuit, Wallet};
 use aegis_node::hn::state::HnError;
 use aegis_node::hn::HnChain;
 
-/// Fixed circuit-key seed so the published vk is stable across the restart.
-const CIRCUIT_SEED: u64 = 0xA315_C0DE_5EED_0001;
 
 fn addr_of(w: &Wallet) -> Address {
     // Senders know only the encoded string.
@@ -27,7 +25,7 @@ fn real_node_hash_native_end_to_end() {
     let (addr_a, addr_b, addr_c) = (addr_of(&a), addr_of(&b), addr_of(&c));
 
     // ---- boot the node ----
-    let mut chain = HnChain::create(dir.path(), SpendCircuit::deterministic(CIRCUIT_SEED)).unwrap();
+    let mut chain = HnChain::create(dir.path(), SpendCircuit::new()).unwrap();
 
     // ---- faucet: coinbase mints (each its own block) ----
     chain.produce_block(&addr_a, 1_000).unwrap();
@@ -92,7 +90,7 @@ fn real_node_hash_native_end_to_end() {
 
     // ---- RESTART: drop the node, reopen from disk (replays the block log) ----
     drop(chain);
-    let reopened = HnChain::open(dir.path(), SpendCircuit::deterministic(CIRCUIT_SEED)).unwrap();
+    let reopened = HnChain::open(dir.path(), SpendCircuit::new()).unwrap();
     assert_eq!(
         reopened.height(),
         height_before,

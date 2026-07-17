@@ -36,7 +36,8 @@ pub struct HnChain {
 
 impl HnChain {
     /// A fresh chain persisted under `dir` (creates the dir). `circuit` MUST be
-    /// the reproducible published keys ([`SpendCircuit::deterministic`]) so the
+    /// the reproducible published keys (`SpendCircuit::new` — fixed public preprocessed
+    /// salt) so the
     /// vk is stable across restarts.
     pub fn create(dir: impl AsRef<Path>, circuit: SpendCircuit) -> std::io::Result<Self> {
         std::fs::create_dir_all(dir.as_ref())?;
