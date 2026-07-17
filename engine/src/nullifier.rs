@@ -24,12 +24,14 @@
 use crate::poseidon::{hash_domain, Digest, DIGEST_ELEMS, DOMAIN_NULLIFIER};
 use crate::commit::{Nk, Rho};
 
+/// The two rate-8 sponge blocks of a nullifier, in absorption order: `nk`, `rho`.
+pub fn nullifier_blocks(nk: &Nk, rho: &Rho) -> [[crate::poseidon::F; DIGEST_ELEMS]; 2] {
+    [*nk, *rho]
+}
+
 /// Nullifier `nf = H_NF(nk ‖ rho)` (16 field elements → 2 permutations).
 pub fn nullifier(nk: &Nk, rho: &Rho) -> Digest {
-    let mut input = [crate::poseidon::F::default(); 2 * DIGEST_ELEMS];
-    input[..DIGEST_ELEMS].copy_from_slice(nk);
-    input[DIGEST_ELEMS..].copy_from_slice(rho);
-    hash_domain(DOMAIN_NULLIFIER, &input)
+    hash_domain(DOMAIN_NULLIFIER, &nullifier_blocks(nk, rho).concat())
 }
 
 #[cfg(test)]

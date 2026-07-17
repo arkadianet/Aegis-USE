@@ -5,6 +5,7 @@
 //! validated foundation the full 2-in/2-out spend AIR is assembled on.
 
 pub mod merkle_air;
+pub mod nullifier_air;
 pub mod perm;
 
 use core::borrow::Borrow;

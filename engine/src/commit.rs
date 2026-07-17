@@ -64,14 +64,22 @@ pub fn owner_key(nk: &Nk) -> Digest {
     hash_domain(DOMAIN_OWNER, nk)
 }
 
-/// Note commitment `cm = H_CM(value ‖ owner ‖ rho ‖ r)`.
+/// The four rate-8 sponge blocks of a note commitment, in absorption order:
+/// `[value ‖ 0×7]`, `owner`, `rho`, `r`. Component-aligned (one component per
+/// block) so the in-circuit sponge chain ([`crate::spend`]) absorbs exactly one
+/// component per row — no component straddles a block boundary.
+pub fn commitment_blocks(value: F, owner: &Digest, rho: &Rho, r: &Blinding) -> [[F; DIGEST_ELEMS]; 4] {
+    let mut value_block = [F::ZERO; DIGEST_ELEMS];
+    value_block[0] = value;
+    [value_block, *owner, *rho, *r]
+}
+
+/// Note commitment `cm = H_CM(value_block ‖ owner ‖ rho ‖ r)` — a
+/// domain-separated Poseidon2 sponge over the four component-aligned blocks
+/// (32 field elements → 4 permutations).
 pub fn note_commitment(value: F, owner: &Digest, rho: &Rho, r: &Blinding) -> Digest {
-    let mut input = Vec::with_capacity(1 + 3 * DIGEST_ELEMS);
-    input.push(value);
-    input.extend_from_slice(owner);
-    input.extend_from_slice(rho);
-    input.extend_from_slice(r);
-    hash_domain(DOMAIN_COMMITMENT, &input)
+    let blocks = commitment_blocks(value, owner, rho, r);
+    hash_domain(DOMAIN_COMMITMENT, &blocks.concat())
 }
 
 #[cfg(test)]
