@@ -401,6 +401,74 @@ in-field proof verification (~52 ms/proof native).
   (scan → pay by address → submit+mine → double-spend rejected → restart → rescan
   → fresh spend), plus the in-process e2e's emission/fee/maturity checks.
 
+## Spec economics (aegis-spec §11-12): the pot, the flat fee, pot-funded coinbase
+
+The placeholder economy (flat 50/block unconditional emission, min-fee floor,
+fees-to-miner) is REPLACED by the designed one. Chain-id-breaking: the testnet
+chain id bumped to `0x484E_0002` and `~/apps/aegis-testnet-hn` was re-cut on the
+new genesis.
+
+### Parameters — ONE place (`hn::params::HnChainParams`)
+
+| Param | Value | Meaning |
+|---|---|---|
+| `BASE_UNITS_PER_USE` | 100 | 1 USE = 100 cents; all amounts are integer cents |
+| `flat_fee` | 3 (0.03 USE) | EVERY shielded tx pays exactly this — over- or under-payment is consensus-invalid (`HnError::BadFee`). Amount-independent by the standing privacy rule: fee variation is a fingerprint. |
+| `coinbase_base` | 1 (0.01 USE) | per-block base draw from the pot |
+| `coinbase_per_tx` | 1 (0.01 USE) | miner's inclusion bonus per included tx |
+| `coinbase_maturity` | 120 | spec value (~4 min at the testnet's ~2 s cadence); references the wallet crate's `COINBASE_MATURITY` so client and chain cannot drift |
+| `root_window` | 100 | recent-root acceptance window |
+| `genesis_pot` | 1,000,000 (10,000 USE) | the testnet's pinned security-budget allocation |
+| genesis allocation | 2 × 500,000,000 to the faucet | pinned non-reward blocks (see below) |
+
+### The pot (public security budget)
+
+- A PUBLIC integer balance in `HnState`, **header-committed** in every block
+  (`HnBlock::pot_after`); validators recompute `pot_parent + fees − coinbase`
+  and reject a mismatch (`PotMismatch`).
+- **Fees → pot, 100%.** The miner never receives fee value directly.
+- **Coinbase = min(pot_parent, base + per_tx × txs)** — computed on the PARENT
+  pot (no same-block circularity: a block's fees credit the pot but cannot fund
+  its own coinbase). Per included tx the miner nets +0.01 and the pot nets
+  +0.02. When the pot runs dry the coinbase is the remainder, then 0 — the
+  chain still advances (tested).
+- **The coinbase is publicly auditable while staying a shielded note**: the
+  block carries `miner_owner` (the destination's spend component) and
+  `coinbase_amount` in the clear; since the mint derivation is deterministic
+  from `(owner, amount, block_id)`, every validator recomputes the commitment
+  (`mint::coinbase_cm_expected`) and rejects a note that doesn't carry exactly
+  the consensus value to the claimed miner (`CoinbaseCmMismatch`), and rejects
+  any over/under-claimed amount (`CoinbaseMismatch`). Block production is
+  public; payments stay private.
+- **Genesis is pinned, not free**: non-reward mint blocks are only valid inside
+  the `params.genesis` prefix and must match its `(dest, amount)` entries
+  exactly (`BadGenesis`); reward blocks inside the prefix are equally invalid.
+  `HnChain::fund` is private — arbitrary funding cannot exist. Genesis issuance
+  is the one documented exception to conservation (it IS the initial supply),
+  and the genesis pot is a separate pinned param.
+
+### Conservation invariant (I1-extended)
+
+`shielded_total + pot` is unchanged by every non-genesis block: the pool gains
+exactly the coinbase and loses exactly the fees; the pot does the opposite.
+`HnState` tracks `shielded_total` from PUBLIC deltas only (coinbase amounts,
+genesis mints, flat fees — individual note values stay hidden) and the state
+transition **enforces** the invariant (`ConservationViolated`) rather than
+assuming the arithmetic. Undo/rollback restores `pot` and `shielded_total`
+exactly (reorg-safe; tested as apply → rollback → apply identity).
+
+### Adversarial tests (state unit tests + `hn_e2e`)
+
+Over-claim with a fully consistent block (cm/pot/state_root all match the
+inflated claim) → `CoinbaseMismatch`; over-claim against an empty pot →
+`CoinbaseMismatch`; under-claim → `CoinbaseMismatch`; correct public amount but
+shielded note minted for more → `CoinbaseCmMismatch`; wrong `pot_after` →
+`PotMismatch`; genesis redirect / inflation / reward-in-prefix → `BadGenesis`;
+wrong fee (0, 0.02, 0.04) with a VALID proof → `BadFee` at the mempool;
+pot-exhausted chain advances with 0-coinbase blocks; the multi-block multi-tx
+e2e asserts `pot + shielded_total == genesis_pot + genesis_sum` after every
+block and that the pot equals `genesis + fees − coinbases` exactly.
+
 ## Networked testnet cut (multi-node, merge-mined)
 
 The hash-native subsystem now runs as a **networked, multi-node, merge-mined

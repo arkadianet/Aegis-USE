@@ -49,14 +49,14 @@ fn main() {
     let args = Args::parse();
     let circuit = SpendCircuit::new();
 
+    let params = HnChainParams::testnet();
     let log_exists = args.data_dir.join("hn_blocks.log").exists();
     let chain = if log_exists {
-        HnChain::open(&args.data_dir, circuit).expect("open chain")
+        HnChain::open(&args.data_dir, circuit, params).expect("open chain")
     } else if args.genesis {
-        HnChain::create_with_params(&args.data_dir, circuit, HnChainParams::testnet())
-            .expect("create genesis chain")
+        HnChain::create_genesis(&args.data_dir, circuit, params).expect("create genesis chain")
     } else {
-        HnChain::create(&args.data_dir, circuit).expect("create chain")
+        HnChain::create(&args.data_dir, circuit, params).expect("create chain")
     };
 
     let miner = WalletKeys::from_seed(args.miner_seed.as_bytes()).address();
@@ -119,9 +119,12 @@ fn main() {
                     match produced {
                         Err(e) => eprintln!("hn-node: produce error: {e}"),
                         Ok(()) => {
-                            let h = shared.lock().unwrap().height();
+                            let (h, pot) = {
+                                let c = shared.lock().unwrap();
+                                (c.height(), c.pot())
+                            };
                             if last_status.elapsed() > Duration::from_secs(10) {
-                                eprintln!("hn-node: height {h} (devnet anchor {dh})");
+                                eprintln!("hn-node: height {h} pot {pot} (devnet anchor {dh})");
                                 last_status = std::time::Instant::now();
                             }
                         }

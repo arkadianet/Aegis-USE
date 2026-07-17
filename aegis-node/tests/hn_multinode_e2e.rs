@@ -40,14 +40,14 @@ fn two_node_hash_native_testnet() {
 
     // ---- node A: genesis allocation + mining ----
     let chain_a = Arc::new(Mutex::new(
-        HnChain::create_with_params(dir_a.path(), SpendCircuit::new(), params).unwrap(),
+        HnChain::create_genesis(dir_a.path(), SpendCircuit::new(), params.clone()).unwrap(),
     ));
     let server_a = serve(&chain_a, addr_m);
     let net_a = HttpChain::new(server_a.base_url());
 
     // ---- node B: empty, syncs from A over P2P (IBD from genesis) ----
     let chain_b = Arc::new(Mutex::new(
-        HnChain::create(dir_b.path(), SpendCircuit::new()).unwrap(),
+        HnChain::create(dir_b.path(), SpendCircuit::new(), params.clone()).unwrap(),
     ));
     let server_b = serve(&chain_b, addr_of(&miner));
     let net_b = HttpChain::new(server_b.base_url());
@@ -65,8 +65,10 @@ fn two_node_hash_native_testnet() {
     faucet.scan(&net_a);
     assert_eq!(faucet.balance(), 1_000_000_000);
 
-    // Faucet pays R 1000; the tx is submitted to NODE B.
-    let tx = faucet.pay(&net_a, &circuit, &addr_r, 1_000, 10).unwrap();
+    // Faucet pays R 1000 (flat fee); the tx is submitted to NODE B.
+    let tx = faucet
+        .pay(&net_a, &circuit, &addr_r, 1_000, params.flat_fee)
+        .unwrap();
     net_b.submit(&tx).expect("node B admits the tx");
 
     // Gossip: A pulls B's mempool, then A mines the block.
@@ -102,7 +104,7 @@ fn two_node_hash_native_testnet() {
     drop(server_b);
     drop(net_b);
     let chain_b2 = Arc::new(Mutex::new(
-        HnChain::open(dir_b.path(), SpendCircuit::new()).unwrap(),
+        HnChain::open(dir_b.path(), SpendCircuit::new(), params).unwrap(),
     ));
     assert_eq!(
         chain_b2.lock().unwrap().height(),

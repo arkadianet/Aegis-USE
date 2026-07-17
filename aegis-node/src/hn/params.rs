@@ -1,15 +1,51 @@
 //! Chain parameters + genesis for the hash-native testnet profile.
 //!
-//! A NEW chain id (chain-id-breaking is free pre-launch): the hn profile is
-//! entirely separate from the Curve-Trees testnet, which keeps running as-is.
-//! Every consensus knob the node enforces is pinned here (not scattered as
-//! magic constants) and documented in `dev-docs/sidechain/`.
+//! **Every consensus-economic knob lives HERE** (aegis-spec §11-12): the flat
+//! tx fee, the coinbase base/bonus, the coinbase maturity, the genesis pot and
+//! allocation, and the root window — a single struct selected by chain profile,
+//! documented in `dev-docs/sidechain/`. Nothing economic is a scattered
+//! constant elsewhere in the node.
+//!
+//! # The designed economy (ported from the spec — not the placeholder)
+//! - The **emission pot** is a PUBLIC integer balance in chain state,
+//!   header-committed. It is the security budget: all tx fees flow INTO it,
+//!   every coinbase draws OUT of it. There is no unconditional emission.
+//! - The **SC tx fee is flat** ([`FLAT_FEE`] = 0.03 USE), amount-independent
+//!   (the standing privacy rule — fee variation is a fingerprint). A tx pays
+//!   EXACTLY the flat fee; any other fee is consensus-invalid.
+//! - **Coinbase = min(pot_parent, base + per_tx × txs)** — computed on the
+//!   PARENT state's pot (no same-block circularity). Per included tx the miner
+//!   earns a 0.01 USE inclusion bonus and the pot nets +0.02 USE.
+//! - **Conservation (I1-extended)**: shielded total + pot is conserved by every
+//!   non-genesis block; the state transition enforces it.
 
 use aegis_engine::address::{Address, WalletKeys, HRP_TEST};
 
 /// The hn testnet chain id / network magic. Distinct from the Curve-Trees
 /// profiles so the two networks can never confuse blocks or peers.
-pub const HN_TESTNET_CHAIN_ID: u32 = 0x484E_0001; // "HN" ‖ v1
+/// v2: the spec-economics port (flat fee → pot, pot-funded coinbase) —
+/// chain-id-breaking vs the v1 placeholder-economy testnet.
+pub const HN_TESTNET_CHAIN_ID: u32 = 0x484E_0002; // "HN" ‖ v2
+
+/// Base-unit scale: 1 USE = 100 base units ("cents"). All amounts in the
+/// engine, wallet, and chain are integer cents.
+pub const BASE_UNITS_PER_USE: u64 = 100;
+
+/// The flat shielded-tx fee: 0.03 USE, EXACT (not a floor). Amount-independent
+/// by design — a variable fee would fingerprint transactions.
+pub const FLAT_FEE: u64 = 3;
+
+/// Coinbase base draw per block: 0.01 USE (paid even for an empty block, while
+/// the pot lasts).
+pub const COINBASE_BASE: u64 = 1;
+
+/// Coinbase inclusion bonus per tx: 0.01 USE to the miner per included tx.
+pub const COINBASE_PER_TX: u64 = 1;
+
+/// The testnet's genesis pot allocation: 10,000 USE of security budget. An
+/// empty chain draws ~[`COINBASE_BASE`]/block, so at the testnet's ~2 s cadence
+/// this funds mining for weeks; fees top it back up (+0.02 USE net per tx).
+pub const TESTNET_GENESIS_POT: u64 = 1_000_000;
 
 /// Consensus parameters for an hn chain profile.
 #[derive(Clone, Debug)]
@@ -18,13 +54,19 @@ pub struct HnChainParams {
     pub chain_id: u32,
     /// Recent-root acceptance window (a spend anchors to one of the last N roots).
     pub root_window: usize,
-    /// Blocks a coinbase note must age before it is spendable.
+    /// Blocks a coinbase note must age before it is spendable (spec: 120).
     pub coinbase_maturity: u64,
-    /// Minimum fee (base units) a shielded tx must pay to be admitted.
-    pub min_fee: u64,
-    /// Flat per-block emission (base units). Fees are added on top, to the miner.
-    pub emission_per_block: u64,
-    /// Genesis allocation: `(recipient, amount)` faucet notes minted at height 0.
+    /// The flat fee (base units) EVERY shielded tx must pay exactly.
+    pub flat_fee: u64,
+    /// Coinbase base draw (base units) per block.
+    pub coinbase_base: u64,
+    /// Coinbase inclusion bonus (base units) per included tx.
+    pub coinbase_per_tx: u64,
+    /// The pot balance the chain starts with (the pinned genesis allocation to
+    /// the security budget).
+    pub genesis_pot: u64,
+    /// Genesis allocation: `(recipient, amount)` faucet notes minted at height 0
+    /// — the pinned non-reward blocks; a validator rejects any deviation.
     pub genesis: Vec<(Address, u64)>,
 }
 
@@ -47,22 +89,41 @@ pub fn faucet_address_string() -> String {
 impl HnChainParams {
     /// The hn testnet parameters (pinned).
     ///
-    /// Genesis mints a single large faucet note the campaign draws from. The
-    /// emission is a flat 50/block (a real chain halves — documented follow-up);
-    /// maturity/window/min-fee match the engine + wallet defaults so a wallet
-    /// built against the crate agrees with the chain.
+    /// `root_window`/`coinbase_maturity` reference the wallet crate's constants
+    /// (the client-side mirror) so wallet and chain can never drift; the
+    /// economic values are the module constants above.
     pub fn testnet() -> Self {
         Self {
             chain_id: HN_TESTNET_CHAIN_ID,
             root_window: aegis_hn_wallet::chain::ROOT_WINDOW,
             coinbase_maturity: aegis_hn_wallet::chain::COINBASE_MATURITY,
-            min_fee: crate::hn::state::MIN_FEE,
-            emission_per_block: crate::hn::chain::EMISSION_PER_BLOCK,
+            flat_fee: FLAT_FEE,
+            coinbase_base: COINBASE_BASE,
+            coinbase_per_tx: COINBASE_PER_TX,
+            genesis_pot: TESTNET_GENESIS_POT,
             genesis: vec![
                 (faucet_address(), 500_000_000),
                 (faucet_address(), 500_000_000),
             ],
         }
+    }
+
+    /// This profile with a custom genesis allocation + pot (tests / local
+    /// profiles; the economics stay pinned).
+    pub fn with_genesis(mut self, genesis: Vec<(Address, u64)>, genesis_pot: u64) -> Self {
+        self.genesis = genesis;
+        self.genesis_pot = genesis_pot;
+        self
+    }
+
+    /// The consensus coinbase amount for a block with `n_txs` included txs on a
+    /// parent state whose pot is `pot_parent`:
+    /// `min(pot_parent, base + per_tx × n_txs)`. Computed on the PARENT pot —
+    /// this block's fees credit the pot but cannot fund its own coinbase.
+    pub fn coinbase_amount(&self, pot_parent: u64, n_txs: usize) -> u64 {
+        self.coinbase_base
+            .saturating_add(self.coinbase_per_tx.saturating_mul(n_txs as u64))
+            .min(pot_parent)
     }
 }
 

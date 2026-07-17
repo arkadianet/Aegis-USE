@@ -153,9 +153,32 @@ fn handle_get(s: &mut TcpStream, state: &HnApiState, target: &str) -> std::io::R
                 s,
                 200,
                 format!(
-                    "{{\"height\":{},\"count\":{},\"root\":\"{root}\"}}",
+                    "{{\"height\":{},\"count\":{},\"pot\":{},\"root\":\"{root}\"}}",
                     chain.height(),
-                    chain.output_count()
+                    chain.output_count(),
+                    chain.pot()
+                )
+                .as_bytes(),
+            )
+        }
+        // The pinned chain-economic parameters (a remote wallet reads the flat
+        // fee + maturity here instead of hardcoding them).
+        "/hn/v1/params" => {
+            let p = chain.params();
+            respond(
+                s,
+                200,
+                format!(
+                    "{{\"chain_id\":{},\"flat_fee\":{},\"coinbase_base\":{},\
+                     \"coinbase_per_tx\":{},\"coinbase_maturity\":{},\
+                     \"root_window\":{},\"genesis_pot\":{}}}",
+                    p.chain_id,
+                    p.flat_fee,
+                    p.coinbase_base,
+                    p.coinbase_per_tx,
+                    p.coinbase_maturity,
+                    p.root_window,
+                    p.genesis_pot
                 )
                 .as_bytes(),
             )

@@ -30,8 +30,9 @@ pub const ROOT_WINDOW: usize = 100;
 /// Blocks a coinbase note must age before it is spendable (a wallet-side policy
 /// — a well-behaved wallet won't select an immature coinbase note; a fully
 /// consensus-enforced maturity over HIDDEN inputs is a documented hard problem,
-/// deferred). Small for tests; a real chain uses a larger depth.
-pub const COINBASE_MATURITY: u64 = 5;
+/// deferred). The aegis-spec value (120); the node's chain params reference this
+/// constant so wallet and chain can never drift.
+pub const COINBASE_MATURITY: u64 = 120;
 
 /// An on-chain shielded transaction: the hiding spend proof, its public values
 /// (canonical `u32` limbs), and the two fixed-size output ciphertexts (§6

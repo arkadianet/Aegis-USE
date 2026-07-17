@@ -13,21 +13,17 @@ use std::path::{Path, PathBuf};
 
 use aegis_engine::address::Address;
 use aegis_engine::merkle::MerklePath;
-use aegis_engine::poseidon::hash_id_domain;
 use aegis_engine::poseidon::{Digest, DIGEST_ELEMS};
 use aegis_hn_wallet::chain::OutputRecord;
 use aegis_hn_wallet::{ChainView, SpendCircuit, Tx};
 
 use super::mint::{coinbase_note, MintOut};
-use super::state::{digest_to_limbs, limbs_to_digest, AuxAnchor, HnBlock, HnError, HnState};
+use super::params::HnChainParams;
+use super::state::{
+    block_id, digest_to_limbs, limbs_to_digest, AuxAnchor, HnBlock, HnError, HnState,
+};
 
 const BLOCK_LOG: &str = "hn_blocks.log";
-const DOMAIN_BLOCK_ID: u32 = 0x0B10;
-
-/// Fixed per-block emission (base units) for the new testnet profile — a flat
-/// schedule (documented; a real chain halves). Fees are added on top and go to
-/// the miner (no burning).
-pub const EMISSION_PER_BLOCK: u64 = 50;
 
 /// The node's hash-native chain: state + circuit keys + mempool + the block
 /// log (kept in memory for P2P serving), persisted to `dir`.
@@ -39,38 +35,40 @@ pub struct HnChain {
     mempool_nfs: HashSet<[u32; DIGEST_ELEMS]>,
     /// Every applied block (index == height) — served to syncing peers.
     blocks: Vec<HnBlock>,
-    params: super::params::HnChainParams,
 }
 
 impl HnChain {
-    /// A fresh chain persisted under `dir` (creates the dir). `circuit` MUST be
-    /// the reproducible published keys (`SpendCircuit::new` — fixed public
-    /// preprocessed salt) so the vk is stable across restarts. No genesis
-    /// allocation (tests that fund manually); use [`Self::create_with_params`]
-    /// for a real chain profile.
-    pub fn create(dir: impl AsRef<Path>, circuit: SpendCircuit) -> std::io::Result<Self> {
+    /// A fresh, EMPTY chain persisted under `dir` (creates the dir) for the
+    /// given chain profile — no genesis blocks applied (a follower that IBDs
+    /// them from a peer, or a test that applies its own). `circuit` MUST be the
+    /// reproducible published keys (`SpendCircuit::new` — fixed public
+    /// preprocessed salt) so the vk is stable across restarts.
+    pub fn create(
+        dir: impl AsRef<Path>,
+        circuit: SpendCircuit,
+        params: HnChainParams,
+    ) -> std::io::Result<Self> {
         std::fs::create_dir_all(dir.as_ref())?;
         Ok(Self {
-            state: HnState::new(),
+            state: HnState::new(params),
             circuit,
             dir: dir.as_ref().to_path_buf(),
             mempool: Vec::new(),
             mempool_nfs: HashSet::new(),
             blocks: Vec::new(),
-            params: super::params::HnChainParams::testnet(),
         })
     }
 
-    /// A fresh chain for a chain profile: applies the genesis allocation
-    /// (`params.genesis`) as immediately-spendable faucet notes at height 0.
-    pub fn create_with_params(
+    /// A fresh chain with the profile's genesis applied: the pinned allocation
+    /// (`params.genesis`) minted as immediately-spendable notes at the genesis
+    /// heights (the bootstrap node's path).
+    pub fn create_genesis(
         dir: impl AsRef<Path>,
         circuit: SpendCircuit,
-        params: super::params::HnChainParams,
+        params: HnChainParams,
     ) -> std::io::Result<Self> {
-        let mut chain = Self::create(dir, circuit)?;
         let genesis = params.genesis.clone();
-        chain.params = params;
+        let mut chain = Self::create(dir, circuit, params)?;
         for (addr, amount) in &genesis {
             chain
                 .fund(addr, *amount)
@@ -82,8 +80,12 @@ impl HnChain {
     /// Open an existing chain: replay the persisted block log to rebuild state
     /// (the restart path). A partial trailing record (crash mid-append) is
     /// ignored.
-    pub fn open(dir: impl AsRef<Path>, circuit: SpendCircuit) -> std::io::Result<Self> {
-        let mut chain = Self::create(dir, circuit)?;
+    pub fn open(
+        dir: impl AsRef<Path>,
+        circuit: SpendCircuit,
+        params: HnChainParams,
+    ) -> std::io::Result<Self> {
+        let mut chain = Self::create(dir, circuit, params)?;
         for payload in read_log(&chain.dir.join(BLOCK_LOG))? {
             let Ok(block) = postcard::from_bytes::<HnBlock>(&payload) else {
                 break; // corrupt tail
@@ -98,8 +100,18 @@ impl HnChain {
     }
 
     /// The chain's parameters.
-    pub fn params(&self) -> &super::params::HnChainParams {
-        &self.params
+    pub fn params(&self) -> &HnChainParams {
+        self.state.params()
+    }
+
+    /// The emission pot's current balance (public security budget).
+    pub fn pot(&self) -> u64 {
+        self.state.pot()
+    }
+
+    /// The shielded pool's total value (public aggregate).
+    pub fn shielded_total(&self) -> u64 {
+        self.state.shielded_total()
     }
 
     /// Sync from a peer over HTTP: pull every block the peer has beyond our tip
@@ -215,18 +227,7 @@ impl HnChain {
     /// Deterministic block id for coinbase uniqueness (height ‖ prev tip root).
     fn block_id(&self) -> [u8; 32] {
         let prev = limbs_to_digest(&self.state.tip_root_limbs());
-        hash_id_domain(DOMAIN_BLOCK_ID, self.state.height(), &prev)
-    }
-
-    /// The block reward the miner claims: the fixed emission plus every mempool
-    /// tx's fee (fees stop burning — the miner earns them via the coinbase note).
-    fn block_reward(&self) -> u64 {
-        let fees: u64 = self
-            .mempool
-            .iter()
-            .map(|tx| HnState::tx_fee(tx).unwrap_or(0))
-            .sum();
-        EMISSION_PER_BLOCK.saturating_add(fees)
+        block_id(self.state.height(), &prev)
     }
 
     /// Produce a block with an AUTO monotone anchor (`devnet_height = height`).
@@ -242,14 +243,18 @@ impl HnChain {
     }
 
     /// Produce and persist one block from the current mempool, minting the
-    /// coinbase (emission + fees) to `miner`, merge-mined against `anchor`
-    /// (a real devnet header for the deployment). Clears the mempool.
+    /// pot-funded coinbase (`min(pot_parent, base + per_tx × txs)`; fees credit
+    /// the pot, never the miner directly) to `miner`, merge-mined against
+    /// `anchor` (a real devnet header for the deployment). Clears the mempool.
     pub fn produce_block_anchored(
         &mut self,
         miner: &Address,
         anchor: AuxAnchor,
     ) -> Result<(), HnError> {
-        let coinbase_amount = self.block_reward();
+        let params = self.state.params();
+        let coinbase_amount = params.coinbase_amount(self.state.pot(), self.mempool.len());
+        let fees = params.flat_fee * self.mempool.len() as u64;
+        let pot_after = self.state.pot() + fees - coinbase_amount;
         let block_id = self.block_id();
         let MintOut {
             cm: coinbase_cm,
@@ -270,9 +275,12 @@ impl HnChain {
             prev_root: self.state.tip_root_limbs(),
             state_root,
             txs: std::mem::take(&mut self.mempool),
+            miner_owner: digest_to_limbs(&miner.owner),
+            coinbase_amount,
             coinbase_cm: digest_to_limbs(&coinbase_cm),
             coinbase_ct,
             coinbase_is_reward: true,
+            pot_after,
             anchor,
         };
         self.state.apply_block(&block, &self.circuit)?;
@@ -282,10 +290,11 @@ impl HnChain {
         Ok(())
     }
 
-    /// Genesis/faucet allocation: a block minting `amount` to `dest` as an
-    /// immediately-spendable (non-maturity) note. For chain bootstrap / testnet
-    /// funding — a real genesis pins these in the chain-id.
-    pub fn fund(&mut self, dest: &Address, amount: u64) -> Result<(), HnError> {
+    /// One pinned genesis-allocation block: mint `amount` to `dest` as an
+    /// immediately-spendable note (pot untouched). Only callable through
+    /// [`Self::create_genesis`] — `apply_block` rejects any allocation that
+    /// deviates from `params.genesis`, so arbitrary funding cannot exist.
+    fn fund(&mut self, dest: &Address, amount: u64) -> Result<(), HnError> {
         let block_id = self.block_id();
         let MintOut {
             cm: coinbase_cm,
@@ -297,9 +306,12 @@ impl HnChain {
             prev_root: self.state.tip_root_limbs(),
             state_root,
             txs: vec![],
+            miner_owner: digest_to_limbs(&dest.owner),
+            coinbase_amount: amount,
             coinbase_cm: digest_to_limbs(&coinbase_cm),
             coinbase_ct,
             coinbase_is_reward: false,
+            pot_after: self.state.pot(),
             anchor: AuxAnchor::genesis(),
         };
         self.state.apply_block(&block, &self.circuit)?;

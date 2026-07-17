@@ -60,6 +60,16 @@ pub fn coinbase_note(dest: &Address, amount: u64, block_id: &[u8; 32]) -> MintOu
     mint_out(dest, amount, block_id, PURPOSE_COINBASE)
 }
 
+/// The commitment a coinbase note MUST have for `(owner, amount, block_id)` —
+/// what a validator recomputes from the block's PUBLIC `miner_owner` +
+/// `coinbase_amount` to enforce that the shielded coinbase note carries exactly
+/// the consensus-determined value to the claimed miner (no over/under-claim,
+/// no redirect).
+pub fn coinbase_cm_expected(owner: &Digest, amount: u64, block_id: &[u8; 32]) -> Digest {
+    let (rho, r) = mint_nonces(block_id, PURPOSE_COINBASE);
+    note_commitment(amount, owner, &rho, &r)
+}
+
 /// The (INERT) peg-in note for `amount` to `dest`, unique per `box_id`. The
 /// derivation exists so the peg-in mint path is defined; enabling it is gated at
 /// the node exactly as on `main` (a used-`box_id` set + anchor deferral).
@@ -101,6 +111,22 @@ mod tests {
             coinbase_note(&addr(b"other"), 100, &[7u8; 32]).cm,
             m1.cm,
             "dest-bound — a miner cannot redirect"
+        );
+    }
+
+    #[test]
+    fn coinbase_cm_expected_matches_minted_note() {
+        let a = addr(b"miner");
+        let m = coinbase_note(&a, 42, &[3u8; 32]);
+        assert_eq!(
+            coinbase_cm_expected(&a.owner, 42, &[3u8; 32]),
+            m.cm,
+            "a validator recomputes the exact minted commitment"
+        );
+        assert_ne!(
+            coinbase_cm_expected(&a.owner, 43, &[3u8; 32]),
+            m.cm,
+            "a different claimed amount cannot match the commitment"
         );
     }
 
