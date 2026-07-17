@@ -1,24 +1,22 @@
 //! The spend circuit — Plonky3 uni-STARKs over BabyBear.
 //!
-//! Built bottom-up from the [`perm`] Poseidon2 gadget. Every constraint class of
-//! the 2-in/2-out spend is present here as a verifying, separately-tested AIR:
+//! Built bottom-up from the [`perm`] Poseidon2 gadget. The [`monolith`] is the
+//! deliverable: ONE proof for a 2-in/2-out spend binding depth-32 membership +
+//! opening + ownership + nullifier + balance behind one root, with a private
+//! shared witness. The other AIRs are the validated building blocks it composes,
+//! each verifying and separately tested:
 //! - [`PermBindingAir`] — the base permutation binding (`out == Poseidon2(in)`).
 //! - [`merkle_air`] — depth-32 Merkle membership (private leaf, public root).
 //! - [`nullifier_air`] — `nf = H_NF(nk‖rho)` via the add-absorb sponge chain
 //!   (the same chain the note-commitment opening uses, with more blocks).
 //! - [`balance_air`] — value conservation `Σin == Σout + fee` + output range.
 //!
-//! The remaining step is the single monolithic proof that BINDS these together
-//! for two inputs and two outputs behind one accumulator root — sharing the
-//! secret witness (`nk`, `rho`, `value`, `r`, `cm`) across the sub-circuits via a
-//! persistent-column bus so the value in [`balance_air`] is the value opened in
-//! the commitment, the `cm` proven in [`merkle_air`] is the commitment opened,
-//! and the `nk`/`rho` in [`nullifier_air`] are the note's. That assembly and its
-//! binding-soundness argument are specified in
-//! `dev-docs/sidechain/hash-native-spend-circuit.md`.
+//! The monolith's per-value binding-soundness argument and adversarial tests are
+//! in [`monolith`] and `dev-docs/sidechain/hash-native-spend-circuit.md`.
 
 pub mod balance_air;
 pub mod merkle_air;
+pub mod monolith;
 pub mod nullifier_air;
 pub mod perm;
 

@@ -120,13 +120,20 @@ pub fn eval_permutation<AB: AirBuilder<F = BabyBear>>(
     state
 }
 
-/// The output digest of the permutation whose columns start at `perm_slice`
-/// (the first 8 output lanes) — a native helper for the verifier/tests that
-/// mirrors what [`eval_permutation`] returns in-circuit.
+/// The 8-lane output digest of `Poseidon2(input)` — a native helper mirroring
+/// what [`eval_permutation`] exposes as its first 8 output lanes.
 pub fn permutation_output(input: &[F; WIDTH]) -> Digest {
     let mut s = *input;
     permute(&mut s);
     s[..DIGEST_ELEMS].try_into().expect("8 of 16")
+}
+
+/// The full 16-lane output of `Poseidon2(input)` — used to chain sponge
+/// absorptions (the next block adds onto these lanes).
+pub fn permutation_output16(input: &[F; WIDTH]) -> [F; WIDTH] {
+    let mut s = *input;
+    permute(&mut s);
+    s
 }
 
 /// Fill one permutation's `PERM_COLS` trace columns (`dst`) from the raw input

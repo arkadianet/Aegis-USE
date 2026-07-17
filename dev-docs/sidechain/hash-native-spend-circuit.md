@@ -61,31 +61,44 @@ forgery), the Merkle `bit∈{0,1}` (else path forgery via a non-boolean blend), 
 sponge absorb-chaining (the defining sponge step), the overflow-free balance, and
 the output range (else a field-wrap "negative" output inflates).
 
-## The monolith assembly (the remaining step)
+## The monolith — BUILT (`engine/src/spend/monolith.rs`, verifying)
 
-All mechanics above are validated; the full spend is their composition into ONE
-proof so that a **private** witness is shared and consistent across the
-sub-circuits (privacy needs `cm` internal, which forces one proof, not several
-public-value-linked proofs). Design:
+A single uni-STARK proves a 2-in/2-out spend binding all sub-statements behind
+one public root, with a **private** shared witness (no public `cm`, no leaf
+index — so which notes were spent is hidden). **Measured** (depth 32, this
+machine): prove **~251 ms**, verify **~41 ms**, proof **~1.33 MB**; 128 rows ×
+2471 cols; 41 public values (`root ‖ nf0 ‖ nf1 ‖ cm_out0 ‖ cm_out1 ‖ fee`). This
+matches the spike's ~1.3 MB / sub-second prediction.
 
-- **Persistent-secret bus.** Per input, carry `nk(8), rho(8), r(8), value(1),
-  owner(8), cm(8)` in persistent columns, copied across the input's row block by
-  a `when_transition` equality (sound: they are constants). Every absorb row
-  references the bus instead of re-witnessing, so the same secret can appear in
-  two hashes without a non-local link.
-- **Fixed schedule** via a preprocessed one-hot role column (trusted, not
-  prover-controlled), so the structure — which rows are owner/cm/nf/merkle/out —
-  cannot be manipulated.
-- **Bindings that make it sound:**
-  - owner-row output `== bus.owner`; cm absorbs `bus.value/owner/rho/r`; cm last
-    output `== bus.cm`; membership row 0 child `== bus.cm`, last output `==`
-    public root ⇒ *the committed note is in the tree*.
-  - nf absorbs `bus.nk, bus.rho`; nf last output `==` public nullifier ⇒ *the
-    revealed nullifier is this note's* (double-spend caught by the nullifier set).
-  - owner `= H(nk)` with `owner` inside `cm` ⇒ *ownership*: only a holder of `nk`
-    can open the note (theft-resistance).
-  - balance over the two inputs' `bus.value` and the two outputs' values + fee;
-    output range on the output values; output `cm`s well-formed and appended.
+**Layout — the "wide row".** Rather than a general microcode bus, each row
+carries 8 always-valid Poseidon2 blocks, so a whole note's hashes (owner 1 + cm 4
++ nf 2) sit in one row and **every intra-note binding is a same-row column
+equality**. Only the `cm → Merkle-leaf` hand-off and the Merkle chain cross rows
+(adjacent next-row links); the five transfer amounts ride a 5-column constant
+"value bus". A 7-flag **preprocessed** schedule (committed, transcript-bound —
+trusted, not prover-controlled) marks each row's role:
+`hash(in0) · merkle(in0)×32 · hash(in1) · merkle(in1)×32 · output · pad…`.
+
+**Per-value binding (what forces each shared value to be one element):**
+- `nk`: the owner hash (B0) and nullifier hash (B5) absorb the SAME columns
+  (`B5.in == B0.in`) ⇒ the key proving ownership is the key deriving the nf.
+- `owner`: cm absorbs `B0.out` (`B2.in − B1.out == B0.out`) ⇒ committed owner is
+  exactly `H(nk)` — theft-resistance.
+- `rho`: cm's and nf's rho are constrained equal (`B3.in − B2.out == B6.in −
+  B5.out`) ⇒ the nf is built from the note's own rho.
+- `cm`: opening output `B4.out` is handed to the first Merkle `child`
+  (`cm_to_leaf`) ⇒ the note in the tree is the note opened; `cm` never public.
+- `value`: cm's value block binds to the bus, which feeds conservation.
+- `root`: each chain's last output binds to the one public root.
+- `nf0 ≠ nf1`: a one-hot limb selector + inverse witness forbids the two inputs
+  being the same note *inside* one proof (double-spend); the cross-tx case is the
+  consensus nullifier set's.
+
+**Adversarial tests (each REJECTED by the real verifier, release-mode):**
+ownership key mismatch, committed-owner ≠ `H(nk)`, nullifier from a foreign rho,
+membership of a different leaf (witness substitution), value inflation, wrong
+root at verify; same-note double-spend is unbuildable; and a structural check
+that no input `cm` / leaf index appears in the public values.
 
 ### The re-derivation soundness argument (nullifier — REVIEW ITEM)
 The N1 property "one note ⇒ one nullifier" holds because in the monolith `nf`'s
@@ -108,12 +121,21 @@ concatenation (the bounded Poseidon2 parameter/round-count review item).
 5. **`EMPTY_LEAF`** nothing-up-my-sleeve value.
 6. **Zero-knowledge.** uni-STARK proofs are not ZK by default; keeping secrets
    out of the public inputs is necessary but the hiding wrapper (`is_zk`, or a
-   recursive ZK layer) is a separate, later axis.
+   recursive ZK layer) is a separate, later axis. Until then a proof is *sound*
+   but not *hiding*: a witness-carrying proof could leak note data even though
+   the public values do not — the ZK wrapper is required before real value.
+7. **Monolith soundness items:** (a) the `nf0 ≠ nf1` one-hot/inverse in-circuit
+   guard is best-effort — the authoritative double-spend defense is the consensus
+   nullifier set (cross-tx); (b) the fixed transaction shape is exactly 2-in/2-out
+   (dummy zero-value notes pad smaller transfers — the standard shielded-pool
+   approach, but the padding/uniformity story wants review); (c) fee is a public
+   input and is not itself range-checked here (assumed set by an honest wallet /
+   bounded at consensus).
 
 ## Next (in order)
-1. The monolith assembly above (persistent bus + fixed schedule + 2-in/2-out).
-2. Note encryption (hash/KEM-based DH replacement) — deferred this pass.
-3. Address/wallet over `owner = H(nk)`.
-4. Settlement: the RISC0 guest re-verifying these BabyBear client proofs in-field
+1. Note encryption (hash/KEM-based DH replacement) — deferred this pass.
+2. Address/wallet over `owner = H(nk)`.
+3. Settlement: the RISC0 guest re-verifying these BabyBear client proofs in-field
    (the whole reason for the hash-native rebuild), + the peg contract wiring.
+4. A ZK wrapper (hiding), and generalizing the fixed 2-in/2-out shape.
 5. A fresh testnet on the new engine (chain-id-breaking is free).
