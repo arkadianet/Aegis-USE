@@ -39,7 +39,7 @@
 //! For each new output `(cm, ciphertext)` the wallet calls [`try_decrypt`]:
 //! wrong-recipient or tampered ciphertexts fail the AEAD cheaply (`None`); on
 //! success the opening is parsed **strictly** (canonical limbs, value <
-//! 2^AMOUNT_BITS) and `cm` is recomputed from the opening + the wallet's OWN
+//! canonical limbs; any u64 value) and `cm` is recomputed from the opening + the wallet's OWN
 //! `owner` and REQUIRED to equal the on-chain `cm` — an opening that does not
 //! reconstruct the on-chain note is rejected (no accepting unspendable
 //! garbage, and defense-in-depth beyond the aad binding).
@@ -64,9 +64,8 @@ use sha2::Sha256;
 use x25519_dalek::{PublicKey, StaticSecret};
 
 use crate::address::Address;
-use crate::commit::{note_commitment, Blinding, Rho, AMOUNT_BOUND};
-use crate::poseidon::{digest_from_bytes, digest_to_bytes, Digest, F};
-use p3_field::PrimeCharacteristicRing;
+use crate::commit::{note_commitment, Blinding, Rho};
+use crate::poseidon::{digest_from_bytes, digest_to_bytes, Digest};
 
 /// Ephemeral X25519 public key size.
 pub const EPK_BYTES: usize = 32;
@@ -128,9 +127,6 @@ fn parse_plaintext(bytes: &[u8]) -> Option<NotePlaintext> {
         return None;
     }
     let value = u64::from_le_bytes(bytes[..8].try_into().expect("8 bytes"));
-    if value >= AMOUNT_BOUND {
-        return None;
-    }
     let rho = digest_from_bytes(&bytes[8..40].try_into().expect("32 bytes"))?;
     let r = digest_from_bytes(&bytes[40..72].try_into().expect("32 bytes"))?;
     let memo: [u8; MEMO_BYTES] = bytes[72..].try_into().expect("32 bytes");
@@ -217,7 +213,7 @@ pub fn try_decrypt(
 
     // The decisive spendability check: the opening must reconstruct the
     // on-chain note under OUR owner digest.
-    let recomputed = note_commitment(F::from_u64(pt.value), owner, &pt.rho, &pt.r);
+    let recomputed = note_commitment(pt.value, owner, &pt.rho, &pt.r);
     (recomputed == *cm).then_some(pt)
 }
 
@@ -227,6 +223,8 @@ mod tests {
     use crate::address::WalletKeys;
     use crate::commit::owner_key;
     use crate::nullifier::nullifier;
+    use crate::poseidon::F;
+    use p3_field::PrimeCharacteristicRing;
 
     // ----- helpers -----
 
@@ -251,7 +249,7 @@ mod tests {
     /// note and its ciphertext. Returns the on-chain pair `(cm, wire)`.
     fn stranger_pays(addr: &Address, value: u64, base: u32, tag: u8) -> (Digest, Vec<u8>) {
         let pt = plaintext(value, base);
-        let cm = note_commitment(F::from_u64(pt.value), &addr.owner, &pt.rho, &pt.r);
+        let cm = note_commitment(pt.value, &addr.owner, &pt.rho, &pt.r);
         let wire = encrypt_note_with(addr, &cm, &pt, esk(tag)).expect("valid address");
         (cm, wire)
     }
@@ -276,10 +274,7 @@ mod tests {
         // cm reconstructs (checked inside try_decrypt) and the nullifier is
         // derivable — exactly the monolith's InputNote fields.
         let _nf = nullifier(&recipient.nk, &pt.rho);
-        assert_eq!(
-            note_commitment(F::from_u64(pt.value), &owner, &pt.rho, &pt.r),
-            cm
-        );
+        assert_eq!(note_commitment(pt.value, &owner, &pt.rho, &pt.r), cm);
     }
 
     #[test]
@@ -315,12 +310,7 @@ mod tests {
 
         // And the self-send is FOUND by the sender's own scanner (change flow).
         let owner = owner_key(&sender.nk);
-        let cm = note_commitment(
-            F::from_u64(10),
-            &sender.address().owner,
-            &digest(200),
-            &digest(240),
-        );
+        let cm = note_commitment(10, &sender.address().owner, &digest(200), &digest(240));
         assert!(try_decrypt(&sender.enc_sk, &owner, &cm, &change).is_some());
     }
 
@@ -357,7 +347,7 @@ mod tests {
         let recipient = WalletKeys::from_seed(b"recipient-seed");
         let addr = recipient.address();
         let pt_a = plaintext(1_000, 500);
-        let cm_b = note_commitment(F::from_u64(42), &addr.owner, &digest(800), &digest(840));
+        let cm_b = note_commitment(42, &addr.owner, &digest(800), &digest(840));
         let wire = encrypt_note_with(&addr, &cm_b, &pt_a, esk(7)).unwrap();
         let owner = owner_key(&recipient.nk);
         assert_eq!(

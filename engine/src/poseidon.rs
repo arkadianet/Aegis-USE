@@ -71,8 +71,10 @@ pub type AegisRoundConstants = RoundConstants<F, WIDTH, HALF_FULL_ROUNDS, PARTIA
 pub const DOMAIN_OWNER: u32 = 0x0A01;
 /// Nullifier derivation `nf = H(nk, rho)`.
 pub const DOMAIN_NULLIFIER: u32 = 0x0A02;
-/// Note-commitment derivation `cm = H(value, owner, rho, r)`.
-pub const DOMAIN_COMMITMENT: u32 = 0x0A03;
+/// Note-commitment derivation `cm = H(value_limbs, owner, rho, r)`.
+/// Bumped 0x0A03 → 0x0A13 when the value block became 4×16-bit limbs
+/// (64-bit amounts) — old-layout commitments must not collide with new ones.
+pub const DOMAIN_COMMITMENT: u32 = 0x0A13;
 
 /// The canonical BabyBear-t16 permutation (cached).
 fn perm16() -> &'static Poseidon2BabyBear<16> {

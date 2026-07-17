@@ -56,8 +56,9 @@ use p3_baby_bear::BabyBear;
 use p3_field::{Field, PrimeCharacteristicRing};
 use p3_matrix::dense::RowMajorMatrix;
 
+use super::balance_air::compute_carries;
 use super::perm::{eval_permutation, fill_permutation, PermCols, PERM_COLS};
-use crate::commit::{note_commitment, owner_key, AMOUNT_BITS};
+use crate::commit::{note_commitment, owner_key, value_limbs, LIMB_BITS, LIMB_BOUND, N_LIMBS};
 use crate::merkle::{MerklePath, NoteTree, DEPTH};
 use crate::nullifier::nullifier;
 use crate::poseidon::{
@@ -72,9 +73,25 @@ const EXTRA: usize = NB * PERM_COLS;
 const CHILD: usize = EXTRA; // 8 — Merkle running node entering this row
 const SIB: usize = CHILD + DIGEST_ELEMS; // 8 — Merkle sibling
 const BIT: usize = SIB + DIGEST_ELEMS; // 1 — Merkle index bit
-const BUS: usize = BIT + 1; // 5 — [v_in0, v_in1, v_out0, v_out1, fee] (constant)
-const RBITS: usize = BUS + 5; // 2*AMOUNT_BITS — range bits of v_out0, v_out1
-const ENEQ: usize = RBITS + 2 * AMOUNT_BITS; // 8 — one-hot limb selector for nf0≠nf1
+/// The value bus: 5 amounts × 4 limbs (constant across the trace), in order
+/// `in0[0..4] ‖ in1 ‖ out0 ‖ out1 ‖ fee` (canonical LE 16-bit limbs).
+const BUS: usize = BIT + 1;
+const N_VALUES: usize = 5;
+const BUS_W: usize = N_VALUES * N_LIMBS; // 20
+const BUS_IN0: usize = 0;
+const BUS_IN1: usize = N_LIMBS;
+const BUS_OUT0: usize = 2 * N_LIMBS;
+const BUS_OUT1: usize = 3 * N_LIMBS;
+const BUS_FEE: usize = 4 * N_LIMBS;
+/// Range bits: EVERY bus limb gets a 16-bit decomposition (5 × 64 bits).
+/// Outputs/fee are created here (range mandatory); ranging the inputs too is
+/// defense-in-depth on top of the cm-binding induction (see balance_air).
+const RBITS: usize = BUS + BUS_W;
+const N_RANGE_BITS: usize = N_VALUES * N_LIMBS * LIMB_BITS; // 320
+/// Balance carries c_1..c_3 ∈ {-2..1}, 2 bits each (c_0 = c_4 = 0 built-in).
+const CARRYB: usize = RBITS + N_RANGE_BITS;
+const N_CARRIES: usize = N_LIMBS - 1;
+const ENEQ: usize = CARRYB + 2 * N_CARRIES; // 8 — one-hot limb selector for nf0≠nf1
 const INV: usize = ENEQ + DIGEST_ELEMS; // 1 — inverse witness for nf0≠nf1
 /// Monolith row width.
 pub const ROW_W: usize = INV + 1;
@@ -101,10 +118,10 @@ pub const PUB_NF1: usize = 16;
 pub const PUB_CMO0: usize = 24;
 /// Offset of output 1's commitment.
 pub const PUB_CMO1: usize = 32;
-/// Offset of the fee.
+/// Offset of the fee (4 canonical 16-bit limbs — full u64).
 pub const PUB_FEE: usize = 40;
-/// Number of public values: root ‖ nf0 ‖ nf1 ‖ cm_out0 ‖ cm_out1 ‖ fee.
-pub const N_PUB: usize = 41;
+/// Number of public values: root ‖ nf0 ‖ nf1 ‖ cm_out0 ‖ cm_out1 ‖ fee_limbs(4).
+pub const N_PUB: usize = 44;
 
 // --- fixed row schedule ---
 const HASH0_ROW: usize = 0;
@@ -201,8 +218,9 @@ impl<AB: AirBuilder<F = BabyBear>> Air<AB> for SpendAir {
             let mut b = builder.when(h.clone());
             // B0 owner init(OWNER, len 8); lanes 0..8 = nk (free).
             assert_init(&mut b, |j| binp(0, j), DOM_OWNER, DIGEST_ELEMS as u32);
-            // B1 cm block0 = value_block: lane0 = value (free), lanes 1..8 = 0.
-            for j in 1..DIGEST_ELEMS {
+            // B1 cm block0 = value_block: lanes 0..4 = value limbs (bound to the
+            // bus below), lanes 4..8 = 0.
+            for j in N_LIMBS..DIGEST_ELEMS {
                 b.assert_zero(binp(1, j));
             }
             assert_init(&mut b, |j| binp(1, j), DOM_CM, (4 * DIGEST_ELEMS) as u32);
@@ -247,18 +265,22 @@ impl<AB: AirBuilder<F = BabyBear>> Air<AB> for SpendAir {
                 .when(h1.into())
                 .assert_eq(o6.clone(), pv[PUB_NF1 + j].into());
         }
-        builder
-            .when(h0.into())
-            .assert_eq(cur[BUS].into(), binp(1, 0).into());
-        builder
-            .when(h1.into())
-            .assert_eq(cur[BUS + 1].into(), binp(1, 0).into());
+        // value-bus binding: the value limbs absorbed into each input's cm are
+        // exactly the bus limbs (h0 row = in0, h1 row = in1).
+        for j in 0..N_LIMBS {
+            builder
+                .when(h0.into())
+                .assert_eq(cur[BUS + BUS_IN0 + j].into(), binp(1, j).into());
+            builder
+                .when(h1.into())
+                .assert_eq(cur[BUS + BUS_IN1 + j].into(), binp(1, j).into());
+        }
 
         // ===== output row: two cm chains, well-formed, publicly revealed =====
         {
             let mut b = builder.when(is_out.into());
             // out0 cm: B0(value_block) B1(owner) B2(rho) B3(r).
-            for j in 1..DIGEST_ELEMS {
+            for j in N_LIMBS..DIGEST_ELEMS {
                 b.assert_zero(binp(0, j));
             }
             assert_init(&mut b, |j| binp(0, j), DOM_CM, (4 * DIGEST_ELEMS) as u32);
@@ -274,7 +296,7 @@ impl<AB: AirBuilder<F = BabyBear>> Air<AB> for SpendAir {
                 b.assert_eq(binp(3, j).into(), o2.clone());
             }
             // out1 cm: B4(value_block) B5(owner) B6(rho) B7(r).
-            for j in 1..DIGEST_ELEMS {
+            for j in N_LIMBS..DIGEST_ELEMS {
                 b.assert_zero(binp(4, j));
             }
             assert_init(&mut b, |j| binp(4, j), DOM_CM, (4 * DIGEST_ELEMS) as u32);
@@ -299,12 +321,15 @@ impl<AB: AirBuilder<F = BabyBear>> Air<AB> for SpendAir {
                 .when(is_out.into())
                 .assert_eq(out[7][j].clone(), pv[PUB_CMO1 + j].into());
         }
-        builder
-            .when(is_out.into())
-            .assert_eq(cur[BUS + 2].into(), binp(0, 0).into());
-        builder
-            .when(is_out.into())
-            .assert_eq(cur[BUS + 3].into(), binp(4, 0).into());
+        // value-bus binding: the output values committed here are the bus limbs.
+        for j in 0..N_LIMBS {
+            builder
+                .when(is_out.into())
+                .assert_eq(cur[BUS + BUS_OUT0 + j].into(), binp(0, j).into());
+            builder
+                .when(is_out.into())
+                .assert_eq(cur[BUS + BUS_OUT1 + j].into(), binp(4, j).into());
+        }
 
         // ===== merkle rows: compression with conditional swap =====
         {
@@ -339,7 +364,7 @@ impl<AB: AirBuilder<F = BabyBear>> Air<AB> for SpendAir {
         }
 
         // ===== value bus is constant across the whole trace =====
-        for k in 0..5 {
+        for k in 0..BUS_W {
             builder
                 .when_transition()
                 .assert_eq(next[BUS + k].into(), cur[BUS + k].into());
@@ -348,23 +373,56 @@ impl<AB: AirBuilder<F = BabyBear>> Air<AB> for SpendAir {
         // ===== transaction-wide facts (bus is constant ⇒ first row suffices) =====
         {
             let mut b = builder.when_first_row();
-            // conservation: v_in0 + v_in1 == v_out0 + v_out1 + fee (overflow-free).
-            b.assert_eq(
-                cur[BUS].into() + cur[BUS + 1].into(),
-                cur[BUS + 2].into() + cur[BUS + 3].into() + cur[BUS + 4].into(),
-            );
-            // fee public.
-            b.assert_eq(cur[BUS + 4].into(), pv[PUB_FEE].into());
-            // range: v_out0, v_out1 ∈ [0, 2^AMOUNT_BITS).
-            for (k, bus_col) in [BUS + 2, BUS + 3].into_iter().enumerate() {
-                let base = RBITS + k * AMOUNT_BITS;
+            // Range: every bus limb == its 16-bit decomposition. Kills
+            // non-canonical limb encodings (a "limb" ≥ 2^16 denotes a different
+            // u64 than its field residue — inflation) and makes the balance
+            // equations below provably wrap-free (all terms < 2^18 ≪ p).
+            for k in 0..BUS_W {
+                let base = RBITS + k * LIMB_BITS;
                 let mut acc = AB::Expr::ZERO;
-                for i in 0..AMOUNT_BITS {
+                for i in 0..LIMB_BITS {
                     let bitv: AB::Expr = cur[base + i].into();
                     b.assert_zero(bitv.clone() * (bitv.clone() - AB::Expr::ONE));
                     acc += bitv * AB::Expr::from_u64(1u64 << i);
                 }
-                b.assert_eq(cur[bus_col].into(), acc);
+                b.assert_eq(cur[BUS + k].into(), acc);
+            }
+            // Carries c_1..c_3 ∈ {-2..1} as 2 bits each (an unconstrained carry
+            // would be a ±k·2^16 slush fund per limb — inflation).
+            for k in 0..(2 * N_CARRIES) {
+                let bitv: AB::Expr = cur[CARRYB + k].into();
+                b.assert_zero(bitv.clone() * (bitv - AB::Expr::ONE));
+            }
+            let carry = |cur: &[AB::Var], k: usize| -> AB::Expr {
+                let b0: AB::Expr = cur[CARRYB + 2 * k].into();
+                let b1: AB::Expr = cur[CARRYB + 2 * k + 1].into();
+                b0 + b1.double() - AB::Expr::TWO
+            };
+            // Limb-wise conservation with the carry chain: telescopes to
+            // in0 + in1 == out0 + out1 + fee over the INTEGERS; c_0 = c_4 = 0
+            // built-in (a nonzero final carry = inflation by 2^64 quanta).
+            for j in 0..N_LIMBS {
+                let c_in = if j == 0 {
+                    AB::Expr::ZERO
+                } else {
+                    carry(cur, j - 1)
+                };
+                let c_out = if j == N_LIMBS - 1 {
+                    AB::Expr::ZERO
+                } else {
+                    carry(cur, j)
+                };
+                let lhs: AB::Expr =
+                    cur[BUS + BUS_IN0 + j].into() + cur[BUS + BUS_IN1 + j].into() + c_in;
+                let rhs: AB::Expr = cur[BUS + BUS_OUT0 + j].into()
+                    + cur[BUS + BUS_OUT1 + j].into()
+                    + cur[BUS + BUS_FEE + j].into()
+                    + c_out * AB::Expr::from_u64(LIMB_BOUND);
+                b.assert_eq(lhs, rhs);
+            }
+            // fee public (4 canonical limbs).
+            for j in 0..N_LIMBS {
+                b.assert_eq(cur[BUS + BUS_FEE + j].into(), pv[PUB_FEE + j].into());
             }
             // nf0 ≠ nf1: one-hot e picks a differing limb, inv proves it nonzero.
             let mut e_sum = AB::Expr::ZERO;
@@ -458,24 +516,29 @@ pub fn build_spend_trace(
     let mut paths: Vec<MerklePath> = Vec::new();
     for (i, n) in inputs.iter().enumerate() {
         owners[i] = owner_key(&n.nk);
-        cms[i] = note_commitment(F::from_u64(n.value), &owners[i], &n.rho, &n.r);
+        cms[i] = note_commitment(n.value, &owners[i], &n.rho, &n.r);
         nfs[i] = nullifier(&n.nk, &n.rho);
         paths.push(tree.authentication_path(n.index));
     }
 
-    let bus = [
-        F::from_u64(inputs[0].value),
-        F::from_u64(inputs[1].value),
-        F::from_u64(outputs[0].value),
-        F::from_u64(outputs[1].value),
-        F::from_u64(fee),
+    let amounts = [
+        inputs[0].value,
+        inputs[1].value,
+        outputs[0].value,
+        outputs[1].value,
+        fee,
     ];
+    let carries = compute_carries(amounts).expect("amounts must balance over the integers");
+    let mut bus = [F::ZERO; BUS_W];
+    for (v, &val) in amounts.iter().enumerate() {
+        bus[v * N_LIMBS..(v + 1) * N_LIMBS].copy_from_slice(&value_limbs(val));
+    }
 
     let mut values = vec![F::ZERO; N_ROWS * ROW_W];
 
     // Fill every row's bus (constant) up front.
     for row in 0..N_ROWS {
-        values[row * ROW_W + BUS..row * ROW_W + BUS + 5].copy_from_slice(&bus);
+        values[row * ROW_W + BUS..row * ROW_W + BUS + BUS_W].copy_from_slice(&bus);
     }
 
     let dummy = [F::ZERO; WIDTH];
@@ -489,9 +552,11 @@ pub fn build_spend_trace(
         for (bj, nj) in b0.iter_mut().zip(n.nk.iter()) {
             *bj += *nj;
         }
-        // cm sponge chain: B1(value_block) B2(owner) B3(rho) B4(r).
+        // cm sponge chain: B1(value_block = 4 LE limbs) B2(owner) B3(rho) B4(r).
         let mut b1 = sponge_init(DOM_CM, 4 * DIGEST_ELEMS);
-        b1[0] += F::from_u64(n.value);
+        for (lane, limb) in b1.iter_mut().zip(value_limbs(n.value).iter()) {
+            *lane += *limb;
+        }
         let b2 = absorb(p16(&b1), &owners[i]);
         let b3 = absorb(p16(&b2), &n.rho);
         let b4 = absorb(p16(&b3), &n.r);
@@ -543,7 +608,9 @@ pub fn build_spend_trace(
         for (j, out) in outputs.iter().enumerate() {
             let base = j * 4;
             let mut b0 = sponge_init(DOM_CM, 4 * DIGEST_ELEMS);
-            b0[0] += F::from_u64(out.value);
+            for (lane, limb) in b0.iter_mut().zip(value_limbs(out.value).iter()) {
+                *lane += *limb;
+            }
             let o0 = crate::spend::perm::permutation_output16(&b0);
             let b1 = absorb(o0, &out.owner);
             let o1 = crate::spend::perm::permutation_output16(&b1);
@@ -566,12 +633,21 @@ pub fn build_spend_trace(
         let _ = fill_blocks(perm_region, &ins);
     }
 
-    // First-row extras: range bits + nf0≠nf1 gadget.
-    for (k, out) in [outputs[0].value, outputs[1].value].into_iter().enumerate() {
-        let base = RBITS + k * AMOUNT_BITS;
-        for i in 0..AMOUNT_BITS {
-            values[base + i] = F::from_u64((out >> i) & 1);
+    // First-row extras: range bits (all 20 bus limbs), balance carries, and
+    // the nf0≠nf1 gadget.
+    for (v, &val) in amounts.iter().enumerate() {
+        for j in 0..N_LIMBS {
+            let base = RBITS + (v * N_LIMBS + j) * LIMB_BITS;
+            let raw = (val >> (LIMB_BITS * j)) & (LIMB_BOUND - 1);
+            for i in 0..LIMB_BITS {
+                values[base + i] = F::from_u64((raw >> i) & 1);
+            }
         }
+    }
+    for (k, &c) in carries.iter().enumerate() {
+        let cp = (c + 2) as u64; // {-2..1} -> {0..3}
+        values[CARRYB + 2 * k] = F::from_u64(cp & 1);
+        values[CARRYB + 2 * k + 1] = F::from_u64(cp >> 1);
     }
     // pick the first limb where nf0 differs from nf1.
     let kdiff = nfs[0]
@@ -591,7 +667,7 @@ pub fn build_spend_trace(
     pis.extend_from_slice(&nfs[1]);
     pis.extend_from_slice(&cms_out(outputs)[0]);
     pis.extend_from_slice(&cms_out(outputs)[1]);
-    pis.push(F::from_u64(fee));
+    pis.extend_from_slice(&value_limbs(fee));
 
     (RowMajorMatrix::new(values, ROW_W), pis)
 }
@@ -599,7 +675,7 @@ pub fn build_spend_trace(
 fn cms_out(outputs: &[OutputNote; 2]) -> [[F; DIGEST_ELEMS]; 2] {
     core::array::from_fn(|j| {
         note_commitment(
-            F::from_u64(outputs[j].value),
+            outputs[j].value,
             &outputs[j].owner,
             &outputs[j].rho,
             &outputs[j].r,
@@ -634,18 +710,8 @@ mod tests {
             index: 0,
         };
         let mut tree = NoteTree::new();
-        let cm0 = note_commitment(
-            F::from_u64(in0.value),
-            &owner_key(&in0.nk),
-            &in0.rho,
-            &in0.r,
-        );
-        let cm1 = note_commitment(
-            F::from_u64(in1.value),
-            &owner_key(&in1.nk),
-            &in1.rho,
-            &in1.r,
-        );
+        let cm0 = note_commitment(in0.value, &owner_key(&in0.nk), &in0.rho, &in0.r);
+        let cm1 = note_commitment(in1.value, &owner_key(&in1.nk), &in1.rho, &in1.r);
         let i0 = tree.append(cm0);
         let i1 = tree.append(cm1);
         let in0 = InputNote { index: i0, ..in0 };
@@ -918,12 +984,7 @@ mod tests {
             index: 0,
         };
         let mut tree = NoteTree::new();
-        let cm = note_commitment(
-            F::from_u64(in0.value),
-            &owner_key(&in0.nk),
-            &in0.rho,
-            &in0.r,
-        );
+        let cm = note_commitment(in0.value, &owner_key(&in0.nk), &in0.rho, &in0.r);
         let i = tree.append(cm);
         let same = InputNote {
             index: i,
@@ -949,7 +1010,7 @@ mod tests {
     fn rejects_value_inflation() {
         // Outputs encode more value than the inputs: conservation
         // (v_in0 + v_in1 == v_out0 + v_out1 + fee) is unsatisfiable.
-        let (tree, inputs, _outputs, _fee) = scenario();
+        let (tree, inputs, outputs, fee) = scenario();
         // in0 + in1 = 1500; make outputs sum to 2500 (inflation).
         let bad_out = [
             OutputNote {
@@ -965,7 +1026,29 @@ mod tests {
                 r: digest(690),
             },
         ];
-        let (trace, pis) = build_spend_trace(&inputs, &tree, &bad_out, 0);
+        // The builder itself refuses an integer-imbalanced witness...
+        let build = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            build_spend_trace(&inputs, &tree, &bad_out, 0)
+        }));
+        assert!(build.is_err(), "an inflating witness must be unbuildable");
+
+        // ...and a hand-tampered trace (bus + range bits rewritten to encode
+        // the inflating outputs, carries left as witness) is rejected by the
+        // carry-chain constraints: no carry assignment in {-2..1} reconciles
+        // an integer imbalance (the wrap-around/inflation guard).
+        let (mut trace, pis) = build_spend_trace(&inputs, &tree, &outputs, fee);
+        for row in 0..N_ROWS {
+            let base = row * ROW_W;
+            trace.values[base + BUS + BUS_OUT0..base + BUS + BUS_OUT0 + N_LIMBS]
+                .copy_from_slice(&value_limbs(bad_out[0].value));
+        }
+        for j in 0..N_LIMBS {
+            let base = RBITS + (2 * N_LIMBS + j) * LIMB_BITS; // out0 bit block
+            let raw = (bad_out[0].value >> (LIMB_BITS * j)) & (LIMB_BOUND - 1);
+            for i in 0..LIMB_BITS {
+                trace.values[base + i] = F::from_u64((raw >> i) & 1);
+            }
+        }
         expect_rejected(trace, pis, "outputs may not create value");
     }
 
@@ -1050,15 +1133,24 @@ mod tests {
         let (tree, inputs, outputs, fee) = scenario();
         let (_trace, pis) = build_spend_trace(&inputs, &tree, &outputs, fee);
         assert_eq!(pis.len(), N_PUB);
+        // The public vector is EXACTLY root ‖ nf0 ‖ nf1 ‖ cm_out0 ‖ cm_out1 ‖
+        // fee limbs — nothing else (in particular no input cm, no leaf index).
+        let mut expected: Vec<F> = Vec::new();
+        expected.extend_from_slice(&tree.root());
         for n in &inputs {
-            let cm = note_commitment(F::from_u64(n.value), &owner_key(&n.nk), &n.rho, &n.r);
+            expected.extend_from_slice(&nullifier(&n.nk, &n.rho));
+        }
+        for o in &outputs {
+            expected.extend_from_slice(&note_commitment(o.value, &o.owner, &o.rho, &o.r));
+        }
+        expected.extend_from_slice(&value_limbs(fee));
+        assert_eq!(pis, expected, "public values carry only the intended data");
+        // And explicitly: no input commitment appears anywhere in them.
+        for n in &inputs {
+            let cm = note_commitment(n.value, &owner_key(&n.nk), &n.rho, &n.r);
             assert!(
                 !pis.windows(DIGEST_ELEMS).any(|w| w == cm),
                 "an input commitment leaked into the public values"
-            );
-            assert!(
-                !pis.contains(&F::from_u64(n.index)),
-                "a leaf index leaked into the public values"
             );
         }
     }

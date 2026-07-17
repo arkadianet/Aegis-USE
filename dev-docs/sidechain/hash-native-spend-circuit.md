@@ -29,15 +29,24 @@ ship the single monolithic 2-in/2-out proof — that assembly is specified below
 - **nf** `= H_NF(nk ‖ rho)` — 2 blocks → 2 permutations. The N1 scheme carried
   over, re-expressed over BabyBear (soundness re-argued below).
 - **cm** `= H_CM(value_block ‖ owner ‖ rho ‖ r)` — 4 component-aligned blocks
-  (`value_block = [value,0×7]`, `owner`, `rho`, `r`) → 4 permutations.
+  (`value_block = [v0..v3, 0×4]` — the amount's 4 LE 16-bit limbs — `owner`,
+  `rho`, `r`) → 4 permutations. Commitment domain `0x0A13` (bumped from `0x0A03`
+  when the value block became limbed).
 - **Accumulator.** Binary Poseidon-Merkle, depth 32 (2^32 leaves), internal node
   `= truncate_8(perm(left ‖ right))` — matches Plonky3's own Merkle shape.
   Incremental/append-only with empty-subtree defaults. `EMPTY_LEAF = 0×8`.
-- **value / AMOUNT_BITS = 28.** A single BabyBear element cannot hold a `u64`, and
-  a multi-term balance sum must not wrap `p`. Amounts are pinned `< 2^28` so
-  `Σin == Σout + fee` is a single overflow-free field constraint (largest side
-  `3·2^28 < 2^30 < p`) and each range-check is a 28-bit decomposition. Full 64-bit
-  amounts ⇒ 2–3 limbs + a carrying balance adder (mechanical, deferred).
+- **value = full u64 as 4×16-bit LE limbs.** A single BabyBear element cannot
+  hold a `u64`, and a naive limb recombination would wrap `p`. 16-bit limbs are
+  byte-aligned to the ciphertext's `u64` LE wire (bijective, no second wire
+  form), uniform (no special last limb), and keep balance carries in a 2-bit
+  window. Conservation is limb-wise with an explicit signed carry chain
+  (`in0_j + in1_j + c_j == out0_j + out1_j + fee_j + c_{j+1}·2^16`,
+  `c_0 = c_4 = 0`, carries ∈ {-2..1} as 2 bits) — telescopes to integer
+  equality; every term < 2^18 ≪ p so the field equations ARE the integer
+  equations (mod-p wrap unsatisfiable). ALL five values' limbs are 16-bit
+  range-checked in-circuit (outputs/fee mandatorily — they are created here;
+  inputs as defense-in-depth on the cm-binding induction). Per-constraint
+  attack notes in `balance_air.rs`.
 
 This reproduces the spike's ~86-permutation budget exactly: `2·(1 owner + 4 cm +
 2 nf + 32 merkle) + 2·(4 out cm) = 86`.
@@ -49,7 +58,7 @@ This reproduces the spike's ~86-permutation budget exactly: `2·(1 owner + 4 cm 
 | `PermBindingAir` | `out == Poseidon2(in)` (public I/O) | tampered output rejected |
 | `MerkleMembershipAir` | private leaf + depth-32 path folds to public root | wrong root rejected |
 | `NullifierAir` | `nf == H_NF(nk‖rho)` (public `nk,rho,nf`) | tampered `nf`, tampered `nk` rejected |
-| `BalanceAir` | `Σin==Σout+fee` + 28-bit output range | imbalance rejected; inflating witness unbuildable |
+| `BalanceAir` | limbed u64 `Σin==Σout+fee` (carry chain) + 16-bit limb ranges | imbalance/wrap-mod-p/non-canonical-limb rejected; inflating witness unbuildable |
 
 **Measured** (depth-32 membership, this machine, `new_benchmark_high_arity`
 FRI): prove **~115 ms**, verify **~5 ms**, proof **~0.19 MB**, 315 columns × 32
@@ -117,7 +126,9 @@ concatenation (the bounded Poseidon2 parameter/round-count review item).
    ~MB). A parameter choice, not a design flaw.
 3. **Domain-separation scheme** — the `DOMAIN_*` tags + length binding, and the
    choice NOT to domain-separate Merkle levels (leaf-vs-node / per-height).
-4. **`AMOUNT_BITS=28`** vs a full 64-bit amount (limbs + carrying adder).
+4. ~~`AMOUNT_BITS=28`~~ **RESOLVED: full u64 amounts** (4×16-bit limbs + signed
+   carry chain; see the balance section). Residual review: the carry-window
+   argument ({-2..1}) and the input-limb-induction note.
 5. **`EMPTY_LEAF`** nothing-up-my-sleeve value.
 6. **Zero-knowledge — NOW IMPLEMENTED (hiding config).** See the dedicated
    section below. Residual: the hiding is *conjectured* (statistical, standard
@@ -247,7 +258,8 @@ all-zero DH rejected (non-contributory address). Zero nonce is safe: fresh esk
 per output ⇒ single-use key. `aad = cm` binds the ciphertext to its output.
 
 **Scanning:** trial-decrypt each new output; AEAD failure = not ours (cheap);
-on success parse STRICTLY (canonical limbs, value < 2^28) and REQUIRE the
+on success parse STRICTLY (canonical digest limbs; the value is a full u64 —
+its 4×16 limb encoding is bijective by construction) and REQUIRE the
 opening to recompute the on-chain `cm` under our OWN `owner` — unspendable
 garbage is rejected. The recovered `(value, rho, r)` + `nk` is exactly the
 monolith's `InputNote` witness.
