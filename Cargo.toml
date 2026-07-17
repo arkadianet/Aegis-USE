@@ -4,7 +4,7 @@ members  = ["aegis-attest", "aegis-crypto", "aegis-node", "aegis-spec", "aegis-t
 # The vendored Curve Trees stack is its own nested workspace; aegis-crypto
 # path-depends into it (see aegis-crypto/Cargo.toml). Excluded here exactly
 # as in the upstream monorepo.
-exclude  = ["vendor/curve-trees"]
+exclude  = ["vendor/curve-trees", "engine"]
 
 [workspace.package]
 version    = "0.5.1"
