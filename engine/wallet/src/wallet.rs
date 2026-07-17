@@ -11,7 +11,7 @@ use p3_field::PrimeCharacteristicRing;
 use rand::Rng;
 use x25519_dalek::StaticSecret;
 
-use crate::chain::{ChainView, OutputRecord, Tx};
+use crate::chain::{ChainView, OutputRecord, Tx, COINBASE_MATURITY};
 use crate::circuit::SpendCircuit;
 
 /// A note the wallet owns: the decrypted opening + its accumulator position and
@@ -25,6 +25,10 @@ pub struct OwnedNote {
     pub leaf_index: u64,
     pub cm: Digest,
     pub spent: bool,
+    /// Block height at which this note was committed (for coinbase maturity).
+    pub mined_height: u64,
+    /// Coinbase notes are unspendable until [`COINBASE_MATURITY`] blocks pass.
+    pub is_coinbase: bool,
 }
 
 /// A watch-only viewing key: detects + decrypts incoming notes but holds no
@@ -115,6 +119,8 @@ impl Wallet {
             leaf_index,
             cm,
             ciphertext,
+            height,
+            is_coinbase,
         } in chain.outputs_since(self.scan_cursor)
         {
             if self.notes.iter().any(|n| n.leaf_index == leaf_index) {
@@ -129,6 +135,8 @@ impl Wallet {
                     leaf_index,
                     cm,
                     spent: false,
+                    mined_height: height,
+                    is_coinbase,
                 });
             }
         }
@@ -147,11 +155,28 @@ impl Wallet {
         }
     }
 
-    /// Total spendable balance (owned ∩ unspent).
+    /// Total owned unspent value (some may be immature coinbase — see
+    /// [`Self::spendable_balance`]).
     pub fn balance(&self) -> u64 {
         self.notes
             .iter()
             .filter(|n| !n.spent)
+            .map(|n| n.value)
+            .sum()
+    }
+
+    /// Whether an unspent note is spendable NOW at `tip_height` (a coinbase note
+    /// must be at least [`COINBASE_MATURITY`] blocks old).
+    fn is_spendable(&self, n: &OwnedNote, tip_height: u64) -> bool {
+        !n.spent
+            && (!n.is_coinbase || tip_height.saturating_sub(n.mined_height) >= COINBASE_MATURITY)
+    }
+
+    /// Value spendable NOW (excludes immature coinbase notes).
+    pub fn spendable_balance(&self, tip_height: u64) -> u64 {
+        self.notes
+            .iter()
+            .filter(|n| self.is_spendable(n, tip_height))
             .map(|n| n.value)
             .sum()
     }
@@ -162,8 +187,12 @@ impl Wallet {
     /// of the two largest; multi-note consolidation (fold N notes → 1 over
     /// several txs) and a circuit dummy-input flag (spend a single note) are the
     /// documented follow-ups.
-    fn select(&self, need: u64) -> Result<[OwnedNote; 2], PayError> {
-        let mut unspent: Vec<&OwnedNote> = self.notes.iter().filter(|n| !n.spent).collect();
+    fn select(&self, need: u64, tip_height: u64) -> Result<[OwnedNote; 2], PayError> {
+        let mut unspent: Vec<&OwnedNote> = self
+            .notes
+            .iter()
+            .filter(|n| self.is_spendable(n, tip_height))
+            .collect();
         unspent.sort_by(|a, b| b.value.cmp(&a.value).then(a.leaf_index.cmp(&b.leaf_index)));
         match unspent.as_slice() {
             [a, b, ..] if a.value + b.value >= need => Ok([(*a).clone(), (*b).clone()]),
@@ -184,7 +213,7 @@ impl Wallet {
         fee: u64,
     ) -> Result<Tx, PayError> {
         let need = amount + fee;
-        let sel = self.select(need)?;
+        let sel = self.select(need, chain.tip_height())?;
 
         let root = chain.current_root();
         let paths: [MerklePath; 2] = [
@@ -284,6 +313,8 @@ mod tests {
             leaf_index: 0,
             cm: [F::ZERO; DIGEST_ELEMS],
             spent: false,
+            mined_height: 0,
+            is_coinbase: false,
         });
         w.notes.push(OwnedNote {
             value: 50,
@@ -293,6 +324,8 @@ mod tests {
             leaf_index: 1,
             cm: [F::ZERO; DIGEST_ELEMS],
             spent: true,
+            mined_height: 0,
+            is_coinbase: false,
         });
         assert_eq!(w.balance(), 100);
     }
@@ -300,7 +333,7 @@ mod tests {
     #[test]
     fn select_needs_two_notes_and_picks_largest() {
         let mut w = Wallet::from_seed(b"w");
-        assert!(matches!(w.select(10), Err(PayError::InsufficientFunds)));
+        assert!(matches!(w.select(10, 0), Err(PayError::InsufficientFunds)));
         for (i, v) in [30u64, 100, 70].into_iter().enumerate() {
             w.notes.push(OwnedNote {
                 value: v,
@@ -310,10 +343,12 @@ mod tests {
                 leaf_index: i as u64,
                 cm: [F::ZERO; DIGEST_ELEMS],
                 spent: false,
+                mined_height: 0,
+                is_coinbase: false,
             });
         }
-        let sel = w.select(150).unwrap();
+        let sel = w.select(150, 0).unwrap();
         assert_eq!([sel[0].value, sel[1].value], [100, 70]); // two largest
-        assert!(matches!(w.select(171), Err(PayError::InsufficientFunds))); // 100+70 < 171
+        assert!(matches!(w.select(171, 0), Err(PayError::InsufficientFunds))); // 100+70 < 171
     }
 }

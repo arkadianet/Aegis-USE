@@ -27,6 +27,12 @@ use crate::circuit::SpendCircuit;
 /// How many recent accumulator roots the node accepts a spend against.
 pub const ROOT_WINDOW: usize = 100;
 
+/// Blocks a coinbase note must age before it is spendable (a wallet-side policy
+/// — a well-behaved wallet won't select an immature coinbase note; a fully
+/// consensus-enforced maturity over HIDDEN inputs is a documented hard problem,
+/// deferred). Small for tests; a real chain uses a larger depth.
+pub const COINBASE_MATURITY: u64 = 5;
+
 /// An on-chain shielded transaction: the hiding spend proof, its public values
 /// (canonical `u32` limbs), and the two fixed-size output ciphertexts (§6
 /// uniformity — always exactly two, always [`NOTE_CT_BYTES`] each).
@@ -44,6 +50,10 @@ pub struct OutputRecord {
     pub leaf_index: u64,
     pub cm: Digest,
     pub ciphertext: Vec<u8>,
+    /// Block height at which this output was committed.
+    pub height: u64,
+    /// Whether this output is a coinbase note (subject to maturity).
+    pub is_coinbase: bool,
 }
 
 /// Why the node rejected a submission.
@@ -73,6 +83,8 @@ pub trait ChainView {
     fn outputs_since(&self, cursor: u64) -> Vec<OutputRecord>;
     /// Total committed outputs = the next leaf index = a scan-cursor target.
     fn output_count(&self) -> u64;
+    /// The current chain tip height (for coinbase-maturity checks).
+    fn tip_height(&self) -> u64;
 }
 
 /// An in-memory chain: the accumulator, the nullifier set, the recent-root
@@ -83,6 +95,7 @@ pub struct InMemoryChain {
     nullifiers: HashSet<[u32; DIGEST_ELEMS]>,
     recent_roots: VecDeque<Digest>,
     outputs: Vec<OutputRecord>,
+    height: u64,
 }
 
 impl Default for InMemoryChain {
@@ -101,6 +114,7 @@ impl InMemoryChain {
             nullifiers: HashSet::new(),
             recent_roots,
             outputs: Vec::new(),
+            height: 0,
         }
     }
 
@@ -114,13 +128,17 @@ impl InMemoryChain {
     /// Append one output commitment with its ciphertext (a coinbase/faucet or
     /// the accept path). Returns the leaf index. Advances the root window.
     pub fn append_output(&mut self, cm: Digest, ciphertext: Vec<u8>) -> u64 {
+        let height = self.height;
         let leaf_index = self.tree.append(cm);
         self.outputs.push(OutputRecord {
             leaf_index,
             cm,
             ciphertext,
+            height,
+            is_coinbase: false,
         });
         self.push_root();
+        self.height += 1;
         leaf_index
     }
 
@@ -189,5 +207,8 @@ impl ChainView for InMemoryChain {
     }
     fn output_count(&self) -> u64 {
         self.tree.len()
+    }
+    fn tip_height(&self) -> u64 {
+        self.height
     }
 }

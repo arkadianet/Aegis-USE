@@ -24,6 +24,11 @@ use super::state::{digest_to_limbs, limbs_to_digest, HnBlock, HnError, HnState};
 const BLOCK_LOG: &str = "hn_blocks.log";
 const DOMAIN_BLOCK_ID: u32 = 0x0B10;
 
+/// Fixed per-block emission (base units) for the new testnet profile — a flat
+/// schedule (documented; a real chain halves). Fees are added on top and go to
+/// the miner (no burning).
+pub const EMISSION_PER_BLOCK: u64 = 50;
+
 /// The node's hash-native chain: state + circuit keys + mempool, persisted to
 /// `dir`.
 pub struct HnChain {
@@ -102,9 +107,22 @@ impl HnChain {
         hash_id_domain(DOMAIN_BLOCK_ID, self.state.height(), &prev)
     }
 
+    /// The block reward the miner claims: the fixed emission plus every mempool
+    /// tx's fee (fees stop burning — the miner earns them via the coinbase note).
+    fn block_reward(&self) -> u64 {
+        let fees: u64 = self
+            .mempool
+            .iter()
+            .map(|tx| HnState::tx_fee(tx).unwrap_or(0))
+            .sum();
+        EMISSION_PER_BLOCK.saturating_add(fees)
+    }
+
     /// Produce and persist one block from the current mempool, minting the
-    /// coinbase to `miner` for `coinbase_amount`. Clears the mempool.
-    pub fn produce_block(&mut self, miner: &Address, coinbase_amount: u64) -> Result<(), HnError> {
+    /// coinbase (emission + fees) to `miner`. This is the node's block-assembly
+    /// step (a production loop or a miner calls it); it clears the mempool.
+    pub fn produce_block(&mut self, miner: &Address) -> Result<(), HnError> {
+        let coinbase_amount = self.block_reward();
         let block_id = self.block_id();
         let MintOut {
             cm: coinbase_cm,
@@ -127,10 +145,35 @@ impl HnChain {
             txs: std::mem::take(&mut self.mempool),
             coinbase_cm: digest_to_limbs(&coinbase_cm),
             coinbase_ct,
+            coinbase_is_reward: true,
         };
         self.state.apply_block(&block, &self.circuit)?;
         self.persist(&block);
         self.mempool_nfs.clear();
+        Ok(())
+    }
+
+    /// Genesis/faucet allocation: a block minting `amount` to `dest` as an
+    /// immediately-spendable (non-maturity) note. For chain bootstrap / testnet
+    /// funding — a real genesis pins these in the chain-id.
+    pub fn fund(&mut self, dest: &Address, amount: u64) -> Result<(), HnError> {
+        let block_id = self.block_id();
+        let MintOut {
+            cm: coinbase_cm,
+            ciphertext: coinbase_ct,
+        } = coinbase_note(dest, amount, &block_id);
+        let state_root = self.state.simulate_state_root(&[coinbase_cm]);
+        let block = HnBlock {
+            height: self.state.height(),
+            prev_root: self.state.tip_root_limbs(),
+            state_root,
+            txs: vec![],
+            coinbase_cm: digest_to_limbs(&coinbase_cm),
+            coinbase_ct,
+            coinbase_is_reward: false,
+        };
+        self.state.apply_block(&block, &self.circuit)?;
+        self.persist(&block);
         Ok(())
     }
 
@@ -165,6 +208,9 @@ impl ChainView for HnChain {
     }
     fn output_count(&self) -> u64 {
         self.state.output_count()
+    }
+    fn tip_height(&self) -> u64 {
+        self.state.height()
     }
 }
 

@@ -7,14 +7,19 @@
 
 use std::collections::{HashSet, VecDeque};
 
+use aegis_engine::commit::{limbs_to_u64, N_LIMBS};
 use aegis_engine::merkle::{MerklePath, NoteTree};
 use aegis_engine::note_encryption::NOTE_CT_BYTES;
 use aegis_engine::poseidon::{Digest, DIGEST_ELEMS, F};
-use aegis_engine::spend::monolith::{PUB_NF0, PUB_NF1, PUB_ROOT};
+use aegis_engine::spend::monolith::{N_PUB, PUB_FEE, PUB_NF0, PUB_NF1, PUB_ROOT};
 use aegis_hn_wallet::chain::{digest_at, OutputRecord, ROOT_WINDOW};
 use aegis_hn_wallet::{ChainView, SpendCircuit};
 use p3_field::{PrimeCharacteristicRing, PrimeField32};
 use serde::{Deserialize, Serialize};
+
+/// Minimum fee (base units) a shielded tx must pay to be admitted — a spam
+/// floor checked from the public fee limbs BEFORE the expensive proof verify.
+pub const MIN_FEE: u64 = 1;
 
 /// Digest ↔ 8 canonical `u32` limbs (the block/header wire form).
 pub fn digest_to_limbs(d: &Digest) -> [u32; DIGEST_ELEMS] {
@@ -36,6 +41,9 @@ pub struct HnBlock {
     pub txs: Vec<aegis_hn_wallet::Tx>,
     pub coinbase_cm: [u32; DIGEST_ELEMS],
     pub coinbase_ct: Vec<u8>,
+    /// `true` for a mined block (coinbase = emission+fees, subject to maturity);
+    /// `false` for a genesis/faucet allocation (immediately spendable).
+    pub coinbase_is_reward: bool,
 }
 
 /// Captured prior state for an exact rollback.
@@ -62,6 +70,8 @@ pub enum HnError {
     BadCiphertext,
     #[error("public values have the wrong shape")]
     BadPublicShape,
+    #[error("fee is below the minimum")]
+    FeeTooLow,
     #[error("block prev_root does not match the current tip")]
     PrevRootMismatch,
     #[error("block state_root does not match the applied tip")]
@@ -107,26 +117,47 @@ impl HnState {
         core::array::from_fn(|i| nf[i].as_canonical_u32())
     }
 
-    fn append_leaf(&mut self, cm: Digest, ciphertext: Vec<u8>) {
+    fn append_leaf(&mut self, cm: Digest, ciphertext: Vec<u8>, is_coinbase: bool) {
         self.cm_leaves.push(cm);
+        let height = self.height;
         let leaf_index = self.tree.append(cm);
         self.outputs.push(OutputRecord {
             leaf_index,
             cm,
             ciphertext,
+            height,
+            is_coinbase,
         });
+    }
+
+    /// The `u64` fee a tx pays, read from its public fee limbs.
+    pub fn tx_fee(tx: &aegis_hn_wallet::Tx) -> Option<u64> {
+        if tx.public_values.len() < PUB_FEE + N_LIMBS {
+            return None;
+        }
+        let limbs: [F; N_LIMBS] =
+            core::array::from_fn(|i| F::from_u32(tx.public_values[PUB_FEE + i]));
+        Some(limbs_to_u64(&limbs))
     }
 
     /// Validate a single tx against the current state + a working nullifier set
     /// (used both at mempool admission and inside block application). Returns
     /// the tx's two nullifiers on success.
+    ///
+    /// **Cheap-checks-first (mempool DoS posture)**: shape, §6 ciphertext sizes,
+    /// the minimum-fee floor, the anchor window, and the nullifier index are all
+    /// checked BEFORE the ~52 ms hiding-proof verify — so spam with a stale
+    /// anchor, a reused nullifier, a wrong shape, or an underpaid fee is rejected
+    /// for nearly free, and only well-formed, fresh, fee-paying txs reach the
+    /// expensive verify.
     pub fn validate_tx(
         &self,
         tx: &aegis_hn_wallet::Tx,
         circuit: &SpendCircuit,
         pending: &HashSet<[u32; DIGEST_ELEMS]>,
     ) -> Result<[Digest; 2], HnError> {
-        if tx.public_values.len() < PUB_NF1 + DIGEST_ELEMS {
+        // ---- cheap checks first ----
+        if tx.public_values.len() != N_PUB {
             return Err(HnError::BadPublicShape);
         }
         for ct in &tx.out_ciphertexts {
@@ -134,8 +165,9 @@ impl HnState {
                 return Err(HnError::BadCiphertext);
             }
         }
-        if !circuit.verify(&tx.proof_bytes, &tx.public_values) {
-            return Err(HnError::ProofInvalid);
+        match Self::tx_fee(tx) {
+            Some(fee) if fee >= MIN_FEE => {}
+            _ => return Err(HnError::FeeTooLow),
         }
         let root = digest_at(&tx.public_values, PUB_ROOT);
         if !self.recent_roots.contains(&root) {
@@ -148,6 +180,10 @@ impl HnState {
             if self.nullifiers.contains(&k) || pending.contains(&k) {
                 return Err(HnError::DoubleSpend);
             }
+        }
+        // ---- expensive check last ----
+        if !circuit.verify(&tx.proof_bytes, &tx.public_values) {
+            return Err(HnError::ProofInvalid);
         }
         Ok([nf0, nf1])
     }
@@ -190,12 +226,13 @@ impl HnState {
         for tx in &block.txs {
             let cm0 = digest_at(&tx.public_values, aegis_engine::spend::monolith::PUB_CMO0);
             let cm1 = digest_at(&tx.public_values, aegis_engine::spend::monolith::PUB_CMO1);
-            self.append_leaf(cm0, tx.out_ciphertexts[0].clone());
-            self.append_leaf(cm1, tx.out_ciphertexts[1].clone());
+            self.append_leaf(cm0, tx.out_ciphertexts[0].clone(), false);
+            self.append_leaf(cm1, tx.out_ciphertexts[1].clone(), false);
         }
         self.append_leaf(
             limbs_to_digest(&block.coinbase_cm),
             block.coinbase_ct.clone(),
+            block.coinbase_is_reward,
         );
         for k in &all_nfs {
             self.nullifiers.insert(*k);
@@ -281,6 +318,9 @@ impl ChainView for HnState {
     fn output_count(&self) -> u64 {
         self.tree.len()
     }
+    fn tip_height(&self) -> u64 {
+        self.height
+    }
 }
 
 #[cfg(test)]
@@ -308,6 +348,7 @@ mod tests {
             txs: vec![],
             coinbase_cm: digest_to_limbs(&mint.cm),
             coinbase_ct: mint.ciphertext,
+            coinbase_is_reward: true,
         };
 
         let undo = st.apply_block(&block, &circuit).unwrap();
@@ -345,6 +386,7 @@ mod tests {
             txs: vec![],
             coinbase_cm: digest_to_limbs(&mint.cm),
             coinbase_ct: mint.ciphertext,
+            coinbase_is_reward: true,
         };
         assert!(matches!(
             st.apply_block(&bad, &circuit),
