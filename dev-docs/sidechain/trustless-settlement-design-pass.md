@@ -91,12 +91,18 @@ foundation; the ecosystem pivoted to recursion-friendly proving from day one).
 Combining both, the argument sharpens to a **floor**, and the distinction that
 matters is aggregation vs accumulation:
 
-- **Aggregation** (Bulletproofs `batch_verify`): **[CORRECTED 2026-07-17 by the
-  accumulation feasibility spike — this was wrong.]** Measured, `batch_verify`
-  amortizes the DOMINANT term: the heavy ~16k-point MSM is over a *shared*
-  generator basis, so it's paid once per batch; only ~79 pts/proof is linear.
-  **100 proofs = 1.47× one proof, not 100× — real batch-independent amortization,
-  free today, no Halo/accumulation construction needed.**
+- **Aggregation** (Bulletproofs `batch_verify`): **[MEASURED 2026-07-17, refined by
+  the Option-A settlement build — supersedes the accumulation spike's headline.]**
+  Two things amortize differently. The combined-MSM *point count* is near-flat: the
+  ~16k-point generator MSM is shared, so 100 proofs' MSM is only ~1.47× one proof's
+  (this was the spike's "1.47×"). BUT the *full* settlement verify the RISC0 guest
+  runs also derives each proof's `verification_scalars_and_points` (~79 pts +
+  scalars/proof), which does NOT amortize. Measured full-verify:
+  **`283 ms shared base (94%) + 17.5 ms/tx marginal (6%)` → 6.75× at N=100** (per-tx
+  cost drops 15×). **Strongly sublinear — the right shape for per-epoch batching —
+  but NOT batch-independent.** So it is a constant-heavy base + a small linear tail,
+  not free amortization; the earlier "batch-independent" was the MSM point-count
+  alone, not the work the guest actually does.
 - **Accumulation** (Halo/IPA-style): defers to ONE final MSM of size independent of
   N. This DOES amortize N → 1. **But that one MSM is still over secp/secq**, i.e.
   still non-native in RISC0 ≈ the ~14B-cycle (hours) foreign verification.
