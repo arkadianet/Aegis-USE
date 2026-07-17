@@ -46,6 +46,15 @@ rand = { version = "0.10", default-features = false, features = ["std", "std_rng
 # also `Clone` (the hiding MMCS requires it); rand's StdRng is not `Clone` in 0.10.
 rand_chacha = { version = "0.10", default-features = false }
 
+# --- note encryption / address (OFF-circuit wallet transport; proven crates
+#     only per the crypto rule — the in-circuit no-EC rule is about FRI-native
+#     verification cost and does not apply off-circuit; see the design doc) ---
+x25519-dalek     = { version = "2", default-features = false, features = ["static_secrets"] }
+chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc"] }
+hkdf             = "0.12"
+sha2             = { version = "0.10", default-features = false }
+bech32           = "0.9"
+
 [dev-dependencies]
 hex = "0.4"
 postcard = { version = "1", features = ["alloc"] }

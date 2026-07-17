@@ -219,10 +219,53 @@ is not broken, it is superseded by a 1.045 B hiding path.
 [ePrint 2021/582]: https://eprint.iacr.org/2021/582
 [ePrint 2024/1037]: https://eprint.iacr.org/2024/1037
 
+## Address + note encryption (send-to-a-stranger) — `engine/src/{address,note_encryption}.rs`
+
+**Mechanism decision: X25519 ECDH + ChaCha20-Poly1305 + HKDF-SHA256** (proven
+crates: x25519-dalek, chacha20poly1305, hkdf, sha2). Rationale: encryption is
+**off-circuit** — never proven by the spend STARK nor verified by the settlement
+guest — so the engine's no-EC rule (about FRI-native *verification* cost) does
+not apply; the dalek/RustCrypto stack is battle-tested and ciphertexts are small.
+ML-KEM (option b) declined this pass: younger crates, ~+1 KB/output, and its
+benefit (PQ confidentiality) protects *privacy*, not funds — an HNDL adversary
+could someday read amounts/memos but spending still requires the hash-based
+`nk`. The **versioned address** is the ML-KEM/hybrid upgrade hinge (REVIEW).
+
+**Address (two components — a capability upgrade over the old engine):**
+`owner = H(nk)` has no algebraic pk, so the address carries a separate
+encryption key: `bech32m(hrp, version(1) ‖ owner(32) ‖ enc_pk(32))` (Bech32m =
+the wallet's existing convention; strong checksum; strict decode: known version,
+exact length, canonical limbs). Keys derive from ONE seed via HKDF-SHA256 with
+independent info domains (`aegis:hn:kd:nk:v1`, `aegis:hn:kd:enc:v1`).
+Consequence: `enc_sk` alone detects+decrypts (a viewing capability), `nk` spends
+— the watch-only split the option-a engine documented as impossible.
+
+**Ciphertext (pinned; 152 bytes per output, chain-id-breaking):**
+`epk(32) ‖ ChaCha20Poly1305(K, nonce=0, aad=cm_bytes, value(8) ‖ rho(32) ‖ r(32) ‖ memo(32))`
+with `K = HKDF-SHA256(shared ‖ epk ‖ enc_pk, info="aegis:hn:note-enc:v1")`,
+all-zero DH rejected (non-contributory address). Zero nonce is safe: fresh esk
+per output ⇒ single-use key. `aad = cm` binds the ciphertext to its output.
+
+**Scanning:** trial-decrypt each new output; AEAD failure = not ours (cheap);
+on success parse STRICTLY (canonical limbs, value < 2^28) and REQUIRE the
+opening to recompute the on-chain `cm` under our OWN `owner` — unspendable
+garbage is rejected. The recovered `(value, rho, r)` + `nk` is exactly the
+monolith's `InputNote` witness.
+
+**§6 uniformity invariant (carried, tested):** every output carries exactly
+`NOTE_CT_BYTES = 152` ciphertext bytes via the identical code path — stranger
+payment, change-to-self, zero-value dummy are byte-length-indistinguishable
+(and change is found by the sender's own scanner).
+
+**Deferred:** the sender-recovery slot (`out_ct`, OVK wrap of `K` — the old
+engine's N7) — an additive second fixed slot, uniformity extends verbatim;
+memo semantics; keystore-at-rest for the seed.
+
 ## Next (in order)
-1. Note encryption (hash/KEM-based DH replacement) — deferred this pass.
-2. Address/wallet over `owner = H(nk)`.
-3. Settlement: the RISC0 guest re-verifying these BabyBear client proofs in-field
-   (the whole reason for the hash-native rebuild), + the peg contract wiring.
-4. A ZK wrapper (hiding), and generalizing the fixed 2-in/2-out shape.
+1. Wallet: keystore-at-rest + scan loop + spend orchestration over
+   address/note_encryption + the monolith witness.
+2. Sender-recovery slot (`out_ct`, N7 analog) + memo semantics.
+3. Peg contract wiring on the settlement guest; narrow-trace optimization
+   (client prove < 1 s AND cheaper settlement).
+4. Generalizing the fixed 2-in/2-out shape.
 5. A fresh testnet on the new engine (chain-id-breaking is free).

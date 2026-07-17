@@ -120,6 +120,32 @@ pub fn sponge_init(domain: u32, len: usize) -> [F; WIDTH] {
     state
 }
 
+/// Serialize a digest to 32 bytes: 8 canonical `u32` limbs, little-endian.
+pub fn digest_to_bytes(d: &Digest) -> [u8; 32] {
+    use p3_field::PrimeField32;
+    let mut out = [0u8; 32];
+    for (chunk, limb) in out.chunks_exact_mut(4).zip(d.iter()) {
+        chunk.copy_from_slice(&limb.as_canonical_u32().to_le_bytes());
+    }
+    out
+}
+
+/// Parse a digest from 32 bytes; `None` if any limb is non-canonical (≥ p).
+/// Strictness matters: a non-canonical encoding of the same digest would be a
+/// second wire form (malleability), so only the canonical one is accepted.
+pub fn digest_from_bytes(bytes: &[u8; 32]) -> Option<Digest> {
+    use p3_field::PrimeField32;
+    let mut out = [F::ZERO; DIGEST_ELEMS];
+    for (limb, chunk) in out.iter_mut().zip(bytes.chunks_exact(4)) {
+        let v = u32::from_le_bytes(chunk.try_into().expect("4-byte chunk"));
+        if v >= F::ORDER_U32 {
+            return None;
+        }
+        *limb = F::from_u32(v);
+    }
+    Some(out)
+}
+
 /// Domain-separated fixed-length hash to a digest: add-absorb sponge over
 /// rate-8 chunks (one permutation per chunk), squeeze the first 8 lanes.
 ///

@@ -21,9 +21,11 @@
 //! **Status:** testnet/devnet crypto pending full external review — same gate as
 //! the current engine. Not wired into any consensus path.
 
+pub mod address;
 pub mod commit;
 pub mod config;
 pub mod merkle;
+pub mod note_encryption;
 pub mod nullifier;
 pub mod poseidon;
 pub mod spend;
