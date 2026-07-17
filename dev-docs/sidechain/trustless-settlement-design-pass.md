@@ -84,9 +84,63 @@ the existing proofs as-is — the earlier "aggregate is STARK-friendly" hope doe
 not survive contact with the fact that the aggregate still has to re-establish
 per-note validity.
 
-## Recommended next step
-A focused feasibility check on Lead (1): does a native-cycle aggregation of N
-Curve-Trees transfer proofs into one exist/compose, and what is the single RISC0
-wrapper's real cost? That number decides whether trustless-with-today's-privacy is
-reachable, or whether it forces Lead (2) (a client-crypto pivot). Everything
-downstream (the `verifyStark` peg contract, wiring) is unchanged and waits on it.
+## Synthesis with parallel research (2026-07-17) — the argument is now airtight
+
+A second independent research pass reached the same verdict (Lead 1 is not a sound
+foundation; the ecosystem pivoted to recursion-friendly proving from day one).
+Combining both, the argument sharpens to a **floor**, and the distinction that
+matters is aggregation vs accumulation:
+
+- **Aggregation** (Bulletproofs range-proof aggregation): turns N proofs into one,
+  but the verifier MSM stays ~**linear** in the batch — a constant-factor speedup,
+  NOT amortization. A big batch is still a big MSM.
+- **Accumulation** (Halo/IPA-style): defers to ONE final MSM of size independent of
+  N. This DOES amortize N → 1. **But that one MSM is still over secp/secq**, i.e.
+  still non-native in RISC0 ≈ the ~14B-cycle (hours) foreign verification.
+
+**The floor (the real wall):** any bridge Ergo checks via `verifyStark` (RISC0)
+needs the *final* proof RISC0-native. As long as that proof is over our secp/secq
+curves, verifying it costs **≥ one foreign-curve MSM ≈ ~14B cycles ≈ hours** —
+irreducible. Accumulation reduces N → 1; it cannot get below 1, and 1 is hours.
+**The only way under the floor is a proof whose verifier is RISC0-native (hash/FRI)
+— which means changing the client proof system.** That is why every modern private
+rollup (Aztec/UltraHonk, Mina/Pickles, Nova/IVC, Plonky-family) uses a
+recursion-friendly system from the start rather than wrapping a foreign verifier.
+
+## The pivot is a privacy-LAYER rebuild, not a settlement add-on
+"Change the prover" understates it. Aegis's spend proof, note commitments,
+nullifier scheme (the reviewed N1 work), and the Curve-Trees accumulator are ALL
+Curve-Trees/Bulletproofs over secp/secq. A hash-native pivot **rebuilds the entire
+shielded core** — the largest and most-audited component — and discards much of
+that audited work. So this is a project-defining decision, not an increment.
+
+- **Pivot target (if taken):** a **FRI/STARK-native** system (Plonky3, or a
+  RISC0-guest note circuit) — NOT KZG/Halo2, which reintroduces a trusted setup
+  that Curve Trees was chosen to avoid. FRI keeps no-trusted-setup AND is native to
+  the RISC0 verifier, so settlement aggregation is then cheap by construction.
+- **Client cost of the pivot:** client proving rises from Curve Trees' ~2.9 s to
+  ~5–20 s (STARK/Plonky-class) — a real regression, the price of native recursion.
+
+## The honest landscape of Ergo-verifiable bridge trust models
+Ranked by how cheaply Ergo can verify them (the thing that actually gates us):
+1. **Attester k-of-n** — Ergo verifies sigs via native `atLeast(proveDlog)`. Cheap,
+   ships now, majority-honest. (Current: S1c/S1d.)
+2. **SPV / aux-PoW** — Ergo verifies Autolykos work + Merkle inclusion (hash-native,
+   cheap). PoW-majority trust; proves ORDERING, not monetary validity — complements
+   the attester, doesn't replace it.
+3. **Optimistic / fraud-proof** — awkward fit: the fraud proof itself would need
+   Ergo-side foreign-curve verification (the same floor), so it doesn't cleanly
+   dodge the wall.
+4. **Full STARK validity (trustless)** — requires the privacy-layer rebuild above.
+
+## Recommendation (ADR)
+**Do not pursue trustless by wrapping the current Curve-Trees/Bulletproofs verifier
+in RISC0** — the foreign-MSM floor (~hours per batch, at best, via accumulation)
+makes it an unsound production foundation, and accumulation can't get under it.
+Realistic paths: (a) keep the **trust-minimized bridge** (attester, optionally
+hardened with SPV) shipping now, which preserves the audited privacy layer; and
+(b) treat **full trustless as a deliberate future** that commits to rebuilding the
+shielded core in a FRI/STARK-native system. That rebuild is the real cost of
+trustless — it should be a separate, eyes-open decision, not an assumed increment.
+The prover architecture, not the settlement layer, is the component that must
+change if trustless is the long-term goal.
