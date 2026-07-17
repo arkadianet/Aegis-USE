@@ -10,6 +10,7 @@
 # crates' dependency graph or Cargo.lock. Build it with an isolated
 # CARGO_TARGET_DIR.
 [workspace]
+members = ["wallet"]
 
 [package]
 name        = "aegis-engine"

@@ -502,14 +502,35 @@ fn absorb(prev_out: [F; WIDTH], block: &Digest) -> [F; WIDTH] {
 }
 
 /// Build the full monolith trace + public values for a 2-in/2-out spend, where
-/// both input notes have already been appended to `tree`.
+/// both input notes have already been appended to `tree`. Convenience wrapper
+/// over [`build_spend_trace_with_paths`] for callers holding the whole tree
+/// (tests, the in-memory chain).
 pub fn build_spend_trace(
     inputs: &[InputNote; 2],
     tree: &NoteTree,
     outputs: &[OutputNote; 2],
     fee: u64,
 ) -> (RowMajorMatrix<F>, Vec<F>) {
-    let root = tree.root();
+    let paths = [
+        tree.authentication_path(inputs[0].index),
+        tree.authentication_path(inputs[1].index),
+    ];
+    build_spend_trace_with_paths(inputs, &paths, tree.root(), outputs, fee)
+}
+
+/// Build the trace from EXPLICIT membership paths + anchor `root` — the node
+/// boundary a wallet uses (it fetches each input's path via `ChainView`, then
+/// proves against the anchor root, without holding the whole tree).
+///
+/// # Panics
+/// If a path does not fold to `root` for its note (a stale/wrong witness).
+pub fn build_spend_trace_with_paths(
+    inputs: &[InputNote; 2],
+    input_paths: &[MerklePath; 2],
+    root: Digest,
+    outputs: &[OutputNote; 2],
+    fee: u64,
+) -> (RowMajorMatrix<F>, Vec<F>) {
     let mut owners = [[F::ZERO; DIGEST_ELEMS]; 2];
     let mut cms = [[F::ZERO; DIGEST_ELEMS]; 2];
     let mut nfs = [[F::ZERO; DIGEST_ELEMS]; 2];
@@ -518,7 +539,12 @@ pub fn build_spend_trace(
         owners[i] = owner_key(&n.nk);
         cms[i] = note_commitment(n.value, &owners[i], &n.rho, &n.r);
         nfs[i] = nullifier(&n.nk, &n.rho);
-        paths.push(tree.authentication_path(n.index));
+        assert_eq!(
+            crate::merkle::root_from_path(&cms[i], &input_paths[i]),
+            root,
+            "input {i} path must fold to the anchor root"
+        );
+        paths.push(input_paths[i].clone());
     }
 
     let amounts = [

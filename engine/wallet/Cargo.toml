@@ -1,0 +1,25 @@
+# aegis-hn-wallet — wallet orchestration for the hash-native engine.
+#
+# Keystore, note store + scanner, selection, and transaction building on top of
+# `aegis-engine`, plus the node-facing ChainView boundary the aegis-node
+# integration will consume.
+[package]
+name        = "aegis-hn-wallet"
+version     = "0.0.1"
+edition     = "2021"
+license     = "MIT OR Apache-2.0"
+description = "Wallet orchestration for the hash-native (BabyBear/Poseidon2/FRI) Aegis engine"
+publish     = false
+
+[dependencies]
+aegis-engine = { path = ".." }
+# Proven crates only (CLAUDE.md crypto rule) — mirrors the old engine's audited
+# keystore: PBKDF2-HMAC-SHA256 stretch → AES-256-GCM seal.
+aes-gcm = { version = "0.10", default-features = false, features = ["alloc", "aes"] }
+pbkdf2  = { version = "0.12", default-features = false, features = ["hmac"] }
+sha2    = { version = "0.10", default-features = false }
+x25519-dalek = { version = "2", default-features = false, features = ["static_secrets"] }
+rand    = { version = "0.10", default-features = false, features = ["std", "std_rng", "sys_rng", "thread_rng"] }
+p3-uni-stark = { git = "https://github.com/Plonky3/Plonky3", rev = "4aed8fe4195d40305175d55e58690f46171258d9" }
+p3-field     = { git = "https://github.com/Plonky3/Plonky3", rev = "4aed8fe4195d40305175d55e58690f46171258d9" }
+postcard = { version = "1", features = ["alloc"] }

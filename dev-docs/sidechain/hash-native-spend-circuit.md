@@ -273,9 +273,57 @@ payment, change-to-self, zero-value dummy are byte-length-indistinguishable
 engine's N7) — an additive second fixed slot, uniformity extends verbatim;
 memo semantics; keystore-at-rest for the seed.
 
+## Wallet orchestration — `engine/wallet` (`aegis-hn-wallet`)
+
+The layer that turns the engine into something a user (and the e2e campaign)
+drives. Crate layout: `keystore` (seed at rest), `circuit` (shared spend
+proving/verifying keys), `wallet` (note store + scanner + selection + pay),
+`chain` (the node boundary + an in-memory node).
+
+- **Keystore**: the old engine's audited pattern ported verbatim —
+  PBKDF2-HMAC-SHA256 (600k iters, cost stored in-blob) → AES-256-GCM over the
+  32-byte seed, random per-file salt + nonce; wrong passphrase/tamper ⇒ `None`,
+  never a silently-wrong seed. Proven crates only. The seed derives `nk` +
+  `enc_sk` via the existing HKDF domains.
+- **Watch-only split**: `ViewingKey = (enc_sk, owner)` detects + decrypts
+  incoming notes; it holds no `nk`, so no nullifier or spend witness can be
+  derived from it — spend authority is absent at the TYPE level.
+- **Note store + scanner**: owned notes = decrypted openings + leaf index + cm
+  + spent flag; incremental cursor (`outputs_since`); idempotent rescans (dedup
+  by leaf index); spent-state refresh from the chain's nullifier set (catches
+  spends by other instances of the same seed).
+- **Selection (deterministic, documented)**: the two highest-value unspent
+  notes, tie-broken by leaf index. The fixed 2-in shape means one spend
+  consumes exactly two notes; zero/dust change notes organically serve as the
+  second ("dummy") input later. Outputs are always exactly two (payment +
+  change-to-self, change may be 0) — §6 uniformity holds by construction.
+  Follow-ups: multi-tx consolidation; an in-circuit dummy-input flag.
+- **Tx object**: `{ proof_bytes (hiding monolith), public_values (44 u32
+  limbs), out_ciphertexts ([2 × 152 B]) }` — exactly what a node consumes.
+- **Node boundary (`ChainView`)**: `current_root`, `authentication_path`,
+  `nullifier_seen`, `outputs_since`, `output_count`. The in-memory chain and
+  the coming aegis-node integration share this trait; the node accept path is
+  `verify proof → anchor-root in window → no double-spend → append outputs +
+  record nullifiers` (`InMemoryChain::submit`).
+- **Root management (honest strategy)**: the tree advances between path fetch
+  and node processing, so wallets always fetch a FRESH path at the current
+  root and prove against that anchor; the node accepts any of the last
+  `ROOT_WINDOW = 100` roots (Zcash-anchor style sliding window); staler
+  anchors ⇒ re-fetch + re-prove. The engine's
+  `build_spend_trace_with_paths(inputs, paths, root, …)` is the wallet-side
+  entry (no whole-tree access needed).
+- **e2e rehearsal (passing)**: three wallets, address-string-only payments
+  A→B→C→A on the in-memory chain with real hiding proofs; change found by the
+  senders' own scans; balances reconcile exactly (fees burn); a stale wallet
+  instance's double-spend AND a replayed tx are rejected by the nullifier set;
+  the watch-only key sees B's payments (800 + faucet 50) but cannot spend.
+
+Deferred: keystore file format/serde + CLI, out_ct sender recovery, note-store
+persistence, fee-to-miner accounting (fees burn in the rehearsal), in-circuit
+dummy-input flag.
+
 ## Next (in order)
-1. Wallet: keystore-at-rest + scan loop + spend orchestration over
-   address/note_encryption + the monolith witness.
+1. ~~Wallet~~ DONE (see the wallet section above).
 2. Sender-recovery slot (`out_ct`, N7 analog) + memo semantics.
 3. Peg contract wiring on the settlement guest; narrow-trace optimization
    (client prove < 1 s AND cheaper settlement).
