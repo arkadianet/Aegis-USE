@@ -91,9 +91,12 @@ foundation; the ecosystem pivoted to recursion-friendly proving from day one).
 Combining both, the argument sharpens to a **floor**, and the distinction that
 matters is aggregation vs accumulation:
 
-- **Aggregation** (Bulletproofs range-proof aggregation): turns N proofs into one,
-  but the verifier MSM stays ~**linear** in the batch — a constant-factor speedup,
-  NOT amortization. A big batch is still a big MSM.
+- **Aggregation** (Bulletproofs `batch_verify`): **[CORRECTED 2026-07-17 by the
+  accumulation feasibility spike — this was wrong.]** Measured, `batch_verify`
+  amortizes the DOMINANT term: the heavy ~16k-point MSM is over a *shared*
+  generator basis, so it's paid once per batch; only ~79 pts/proof is linear.
+  **100 proofs = 1.47× one proof, not 100× — real batch-independent amortization,
+  free today, no Halo/accumulation construction needed.**
 - **Accumulation** (Halo/IPA-style): defers to ONE final MSM of size independent of
   N. This DOES amortize N → 1. **But that one MSM is still over secp/secq**, i.e.
   still non-native in RISC0 ≈ the ~14B-cycle (hours) foreign verification.
