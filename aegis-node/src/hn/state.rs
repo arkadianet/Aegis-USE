@@ -17,6 +17,35 @@ use aegis_hn_wallet::{ChainView, SpendCircuit};
 use p3_field::{PrimeCharacteristicRing, PrimeField32};
 use serde::{Deserialize, Serialize};
 
+/// The merge-mining anchor: the STARK-devnet Ergo header this hn block is mined
+/// against. Merge-mining binds hn liveness to the devnet's Autolykos PoW chain —
+/// each hn block references a real, advancing devnet header.
+///
+/// ⚠ CONSENSUS SURFACE (documented, partially implemented). This pass carries
+/// the anchor and enforces MONOTONICITY (the devnet height a block anchors to
+/// never goes backwards) + non-empty id, and the deployment's miner only
+/// anchors to a header it fetched from the live devnet. The FULL aux-PoW binding
+/// — the devnet block's extension Merkle-commits to the hn `state_root`, so one
+/// solved Autolykos PoW is bound to exactly one hn block (reusing
+/// `crate::auxpow::extension_root` + a `BatchMerkleProof`, verified with
+/// `ergo_crypto::autolykos::v2::check_pow_v2`) — is the remaining step. Until it
+/// lands, the anchor is a devnet-paced liveness scaffold, not yet PoW-binding.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuxAnchor {
+    pub devnet_header_id: [u8; 32],
+    pub devnet_height: u64,
+}
+
+impl AuxAnchor {
+    /// The genesis anchor (before any devnet binding).
+    pub fn genesis() -> Self {
+        Self {
+            devnet_header_id: [0u8; 32],
+            devnet_height: 0,
+        }
+    }
+}
+
 /// Minimum fee (base units) a shielded tx must pay to be admitted — a spam
 /// floor checked from the public fee limbs BEFORE the expensive proof verify.
 pub const MIN_FEE: u64 = 1;
@@ -44,6 +73,8 @@ pub struct HnBlock {
     /// `true` for a mined block (coinbase = emission+fees, subject to maturity);
     /// `false` for a genesis/faucet allocation (immediately spendable).
     pub coinbase_is_reward: bool,
+    /// The merge-mining devnet anchor (monotone across blocks).
+    pub anchor: AuxAnchor,
 }
 
 /// Captured prior state for an exact rollback.
@@ -52,6 +83,7 @@ pub struct HnBlockUndo {
     added_nullifiers: Vec<[u32; DIGEST_ELEMS]>,
     prev_output_count: usize,
     prev_height: u64,
+    prev_anchor_height: u64,
     /// A root evicted from the front of the window when this block's tip root
     /// was pushed (restored on rollback so the window is exact).
     evicted_root: Option<Digest>,
@@ -74,6 +106,8 @@ pub enum HnError {
     FeeTooLow,
     #[error("block prev_root does not match the current tip")]
     PrevRootMismatch,
+    #[error("merge-mining anchor regressed (devnet height went backwards)")]
+    AnchorRegressed,
     #[error("block state_root does not match the applied tip")]
     StateRootMismatch,
 }
@@ -86,6 +120,8 @@ pub struct HnState {
     recent_roots: VecDeque<Digest>,
     outputs: Vec<OutputRecord>,
     height: u64,
+    /// The devnet height the last block anchored to (monotone).
+    anchor_height: u64,
 }
 
 impl Default for HnState {
@@ -106,6 +142,7 @@ impl HnState {
             recent_roots,
             outputs: Vec::new(),
             height: 0,
+            anchor_height: 0,
         }
     }
 
@@ -199,6 +236,10 @@ impl HnState {
         if limbs_to_digest(&block.prev_root) != self.tree.root() {
             return Err(HnError::PrevRootMismatch);
         }
+        // Merge-mining anchor must never regress (devnet height monotone).
+        if block.anchor.devnet_height < self.anchor_height {
+            return Err(HnError::AnchorRegressed);
+        }
         // ---- validate everything before mutating ----
         let mut seen: HashSet<[u32; DIGEST_ELEMS]> = HashSet::new();
         let mut all_nfs: Vec<[u32; DIGEST_ELEMS]> = Vec::with_capacity(2 * block.txs.len());
@@ -219,6 +260,7 @@ impl HnState {
             added_nullifiers: all_nfs.clone(),
             prev_output_count: self.outputs.len(),
             prev_height: self.height,
+            prev_anchor_height: self.anchor_height,
             evicted_root: None,
         };
 
@@ -257,6 +299,7 @@ impl HnState {
         }
         self.recent_roots.push_back(tip);
         self.height += 1;
+        self.anchor_height = block.anchor.devnet_height;
         Ok(undo)
     }
 
@@ -273,6 +316,7 @@ impl HnState {
         self.cm_leaves.truncate(undo.prev_leaf_count);
         self.tree = rebuild(&self.cm_leaves);
         self.height = undo.prev_height;
+        self.anchor_height = undo.prev_anchor_height;
     }
 
     /// Compute a block's `state_root` given the current tip and the block's
@@ -349,6 +393,7 @@ mod tests {
             coinbase_cm: digest_to_limbs(&mint.cm),
             coinbase_ct: mint.ciphertext,
             coinbase_is_reward: true,
+            anchor: AuxAnchor::genesis(),
         };
 
         let undo = st.apply_block(&block, &circuit).unwrap();
@@ -387,6 +432,7 @@ mod tests {
             coinbase_cm: digest_to_limbs(&mint.cm),
             coinbase_ct: mint.ciphertext,
             coinbase_is_reward: true,
+            anchor: AuxAnchor::genesis(),
         };
         assert!(matches!(
             st.apply_block(&bad, &circuit),

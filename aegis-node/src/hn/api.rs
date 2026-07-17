@@ -167,6 +167,24 @@ fn handle_get(s: &mut TcpStream, state: &HnApiState, target: &str) -> std::io::R
         ),
         "/hn/v1/count" => respond(s, 200, chain.output_count().to_string().as_bytes()),
         "/hn/v1/tipheight" => respond(s, 200, chain.tip_height().to_string().as_bytes()),
+        // ----- P2P block feed (a syncing peer pulls blocks from `from`) -----
+        "/hn/v1/blockcount" => respond(s, 200, chain.block_count().to_string().as_bytes()),
+        "/hn/v1/mempool" => respond(
+            s,
+            200,
+            hex::encode(postcard::to_allocvec(&chain.mempool_txs()).unwrap()).as_bytes(),
+        ),
+        "/hn/v1/blocks" => {
+            let from: u64 = query
+                .split_once('=')
+                .and_then(|(_, v)| v.parse().ok())
+                .unwrap_or(0);
+            respond(
+                s,
+                200,
+                hex::encode(postcard::to_allocvec(&chain.blocks_since(from)).unwrap()).as_bytes(),
+            )
+        }
         "/hn/v1/outputs" => {
             let from: u64 = query
                 .split_once('=')

@@ -401,12 +401,65 @@ in-field proof verification (~52 ms/proof native).
   (scan → pay by address → submit+mine → double-spend rejected → restart → rescan
   → fresh spend), plus the in-process e2e's emission/fee/maturity checks.
 
-**Deferred (explicitly NEXT):** fold the hash-native tx into the LIVE
-P2P-gossip + aux-PoW merge-mining + fork-choice consensus (the block-production
-step + HTTP service exist and are tested; wiring them into the live networked
-consensus + chain-profile selection is the testnet-cut milestone); testnet cut +
-multi-node; per-peer unverified-tx rate limiting; consensus-enforced coinbase
-maturity over hidden inputs; peg-in enablement.
+## Networked testnet cut (multi-node, merge-mined)
+
+The hash-native subsystem now runs as a **networked, multi-node, merge-mined
+testnet** (`hn_node` binary + `~/apps/aegis-testnet-hn/`).
+
+- **Chain params, pinned (not scattered constants).** `hn::params::HnChainParams`
+  centralizes the profile; `HnChainParams::testnet()` fixes: chain id
+  `0x484E0001`, `ROOT_WINDOW` 100, coinbase maturity 5, `MIN_FEE` 1, emission 50
+  (+fees), and the genesis allocation (2 × 500,000,000 to the faucet). The faucet
+  key derives from the PUBLIC seed `aegis-hn-testnet-faucet-v1`
+  (`hn::params::faucet_address()`) — anyone with the seed can spend it; it exists
+  only to fund the e2e campaign. The old Curve-Trees testnet profile is untouched
+  and still builds/runs.
+- **P2P: HTTP block feed + mempool gossip (IBD from genesis).** The node's
+  `ChainView` HTTP surface gained a peer feed: `GET /hn/v1/{blockcount,blocks?from=,
+  mempool}` serve postcard-framed `Vec<HnBlock>` / `Vec<Tx>`. A follower's
+  `HnChain::sync_from(peer)` pulls blocks `>= block_count` and applies them by
+  **linear-extension fork-choice** (`ingest_block`: accept only a block that
+  extends the local tip, dropping any landed mempool txs); `pull_mempool(peer)`
+  gossips unconfirmed txs. IBD from genesis = `sync_from` starting at count 0.
+- **Aux-PoW / hn-header binding (consensus surface — honest status).** Each
+  `HnBlock` carries an `AuxAnchor { devnet_header_id, devnet_height }`; the miner
+  fetches the devnet's current best header (`hn::auxpow::fetch_devnet_anchor`,
+  `GET /info`, 5 s timeout) and `apply_block` enforces the anchor height is
+  **monotone** (`HnError::AnchorRegressed` otherwise), so hn liveness is **paced
+  by the devnet's Autolykos PoW chain**. The FULL binding — the devnet block's
+  extension Merkle-commits to the hn `state_root` so one solved PoW binds exactly
+  one hn block (reusing `crate::auxpow::extension_root` + a `BatchMerkleProof`,
+  verified via `ergo_crypto::autolykos::v2::check_pow_v2`) — is the remaining
+  consensus step; until it lands the anchor is a devnet-paced scaffold, not yet
+  PoW-binding. Aux-PoW-weight reorg is likewise deferred (single-producer +
+  followers only need linear extension).
+- **Node loop (`hn_node`).** A blocking std-thread loop (no async runtime):
+  resume-or-genesis from the persisted block log, spawn the HTTP server, then
+  each tick optionally `sync_from`/`pull_mempool` a peer and optionally
+  `produce_block_anchored` against the live devnet header. Concurrency note: the
+  chain lives behind a single `Mutex`; the loop binds each locked call to a
+  temporary that drops at the statement `;` — an `if let … {} else {}` over the
+  lock expression would hold the guard across the `else` arm and self-deadlock the
+  server thread, so produce results are `let`-bound before the follow-up
+  `lock()`. The peer `HttpChain` client carries a 10 s request timeout so a dead
+  peer surfaces as an empty fetch rather than hanging the loop.
+- **Deployment (`~/apps/aegis-testnet-hn/`, separate from `~/apps/aegis-testnet`).**
+  `start.sh` boots node A (`:8750`, genesis + producer, merge-mined vs the devnet)
+  then node B (`:8751`, follower syncing A over the HTTP feed); `status.sh`
+  prints both heights+roots, `stop.sh` tears down. README documents topology,
+  the pinned param table, the faucet, and the aux-PoW deferral.
+- **Multi-node e2e** (`hn_multinode_e2e.rs`, in-process 2-node) + a live
+  networked run: two nodes IBD-converge on identical roots, advance together
+  (~1 block / 2 s tick), a faucet spend submitted to the follower propagates to
+  the producer and is mined, the recipient finds it via BOTH nodes, a double
+  spend is rejected on both, and a restarted follower replays its log and
+  re-syncs to the same root.
+
+**Deferred (explicitly NEXT):** the full aux-PoW commitment (extension-Merkle
+binding of the devnet PoW to the hn `state_root`) + aux-PoW-weight reorg;
+per-peer unverified-tx rate limiting; consensus-enforced coinbase maturity over
+hidden inputs; peg-in enablement; folding hn into the main Curve-Trees node's
+libp2p gossip layer (the hn testnet runs its own HTTP-feed P2P for now).
 
 ## Next (in order)
 1. ~~Wallet~~ DONE (see the wallet section above). ~~Node integration (single,

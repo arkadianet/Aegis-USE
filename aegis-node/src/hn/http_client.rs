@@ -19,9 +19,16 @@ pub struct HttpChain {
 
 impl HttpChain {
     pub fn new(base_url: impl Into<String>) -> Self {
+        // A per-request timeout so a stalled/unreachable peer surfaces as a
+        // failed fetch (empty result) rather than hanging the caller — a
+        // follower must not block its produce/serve loop on a dead peer.
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .expect("build reqwest client");
         Self {
             base: base_url.into(),
-            client: reqwest::blocking::Client::new(),
+            client,
         }
     }
 
@@ -54,6 +61,29 @@ impl HttpChain {
             Ok(())
         } else {
             Err(resp.text().unwrap_or_default())
+        }
+    }
+
+    /// The peer's block count (== its height) — the sync target.
+    pub fn peer_block_count(&self) -> u64 {
+        self.get("/hn/v1/blockcount")
+            .and_then(|t| t.parse().ok())
+            .unwrap_or(0)
+    }
+
+    /// Fetch the peer's blocks with height `>= from` (the IBD / gossip pull).
+    pub fn fetch_blocks(&self, from: u64) -> Vec<super::state::HnBlock> {
+        match self.get_hex(&format!("/hn/v1/blocks?from={from}")) {
+            Some(bytes) => postcard::from_bytes(&bytes).unwrap_or_default(),
+            None => Vec::new(),
+        }
+    }
+
+    /// Fetch the peer's mempool (tx gossip pull).
+    pub fn fetch_mempool(&self) -> Vec<Tx> {
+        match self.get_hex("/hn/v1/mempool") {
+            Some(bytes) => postcard::from_bytes(&bytes).unwrap_or_default(),
+            None => Vec::new(),
         }
     }
 

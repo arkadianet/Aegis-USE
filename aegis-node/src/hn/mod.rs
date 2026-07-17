@@ -13,12 +13,15 @@
 //!   production + the wallet-facing `ChainView`/submit boundary.
 
 pub mod api;
+pub mod auxpow;
 pub mod chain;
 pub mod http_client;
 pub mod mint;
+pub mod params;
 pub mod state;
 
 pub use api::{HnApiServer, HnApiState};
 pub use chain::HnChain;
 pub use http_client::HttpChain;
+pub use params::HnChainParams;
 pub use state::{HnBlock, HnError, HnState};

@@ -19,7 +19,7 @@ use aegis_hn_wallet::chain::OutputRecord;
 use aegis_hn_wallet::{ChainView, SpendCircuit, Tx};
 
 use super::mint::{coinbase_note, MintOut};
-use super::state::{digest_to_limbs, limbs_to_digest, HnBlock, HnError, HnState};
+use super::state::{digest_to_limbs, limbs_to_digest, AuxAnchor, HnBlock, HnError, HnState};
 
 const BLOCK_LOG: &str = "hn_blocks.log";
 const DOMAIN_BLOCK_ID: u32 = 0x0B10;
@@ -29,21 +29,25 @@ const DOMAIN_BLOCK_ID: u32 = 0x0B10;
 /// the miner (no burning).
 pub const EMISSION_PER_BLOCK: u64 = 50;
 
-/// The node's hash-native chain: state + circuit keys + mempool, persisted to
-/// `dir`.
+/// The node's hash-native chain: state + circuit keys + mempool + the block
+/// log (kept in memory for P2P serving), persisted to `dir`.
 pub struct HnChain {
     state: HnState,
     circuit: SpendCircuit,
     dir: PathBuf,
     mempool: Vec<Tx>,
     mempool_nfs: HashSet<[u32; DIGEST_ELEMS]>,
+    /// Every applied block (index == height) — served to syncing peers.
+    blocks: Vec<HnBlock>,
+    params: super::params::HnChainParams,
 }
 
 impl HnChain {
     /// A fresh chain persisted under `dir` (creates the dir). `circuit` MUST be
-    /// the reproducible published keys (`SpendCircuit::new` — fixed public preprocessed
-    /// salt) so the
-    /// vk is stable across restarts.
+    /// the reproducible published keys (`SpendCircuit::new` — fixed public
+    /// preprocessed salt) so the vk is stable across restarts. No genesis
+    /// allocation (tests that fund manually); use [`Self::create_with_params`]
+    /// for a real chain profile.
     pub fn create(dir: impl AsRef<Path>, circuit: SpendCircuit) -> std::io::Result<Self> {
         std::fs::create_dir_all(dir.as_ref())?;
         Ok(Self {
@@ -52,7 +56,27 @@ impl HnChain {
             dir: dir.as_ref().to_path_buf(),
             mempool: Vec::new(),
             mempool_nfs: HashSet::new(),
+            blocks: Vec::new(),
+            params: super::params::HnChainParams::testnet(),
         })
+    }
+
+    /// A fresh chain for a chain profile: applies the genesis allocation
+    /// (`params.genesis`) as immediately-spendable faucet notes at height 0.
+    pub fn create_with_params(
+        dir: impl AsRef<Path>,
+        circuit: SpendCircuit,
+        params: super::params::HnChainParams,
+    ) -> std::io::Result<Self> {
+        let mut chain = Self::create(dir, circuit)?;
+        let genesis = params.genesis.clone();
+        chain.params = params;
+        for (addr, amount) in &genesis {
+            chain
+                .fund(addr, *amount)
+                .expect("genesis allocation applies");
+        }
+        Ok(chain)
     }
 
     /// Open an existing chain: replay the persisted block log to rebuild state
@@ -68,8 +92,78 @@ impl HnChain {
                 .state
                 .apply_block(&block, &chain.circuit)
                 .expect("a persisted block must re-apply cleanly");
+            chain.blocks.push(block);
         }
         Ok(chain)
+    }
+
+    /// The chain's parameters.
+    pub fn params(&self) -> &super::params::HnChainParams {
+        &self.params
+    }
+
+    /// Sync from a peer over HTTP: pull every block the peer has beyond our tip
+    /// and ingest it (IBD from genesis if we are empty). Returns the number of
+    /// blocks applied. Invalid peer blocks stop the sync (a peer can withhold,
+    /// never forge — every block is re-validated by `apply_block`).
+    pub fn sync_from(&mut self, peer: &super::http_client::HttpChain) -> usize {
+        let mut applied = 0;
+        loop {
+            let target = peer.peer_block_count();
+            if self.block_count() >= target {
+                break;
+            }
+            let batch = peer.fetch_blocks(self.block_count());
+            if batch.is_empty() {
+                break;
+            }
+            for block in batch {
+                match self.ingest_block(block) {
+                    Ok(true) => applied += 1,
+                    Ok(false) => {}
+                    Err(_) => return applied, // invalid — stop
+                }
+            }
+        }
+        applied
+    }
+
+    /// The number of blocks (== height) — the sync cursor a peer catches up to.
+    pub fn block_count(&self) -> u64 {
+        self.blocks.len() as u64
+    }
+
+    /// Blocks with height `>= from` — the P2P block feed a syncing peer pulls.
+    pub fn blocks_since(&self, from: u64) -> Vec<HnBlock> {
+        self.blocks
+            .get(from as usize..)
+            .map(<[HnBlock]>::to_vec)
+            .unwrap_or_default()
+    }
+
+    /// Ingest a block received from a peer (P2P / IBD). Fork choice this pass is
+    /// **longest-valid-chain by linear extension**: a block is accepted iff it
+    /// extends the current tip (`height == self.height` and its `prev_root`
+    /// matches, both re-checked by `apply_block`); a stale/duplicate block
+    /// (height already reached) is a no-op; anything else is rejected. Deep
+    /// reorg / aux-PoW-weight fork choice across competing tips is deferred (see
+    /// dev-docs) — for a single-producer testnet with followers this suffices.
+    pub fn ingest_block(&mut self, block: HnBlock) -> Result<bool, HnError> {
+        if block.height < self.state.height() {
+            return Ok(false); // already have it
+        }
+        self.state.apply_block(&block, &self.circuit)?;
+        self.blocks.push(block.clone());
+        self.persist(&block);
+        // Drop any mempool tx whose nullifier just landed on-chain.
+        self.mempool.retain(|tx| {
+            let nfs = [
+                digest_at_pub(tx, aegis_engine::spend::monolith::PUB_NF0),
+                digest_at_pub(tx, aegis_engine::spend::monolith::PUB_NF1),
+            ];
+            !nfs.iter().any(|nf| self.state.nullifier_seen(nf))
+        });
+        Ok(true)
     }
 
     pub fn height(&self) -> u64 {
@@ -78,6 +172,23 @@ impl HnChain {
 
     pub fn mempool_len(&self) -> usize {
         self.mempool.len()
+    }
+
+    /// The pending mempool txs (served for gossip).
+    pub fn mempool_txs(&self) -> Vec<Tx> {
+        self.mempool.clone()
+    }
+
+    /// Pull a peer's mempool and admit each tx locally (tx gossip). Returns how
+    /// many were newly admitted; already-known / invalid ones are skipped.
+    pub fn pull_mempool(&mut self, peer: &super::http_client::HttpChain) -> usize {
+        let mut n = 0;
+        for tx in peer.fetch_mempool() {
+            if self.submit(tx).is_ok() {
+                n += 1;
+            }
+        }
+        n
     }
 
     /// The published verifying key (a wallet/light client needs it too).
@@ -118,10 +229,26 @@ impl HnChain {
         EMISSION_PER_BLOCK.saturating_add(fees)
     }
 
-    /// Produce and persist one block from the current mempool, minting the
-    /// coinbase (emission + fees) to `miner`. This is the node's block-assembly
-    /// step (a production loop or a miner calls it); it clears the mempool.
+    /// Produce a block with an AUTO monotone anchor (`devnet_height = height`).
+    /// Local/test path; the deployment uses [`Self::produce_block_anchored`]
+    /// with a header fetched from the live devnet.
     pub fn produce_block(&mut self, miner: &Address) -> Result<(), HnError> {
+        let id = self.block_id();
+        let anchor = AuxAnchor {
+            devnet_header_id: id,
+            devnet_height: self.state.height(),
+        };
+        self.produce_block_anchored(miner, anchor)
+    }
+
+    /// Produce and persist one block from the current mempool, minting the
+    /// coinbase (emission + fees) to `miner`, merge-mined against `anchor`
+    /// (a real devnet header for the deployment). Clears the mempool.
+    pub fn produce_block_anchored(
+        &mut self,
+        miner: &Address,
+        anchor: AuxAnchor,
+    ) -> Result<(), HnError> {
         let coinbase_amount = self.block_reward();
         let block_id = self.block_id();
         let MintOut {
@@ -146,8 +273,10 @@ impl HnChain {
             coinbase_cm: digest_to_limbs(&coinbase_cm),
             coinbase_ct,
             coinbase_is_reward: true,
+            anchor,
         };
         self.state.apply_block(&block, &self.circuit)?;
+        self.blocks.push(block.clone());
         self.persist(&block);
         self.mempool_nfs.clear();
         Ok(())
@@ -171,8 +300,10 @@ impl HnChain {
             coinbase_cm: digest_to_limbs(&coinbase_cm),
             coinbase_ct,
             coinbase_is_reward: false,
+            anchor: AuxAnchor::genesis(),
         };
         self.state.apply_block(&block, &self.circuit)?;
+        self.blocks.push(block.clone());
         self.persist(&block);
         Ok(())
     }
