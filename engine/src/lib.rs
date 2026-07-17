@@ -22,8 +22,8 @@
 //! the current engine. Not wired into any consensus path.
 
 pub mod commit;
+pub mod config;
 pub mod merkle;
 pub mod nullifier;
 pub mod poseidon;
-// The spend AIR is added on top of the native layer once it is green:
-// pub mod spend;
+pub mod spend;
