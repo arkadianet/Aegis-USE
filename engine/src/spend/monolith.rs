@@ -89,13 +89,20 @@ const P_CM2LEAF: usize = 5;
 const P_OUTPUT: usize = 6;
 const PRE_W: usize = 7;
 
-// --- public-value offsets ---
-const PUB_ROOT: usize = 0;
-const PUB_NF0: usize = 8;
-const PUB_NF1: usize = 16;
-const PUB_CMO0: usize = 24;
-const PUB_CMO1: usize = 32;
-const PUB_FEE: usize = 40;
+// --- public-value offsets (exposed so a settlement verifier can read the
+//     journal effects of each spend: root, nullifiers, output commitments) ---
+/// Offset of the accumulator root in the public values.
+pub const PUB_ROOT: usize = 0;
+/// Offset of input 0's revealed nullifier.
+pub const PUB_NF0: usize = 8;
+/// Offset of input 1's revealed nullifier.
+pub const PUB_NF1: usize = 16;
+/// Offset of output 0's commitment.
+pub const PUB_CMO0: usize = 24;
+/// Offset of output 1's commitment.
+pub const PUB_CMO1: usize = 32;
+/// Offset of the fee.
+pub const PUB_FEE: usize = 40;
 /// Number of public values: root ‖ nf0 ‖ nf1 ‖ cm_out0 ‖ cm_out1 ‖ fee.
 pub const N_PUB: usize = 41;
 
