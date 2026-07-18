@@ -1,7 +1,15 @@
 # Aegis — privacy specification
 
+> **⚠️ LEGACY — prior (Curve-Trees) engine.** This spec describes the shielded
+> pool over **Curve Trees + Bulletproofs**, which the
+> [ADR](./adr-hash-native-engine.md) **superseded** with the live **hash-native**
+> engine (Plonky3 / BabyBear / Poseidon2). The privacy *goals and threat model*
+> here still hold; the *proving mechanism* does not. For the live engine read
+> [hash-native-engine-design.md](./hash-native-engine-design.md) and
+> [hash-native-spend-circuit.md](./hash-native-spend-circuit.md).
+
 **Date:** 2026-07-11  
-**Status:** canon  
+**Status:** legacy (Curve-Trees engine; superseded — see banner)  
 **Product:** [aegis-spec.md](./aegis-spec.md)
 
 ---

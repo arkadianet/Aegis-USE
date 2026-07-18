@@ -1,5 +1,12 @@
 # M4 — wallet + keys (design)
 
+> **⚠️ LEGACY design (Curve-Trees era).** The STARK/PQ pivot this doc anticipated
+> *happened*: Aegis is hash-native ([ADR](./adr-hash-native-engine.md)) and the
+> live wallet is **`aegis-hn-wallet`** (`engine/wallet` — keystore, scanner, tx
+> building, built and integrated), not the `aegis-wallet` crate described here.
+> The key-hierarchy / address / scan *concepts* below still inform it; the
+> proving-facing details are superseded.
+
 > The **send / receive / verify-a-payment** layer — the actual point of a private
 > payment chain. This is a *design*; the key-hierarchy / address / scan
 > *orchestration* is buildable under the freeze-hold, but note-encryption and the

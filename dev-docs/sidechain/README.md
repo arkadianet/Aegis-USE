@@ -1,24 +1,53 @@
 # Aegis design docs
 
-**Status:** Consolidated primary docs (2026-07-11; fee redesign 2026-07-12).  
-**Stage: design — nothing is frozen.** "Decided" means current-best-reasoning, revisable until scaffold; revisions go through these docs so the trail stays coherent.  
+**Status:** Aegis is a **hash-native private sidechain** (Plonky3 / BabyBear /
+Poseidon2) with a **trustless `verifyStark` peg bridge**. The engine, ZK spend
+proofs, note encryption, wallet, and node are **built and integrated**; a
+networked merge-mined testnet is cut; and the **first fully trustless peg
+round-trip completed 2026-07-19** on the STARK devnet (release tx
+`01cba5ace7d9aeb2f4a8e9bec9e277db5dfbe3f977a8a5d2573fdb31169831d6`, accepted).
+What remains: the rigorous e2e campaign, prover-speed optimization, the
+[HARDENING.md](./HARDENING.md) tiers, and the external-review value-gate before
+any real value.  
 **Archive:** Superseded notes live under [`notes/archive/`](./notes/archive/) — do not use as primary.
 
-> **Bridge status (2026-07-17, operator decision):** the Aegis bridge is the
-> **trustless verifyStark settlement design** —
-> [stark-settlement-design.md](./stark-settlement-design.md). The k-of-n
+> **Engine (2026-07-17 ADR, ACCEPTED):** the shielded pool is **hash-native**
+> (Plonky3 uni-STARK over BabyBear, Poseidon2 commitments, `owner = H(nk)`,
+> Poseidon-Merkle accumulator), **superseding** the Curve-Trees + Bulletproofs
+> engine. Rationale + measured A-vs-B evidence:
+> [adr-hash-native-engine.md](./adr-hash-native-engine.md) and
+> [spike-results/](./spike-results/). The Curve-Trees engine (`aegis-crypto`,
+> `vendor/curve-trees`, `aegis-wallet`) is retained as the prior baseline but is
+> **not the live path**; docs that describe it are legacy context.
+
+> **Bridge (trustless):** the Aegis bridge is the **trustless verifyStark
+> settlement design** —
+> [stark-settlement-design.md](./stark-settlement-design.md),
+> [stark-devnet-integration.md](./stark-devnet-integration.md). A settlement STARK
+> is verified *on Ergo* by `verifyStark` (EIP-0045, `0xB9`) and `PegVault` releases
+> against it — **round-trip proven on devnet (2026-07-19)**. The k-of-n
 > **attester committee bridge (S1a–S1d) is RETIRED**: the `aegis-attest` crate,
 > the node attestation service, `AttestRegistry.es`, and the committee authority
 > in `SideChainState.es` were removed from `main` and are preserved at git tag
 > `attester-bridge-final` (its design docs `attester-infra.md` /
-> `s1c-attester-unlock.md` live there too). `SideChainState.es` keeps its
-> transition-constrained shape with a placeholder authority slot where the
-> verifyStark predicate plugs in. Mainnet activation of the trustless bridge
-> awaits upstream EIP-0045 (ergoplatform/eips#103, sigmastate-interpreter#1116).
-> Older docs below that describe attester/`V_cap` peg-out mechanics are
-> historical context, not the current plan.
+> `s1c-attester-unlock.md` live there too). Mainnet activation awaits upstream
+> EIP-0045 (ergoplatform/eips#103, sigmastate-interpreter#1116). Older docs that
+> describe attester/`V_cap` peg-out mechanics are historical context, not the
+> current plan.
 
-## Start here
+## The live architecture (read in this order)
+
+| Doc | Contents |
+|---|---|
+| **[adr-hash-native-engine.md](./adr-hash-native-engine.md)** | The decision: Aegis goes hash-native (Option B), superseding Curve-Trees — with the price accepted and the roadmap |
+| **[spike-results/](./spike-results/)** | The measured A-vs-B settlement-cost evidence the ADR rests on |
+| **[hash-native-engine-design.md](./hash-native-engine-design.md)** | The live engine: Poseidon2/commitment/nullifier/Merkle, the STARK AIRs |
+| **[hash-native-spend-circuit.md](./hash-native-spend-circuit.md)** | The 2-in/2-out ZK spend circuit (hiding, value-conservation, range, membership) |
+| **[stark-settlement-design.md](./stark-settlement-design.md)** | Trustless peg-out: the settlement statement + incremental O(epoch) transition |
+| **[stark-devnet-integration.md](./stark-devnet-integration.md)** | `verifyStark` (`0xB9`) on the devnet, `PegVault`, the proven round-trip |
+| **[HARDENING.md](./HARDENING.md)** | Consolidated post-campaign roadmap; tiers; the real-value review-gate |
+
+## Foundational specs (protocol depth)
 
 | Doc | Contents |
 |---|---|
@@ -45,7 +74,7 @@
 
 ## One-liner
 
-**Aegis** — merge-mined Ergo sidechain for private **USE** payments (`aegis1…` addresses). Global shielded note pool (Curve Trees + Bulletproofs). 1:1 peg via ErgoScript receipts + vault. Crates: `aegis-spec` / `aegis-node` / `aegis-mm`.
+**Aegis** — merge-mined Ergo sidechain for private **USE** payments (`aegis1…` addresses). Global shielded note pool, **hash-native** (Plonky3 uni-STARK / BabyBear / Poseidon2-Merkle). 1:1 peg with a **trustless `verifyStark` bridge** (settlement STARK verified on Ergo → `PegVault` release). Live crates: `aegis-engine` (`engine/`) / `aegis-hn-wallet` / `aegis-node`; legacy Curve-Trees engine retained but not the live path.
 
 ## Conflict resolution
 

@@ -1,5 +1,14 @@
 # Aegis — note protocol specification (G1.6)
 
+> **⚠️ LEGACY — prior (Curve-Trees) engine.** This note protocol targets the
+> **Curve Trees + Bulletproofs** shielded pool, **superseded** by the live
+> **hash-native** engine per the [ADR](./adr-hash-native-engine.md). The note
+> *concepts* (commitments, nullifiers, encryption, diversified addresses) carry
+> over; the concrete generators/membership/range mechanics here are Curve-Trees-
+> specific. Live engine:
+> [hash-native-engine-design.md](./hash-native-engine-design.md),
+> [hash-native-spend-circuit.md](./hash-native-spend-circuit.md).
+
 **Date:** 2026-07-12  
 **Status:** spec fully pinned post-review (2026-07-12, [g16-adversarial-review.md](./g16-adversarial-review.md)). All 20 findings addressed: spend model + exact nullifier form (§3), generators via RFC 9380 SvdW (§0), leaf-index hidden (§4), fee-in-circuit (§4), dummies (§6), OVK slot (§5), diversified addresses (§2). **No open design forks.** The single remaining gate before TVL is an external cryptographer *certifying the composed circuit's soundness* — a check of a finished spec, not a design task. Grounded in `~/coding/reference/crypto/curve-trees/` (membership/range + inverse-tag nullifier) + Zcash Sapling/Orchard (structural-uniqueness discipline) + RFC 9380 (generators); consensus numbers in `params.md`.
 

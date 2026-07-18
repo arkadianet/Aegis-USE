@@ -8,6 +8,14 @@ demonstration; the crypto-maturity tier gates **real value** only.
 > that's its job) → this list, **consensus soundness first**, scaling second,
 > crypto-maturity + external review last (the value gate).
 
+> **Milestone reached — first trustless round-trip (2026-07-19).** The bridge
+> finale landed: a full hash-native peg round-trip completed trustlessly on the
+> STARK devnet — `verifyStark` (EIP-0045 opcode `0xB9`) verified the settlement
+> proof on-chain and the `PegVault` released against it. Release tx
+> `01cba5ace7d9aeb2f4a8e9bec9e277db5dfbe3f977a8a5d2573fdb31169831d6` was accepted
+> by the devnet. Next in sequence: the rigorous e2e campaign, which will surface
+> more items into the tiers below.
+
 ## Tier 1 — consensus soundness (do not ship real value without)
 
 - [ ] **Full aux-PoW commitment.** Bind the merge-mined Ergo PoW to the hn
@@ -27,11 +35,12 @@ demonstration; the crypto-maturity tier gates **real value** only.
 
 ## Tier 2 — performance & scaling (makes settlement cheap/quick)
 
-- [ ] **Incremental / checkpointed state transition.** Kills the per-block sweep
-      term (~4.5M cycles/block) that dominates a long-epoch settlement proof — the
-      chain maintains running checkpoints so settlement stops re-walking history.
-      *Promoted to a settler-economics prerequisite:* the difference between a
-      45-min hourly job and a minutes-class one.
+- [x] ~~**Incremental / checkpointed state transition.**~~ **DONE (v4 cut,
+      `676664a`/`092fc87`).** The note-tree maintains an O(epoch) running frontier
+      so settlement no longer re-walks history — kills the per-block sweep term
+      (~4.5M cycles/block) that dominated a long-epoch settlement proof, turning a
+      45-min hourly job into a minutes-class one. This also *decouples* block-time
+      choice from settlement cost (see the block-time table below).
 - [ ] **Narrow-trace rework.** ~3–10× off the per-tx verify term, and pushes phone
       proving back under ~1s (currently extrapolates to ~1.5–4s post-ZK). Same
       lever that cheapens settlement.

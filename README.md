@@ -33,6 +33,24 @@ produces a zero-knowledge proof that says "I own a valid note, the money adds up
 and here is its one-time spend-marker" — without revealing *which* note. That
 spend-marker (a *nullifier*) stops double-spends while keeping you anonymous.
 
+**Hash-native crypto (Plonky3 / BabyBear / Poseidon2).** The shielded pool is a
+uni-STARK over the BabyBear field with Poseidon2 commitments and hash-based keys
+(`owner = H(nk)`, no elliptic curve in the note/spend path) over a Poseidon-Merkle
+note accumulator. This is a deliberate choice: because a client spend proof's
+verifier is FRI/hash-native, a settlement STARK can re-verify it cheaply, in-field
+— which is what makes the **trustless peg bridge** below possible. It replaces the
+earlier Curve-Trees + Bulletproofs engine (see the
+[ADR](dev-docs/sidechain/adr-hash-native-engine.md)).
+
+**Trustless peg bridge — proven.** Redeeming a note back to real USE on Ergo needs
+no trusted committee. A settlement proof is verified *on Ergo itself* by the
+`verifyStark` opcode (EIP-0045, `0xB9`), and the `PegVault` ErgoScript releases the
+locked USE only against a valid proof whose public journal binds the recipient and
+amount. The **first fully trustless round-trip completed 2026-07-19** on the STARK
+devnet — release tx
+`01cba5ace7d9aeb2f4a8e9bec9e277db5dfbe3f977a8a5d2573fdb31169831d6`, accepted by the
+devnet.
+
 **Sending, receiving, and verifying a payment.** When you send 10 USE, you create
 a note for the recipient and **encrypt its contents to them**; only they can
 open it. Their wallet **scans** the chain with their *viewing key* and finds it —
@@ -63,23 +81,45 @@ hierarchy, what an explorer can show — read
 
 ## What exists today (honest status)
 
-The **consensus + crypto core is built and adversarially reviewed** — the private
-money, the peg-in verifier, the peg-out contracts (live + fixed on testnet). What
-is **not built yet**: the networking, the node API, the mempool, the wallet, and
-the explorer. The binary today is a **dev block-producer** (it makes blocks and
-persists them) — *not yet* a networked, usable node. The [roadmap](ROADMAP.md)
-lays out the path from here.
+The hash-native private-payment engine is **built, integrated, and demonstrated
+end-to-end** — including the first trustless peg round-trip. The remaining work is
+hardening and the external-review value-gate, not core construction. Status:
+
+| Area | State |
+|---|---|
+| Hash-native engine (Poseidon2/Merkle/nullifier AIRs, spend circuit) | Built, adversarially tested (`engine/`) |
+| Zero-knowledge (hiding) spend proofs | Built — hiding wrapper + split hiding RNG |
+| 64-bit amounts, note encryption, payment addresses (send-to-a-stranger) | Built |
+| Wallet (`aegis-hn-wallet`: keystore, scanner, tx building) | Built |
+| Node (`aegis-node`): hash-native shielded pool, HTTP API, mempool, emission/fees | Built — persisted, reorg-safe |
+| Networked merge-mined testnet | Cut (multi-node) |
+| Incremental O(epoch) settlement transition (v4) | Built |
+| Trustless `verifyStark` peg bridge (peg-in + peg-out consensus, `PegVault`, settlement guest/prover) | **Round-trip proven on devnet (2026-07-19)** |
+| Rigorous e2e campaign, prover-speed optimization, remaining [HARDENING](dev-docs/sidechain/HARDENING.md) tiers | Next |
+| External crypto review (the real-value gate) | Not started — **do not put real value on any Aegis chain** |
+
+The trustless bridge activates on mainnet only once EIP-0045 `verifyStark` ships
+upstream; it runs on the STARK devnet today. The [roadmap](ROADMAP.md) and
+[HARDENING.md](dev-docs/sidechain/HARDENING.md) lay out the path from here.
 
 ## Layout
 
 | Crate / dir | Role |
 |---|---|
-| `aegis-spec` | Network identity + chain parameters (constants, no logic) |
-| `aegis-crypto` | The shielded-value crypto: notes, the nullifier, the spend/mint circuits |
-| `aegis-node` | Block / chain / state, the Ergo follower, the peg verifier, persistence |
-| `contracts` (`aegis-contracts`) | The six peg-out ErgoScript contracts, compiled + hash-pinned + tested against the live deployment |
-| `vendor/curve-trees` | Vendored Curve Trees / Bulletproofs proving stack (pinned) |
-| `dev-docs/sidechain` | Full protocol design, security analysis, the open-items register |
+| `engine/` (`aegis-engine`) | **The live hash-native engine** — Poseidon2/Merkle/nullifier AIRs, the ZK spend circuit, note encryption (nested workspace over Plonky3/BabyBear) |
+| `engine/wallet` (`aegis-hn-wallet`) | Hash-native wallet: keystore, chain scanner, tx building |
+| `aegis-node` | Block / chain / state, the hash-native shielded pool (`hn/`), Ergo follower, peg consensus, HTTP API, persistence |
+| `settlement/` | Settlement prover (RISC0 guest + host) — the peg-out STARK re-verified on Ergo |
+| `bridge-tools/` | Devnet `verifyStark` bridge tooling: `PegVault` ErgoTree (`0xB9`), deposit / release-tx assembly |
+| `contracts` (`aegis-contracts`) | The peg ErgoScript contracts, compiled + hash-pinned + tested against the live deployment |
+| `aegis-spec` / `aegis-types` | Network identity + chain parameters; shared domain types |
+| `aegis-crypto`, `aegis-wallet`, `vendor/curve-trees` | **Legacy — the prior Curve-Trees + Bulletproofs engine, superseded by the hash-native engine per the [ADR](dev-docs/sidechain/adr-hash-native-engine.md).** Retained (the old testnet still references it); not the live path. |
+| `dev-docs/sidechain` | Full protocol design, the ADR, security analysis, HARDENING checklist, open-items register |
+
+> The hash-native crates in `engine/` (and `settlement/`, `bridge-tools/`) are
+> **separate nested workspaces**, excluded from the root workspace so their
+> Plonky3 / RISC0 / devnet-ergo dependency graphs don't perturb the main crates.
+> Build each with its own `CARGO_TARGET_DIR`.
 
 Ergo consensus primitives (serialization, PoW, NiPoPoW, REST-JSON decode) are
 **git dependencies on [`arkadianet/ergo`](https://github.com/arkadianet/ergo)**
@@ -89,20 +129,39 @@ node without forking it.
 ## Build
 
 ```sh
+# Root workspace (node, wallet, contracts, spec/types):
 cargo build --workspace         # first build pulls the pinned ergo crates
 cargo test  --workspace         # oracle tests run against committed real-chain vectors
+
+# Hash-native engine (nested workspace — use an isolated target dir):
+CARGO_TARGET_DIR=~/.cache/cargo-target-aegis-engine cargo test --workspace --manifest-path engine/Cargo.toml
 ```
+
+`settlement/` (RISC0) and `bridge-tools/` are further nested workspaces that
+path-depend on a sibling `ergo` checkout carrying the devnet `verifyStark` opcode;
+build them with their own `CARGO_TARGET_DIR` per their manifest headers.
 
 Rust toolchain is pinned in `rust-toolchain.toml`. On low-memory machines,
 `cargo build -j4` avoids OOM during the proving-stack compile.
 
 ## Docs
 
-- **[ROADMAP.md](ROADMAP.md)** — milestones from here to a complete sidechain.
-- **[dev-docs/sidechain/architecture.md](dev-docs/sidechain/architecture.md)** —
-  the system map (read this second).
-- `dev-docs/sidechain/{consensus,note-protocol,peg,security}.md` — depth.
-- `dev-docs/sidechain/DEFERRED.md` — the living open-items / review-gate register.
+Read in this order for the full arc — design → decision → evidence → circuit →
+integration → hardening → the round-trip:
 
----
-🤖 Scaffolding + docs generated with [Claude Code](https://claude.com/claude-code)
+- **[dev-docs/sidechain/README.md](dev-docs/sidechain/README.md)** — the doc index.
+- **[adr-hash-native-engine.md](dev-docs/sidechain/adr-hash-native-engine.md)** —
+  the ADR: why Aegis went hash-native (Option B), with the measured spike evidence.
+- **[spike-results/](dev-docs/sidechain/spike-results/)** — the A-vs-B settlement
+  cost measurements the ADR rests on.
+- **[hash-native-engine-design.md](dev-docs/sidechain/hash-native-engine-design.md)**
+  / **[hash-native-spend-circuit.md](dev-docs/sidechain/hash-native-spend-circuit.md)**
+  — the live engine + spend circuit.
+- **[stark-settlement-design.md](dev-docs/sidechain/stark-settlement-design.md)** /
+  **[stark-devnet-integration.md](dev-docs/sidechain/stark-devnet-integration.md)**
+  — the trustless bridge and its devnet integration.
+- **[HARDENING.md](dev-docs/sidechain/HARDENING.md)** — the consolidated
+  post-campaign roadmap and the real-value review-gate.
+- **[architecture.md](dev-docs/sidechain/architecture.md)** — the system map.
+- **[ROADMAP.md](ROADMAP.md)** / **[DEFERRED.md](dev-docs/sidechain/DEFERRED.md)** —
+  milestones and the living open-items register.

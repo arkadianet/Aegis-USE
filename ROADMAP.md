@@ -1,5 +1,21 @@
 # Aegis roadmap
 
+> 🟢 **STATUS UPDATE (2026-07-19): hash-native engine live; first trustless
+> round-trip proven.** Since this roadmap was drafted, Aegis went **hash-native**
+> (Plonky3 / BabyBear / Poseidon2) per the
+> [ADR](dev-docs/sidechain/adr-hash-native-engine.md) — the Curve-Trees engine
+> that several callouts below "adopt" is now the **superseded prior baseline**
+> (retained, not the live path). The engine, ZK spend proofs, note encryption,
+> `aegis-hn-wallet`, and the `aegis-node` hash-native pool are built and
+> integrated; a networked merge-mined testnet is cut; and the **trustless
+> `verifyStark` peg bridge completed its first round-trip** on the STARK devnet
+> (release tx
+> `01cba5ace7d9aeb2f4a8e9bec9e277db5dfbe3f977a8a5d2573fdb31169831d6`). What's
+> next is the rigorous e2e campaign, prover-speed optimization, the
+> [HARDENING.md](dev-docs/sidechain/HARDENING.md) tiers, and the external-review
+> value-gate. Read this roadmap's engine-specific sequencing below as historical;
+> the value-gate and merge-mining framing still hold.
+
 From today (a reviewed consensus + crypto core) to a **complete, merge-mined,
 private-USE sidechain** — and, separately, to *real value* (an audit gate that is
 deliberately kept off the critical path).
