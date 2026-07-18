@@ -17,6 +17,7 @@ pub mod daa;
 pub mod ergo_follow;
 pub mod fresh_sync;
 pub mod genesis;
+pub mod hn;
 pub mod mempool;
 pub mod mm_forkchoice;
 pub mod node;

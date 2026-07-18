@@ -1,0 +1,49 @@
+# bridge-tools — DEVNET-side bridge tooling for the hash-native trustless
+# bridge: the PegVault ErgoTree (hand-assembled AST incl. the EIP-0045
+# verifyStark opcode 0xB9), its local adversarial predicate tests, and the
+# devnet transaction tooling (EIP-4 token mint, vault deploy, deposit,
+# verifyStark release-tx assembly with the proof chunked into the context
+# extension).
+#
+# NOT a workspace member (root Cargo.toml excludes it): it path-depends on the
+# SIBLING ergo checkout (../../../../ergo, branch feat/eip-0045-stark) whose
+# ergo-ser/ergo-sigma carry the devnet-only 0xB9 opcode — the published
+# v0.5.2 git tag the main workspace pins does not. Build with
+# CARGO_TARGET_DIR="$HOME/.cache/cargo-target-aegis-bridge".
+#
+# Test tiers:
+#   cargo test                      — binding adversarial suite (stub verifier:
+#                                     a well-formed verifyStark reduces true, so
+#                                     outcomes isolate the tx-binding checks)
+#   cargo test --features real-verify — REAL RISC0 verify via the pinned proof
+#                                     vectors (context-extension chunk path +
+#                                     tamper/wrong-journal/wrong-image reject)
+
+[package]
+name = "bridge-tools"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+real-verify = ["ergo-sigma/stark-verify"]
+
+[dependencies]
+ergo-primitives = { path = "../../../../ergo/ergo-primitives" }
+ergo-ser = { path = "../../../../ergo/ergo-ser" }
+ergo-sigma = { path = "../../../../ergo/ergo-sigma" }
+# hn-side drivers (sc-dest, scan/pay/peg-out). aegis-node resolves its
+# `workspace = true` fields against the Aegis-USE root workspace, which pins
+# the PUBLISHED ergo crates — a second, independent copy from the path deps
+# above; no ergo types cross between the two graphs (PegOutTx carries plain
+# bytes), so the duplication is deliberate and safe.
+aegis-engine = { path = "../engine" }
+aegis-hn-wallet = { path = "../engine/wallet" }
+aegis-node = { path = "../aegis-node" }
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+hex = "0.4"
+reqwest = { version = "0.12", features = ["blocking", "json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[workspace]

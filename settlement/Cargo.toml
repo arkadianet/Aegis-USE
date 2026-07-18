@@ -1,0 +1,16 @@
+# Settlement prover — Statement 1 (trustless peg-out) over REAL hn chain
+# state: verify the epoch's peg-out spend proof in-field, recompute the
+# commitment-tree transition prev_root → new_root, bind the burn note to the
+# public withdrawal, and journal exactly what the PegVault contract binds.
+# Standalone workspace (excluded from the Aegis workspace); the engine and
+# aegis-node are read-only path dependencies.
+[workspace]
+resolver = "2"
+members = ["host", "methods"]
+
+[profile.dev]
+opt-level = 3
+
+[profile.release]
+debug = 1
+lto = true

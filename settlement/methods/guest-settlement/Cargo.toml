@@ -1,0 +1,26 @@
+# Statement-1 settlement guest: verify the peg-out spend proof in-field
+# (BabyBear / Plonky3 uni-STARK, HIDING config), bind the burn note to the
+# public withdrawal, recompute the tree transition, and journal the exact
+# bytes the PegVault contract reconstructs from the release transaction.
+# The verifying key is REBUILT IN-GUEST from the fixed public preprocessed
+# salt, so the vk is part of the image id — a prover cannot substitute one.
+[package]
+name = "aegis_settlement_guest"
+version = "0.0.0"
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+risc0-zkvm = { version = "^3.0.5", default-features = false, features = ["std", "getrandom"] }
+aegis-engine = { path = "../../../engine" }
+p3-uni-stark = { git = "https://github.com/Plonky3/Plonky3", rev = "4aed8fe4195d40305175d55e58690f46171258d9" }
+p3-field = { git = "https://github.com/Plonky3/Plonky3", rev = "4aed8fe4195d40305175d55e58690f46171258d9" }
+postcard = { version = "1", default-features = false, features = ["alloc"] }
+serde = { version = "1", default-features = false, features = ["alloc", "derive"] }
+rand = { version = "0.10", default-features = false }
+rand_chacha = { version = "0.10", default-features = false }
+
+[profile.release]
+opt-level = 3
+lto = true

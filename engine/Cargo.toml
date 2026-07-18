@@ -1,0 +1,70 @@
+# aegis-engine — the hash-native private-payment core (Option B).
+#
+# A from-scratch shielded-pool crypto core over BabyBear + Poseidon2, replacing
+# the Curve-Trees/Bulletproofs (elliptic-curve) engine so that a client spend
+# proof's verifier is FRI/hash-native — the precondition for cheap trustless
+# settlement (see dev-docs/sidechain/hash-native-engine-design.md).
+#
+# This is a SEPARATE, nested workspace (excluded from the Aegis-USE root
+# workspace, exactly like vendor/curve-trees). It does NOT perturb the main
+# crates' dependency graph or Cargo.lock. Build it with an isolated
+# CARGO_TARGET_DIR.
+[workspace]
+members = ["wallet"]
+
+[package]
+name        = "aegis-engine"
+version     = "0.0.1"
+edition     = "2021"
+license     = "MIT OR Apache-2.0"
+description = "Hash-native (BabyBear/Poseidon2/FRI) shielded-payment engine core for Aegis"
+publish     = false
+
+[dependencies]
+# --- Plonky3, pinned to the exact rev the client-cost spike measured
+#     (aegis-hashnative-spike/RESULTS.md). BabyBear is deliberate: it is the
+#     RISC0 verifier's field, so a later settlement STARK re-verifies these
+#     client proofs cheaply, in-field, with no foreign-curve MSM. ---
+p3-field         = { git = "https://github.com/Plonky3/Plonky3", rev = "4aed8fe4195d40305175d55e58690f46171258d9" }
+p3-baby-bear     = { git = "https://github.com/Plonky3/Plonky3", rev = "4aed8fe4195d40305175d55e58690f46171258d9" }
+p3-poseidon2     = { git = "https://github.com/Plonky3/Plonky3", rev = "4aed8fe4195d40305175d55e58690f46171258d9" }
+p3-poseidon2-air = { git = "https://github.com/Plonky3/Plonky3", rev = "4aed8fe4195d40305175d55e58690f46171258d9" }
+p3-air           = { git = "https://github.com/Plonky3/Plonky3", rev = "4aed8fe4195d40305175d55e58690f46171258d9" }
+p3-matrix        = { git = "https://github.com/Plonky3/Plonky3", rev = "4aed8fe4195d40305175d55e58690f46171258d9" }
+p3-uni-stark     = { git = "https://github.com/Plonky3/Plonky3", rev = "4aed8fe4195d40305175d55e58690f46171258d9" }
+p3-commit        = { git = "https://github.com/Plonky3/Plonky3", rev = "4aed8fe4195d40305175d55e58690f46171258d9" }
+p3-challenger    = { git = "https://github.com/Plonky3/Plonky3", rev = "4aed8fe4195d40305175d55e58690f46171258d9" }
+p3-fri           = { git = "https://github.com/Plonky3/Plonky3", rev = "4aed8fe4195d40305175d55e58690f46171258d9" }
+p3-dft           = { git = "https://github.com/Plonky3/Plonky3", rev = "4aed8fe4195d40305175d55e58690f46171258d9" }
+p3-merkle-tree   = { git = "https://github.com/Plonky3/Plonky3", rev = "4aed8fe4195d40305175d55e58690f46171258d9" }
+p3-symmetric     = { git = "https://github.com/Plonky3/Plonky3", rev = "4aed8fe4195d40305175d55e58690f46171258d9" }
+p3-util          = { git = "https://github.com/Plonky3/Plonky3", rev = "4aed8fe4195d40305175d55e58690f46171258d9" }
+
+# rand 0.10 to match Plonky3's rand (the hiding PCS/MMCS take an `R: rand::Rng`);
+# a mismatched rand major would fail the trait bound on the mask/salt RNG.
+rand = { version = "0.10", default-features = false, features = ["std", "std_rng", "sys_rng", "thread_rng"] }
+# ChaCha20 is the mask/salt RNG: a CSPRNG (the masks ARE the privacy) that is
+# also `Clone` (the hiding MMCS requires it); rand's StdRng is not `Clone` in 0.10.
+rand_chacha = { version = "0.10", default-features = false }
+
+# --- note encryption / address (OFF-circuit wallet transport; proven crates
+#     only per the crypto rule — the in-circuit no-EC rule is about FRI-native
+#     verification cost and does not apply off-circuit; see the design doc) ---
+x25519-dalek     = { version = "2", default-features = false, features = ["static_secrets"] }
+chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc"] }
+hkdf             = "0.12"
+sha2             = { version = "0.10", default-features = false }
+bech32           = "0.9"
+serde            = { version = "1", default-features = false, features = ["derive", "alloc"] }
+
+[dev-dependencies]
+hex = "0.4"
+postcard = { version = "1", features = ["alloc"] }
+
+# The FRI/STARK stack is unusably slow at opt-level 0; keep it optimized even in
+# dev/test so the prove/verify tests run in seconds, not minutes (mirrors the
+# root workspace's ark-* opt-level pins).
+[profile.dev]
+opt-level = 3
+[profile.test]
+opt-level = 3

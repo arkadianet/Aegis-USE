@@ -11,6 +11,15 @@ publish     = false
 aegis-crypto    = { path = "../aegis-crypto" }
 aegis-spec      = { path = "../aegis-spec" }
 aegis-types     = { path = "../aegis-types" }
+# --- hash-native shielded pool (feat/hash-native-payment-engine integration).
+#     Path deps into the isolated engine/ workspace (kept a separate workspace;
+#     these are path dependencies, not members) — this pulls Plonky3 into the
+#     node build for in-field proof verification. ---
+aegis-engine    = { path = "../engine" }
+aegis-hn-wallet = { path = "../engine/wallet" }
+postcard        = { version = "1", features = ["alloc"] }
+serde           = { version = "1", features = ["derive"] }
+p3-field        = { git = "https://github.com/Plonky3/Plonky3", rev = "4aed8fe4195d40305175d55e58690f46171258d9" }
 ark-ec          = { workspace = true }
 ark-serialize   = { workspace = true }
 ergo-primitives = { workspace = true }
