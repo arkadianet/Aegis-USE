@@ -14,6 +14,7 @@
 //! The monolith's per-value binding-soundness argument and adversarial tests are
 //! in [`monolith`] and `dev-docs/sidechain/hash-native-spend-circuit.md`.
 
+pub mod baked_vk;
 pub mod balance_air;
 pub mod merkle_air;
 pub mod monolith;

@@ -25,6 +25,7 @@
 use aegis_engine::config::{hiding_config, make_hiding_config, HidingEngineConfig};
 use aegis_engine::merkle::MerklePath;
 use aegis_engine::poseidon::{Digest, F};
+use aegis_engine::spend::baked_vk::{PREPROCESSED_SALT_SEED, PREPROCESSED_SALT_TWEAK};
 use aegis_engine::spend::monolith::{
     build_spend_trace_with_paths, InputNote, OutputNote, SpendAir, N_PUB, N_ROWS,
 };
@@ -35,12 +36,6 @@ use p3_uni_stark::{
 };
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
-
-/// Fixed salt for the PUBLIC preprocessed-schedule commitment. The schedule is
-/// public, so a fixed salt leaks nothing; it makes the published vk identical
-/// for every party/instance/restart. Privacy rests solely on the per-proof
-/// main-trace masks, which are always fresh OS entropy.
-const PREPROCESSED_SALT_SEED: u64 = 0x5EED_5A17_0A15_0001;
 
 /// The verifying-key half, shareable with a node.
 pub type SpendVk = PreprocessedVerifierKey<HidingEngineConfig>;
@@ -78,7 +73,7 @@ impl SpendCircuit {
         // commits only the preprocessed trace).
         let setup_config = make_hiding_config(
             ChaCha20Rng::seed_from_u64(PREPROCESSED_SALT_SEED),
-            ChaCha20Rng::seed_from_u64(PREPROCESSED_SALT_SEED ^ 0x9e37_79b9_7f4a_7c15),
+            ChaCha20Rng::seed_from_u64(PREPROCESSED_SALT_SEED ^ PREPROCESSED_SALT_TWEAK),
         );
         let (pd, vk) =
             setup_preprocessed::<HidingEngineConfig, _>(&setup_config, &air, degree_bits)
@@ -214,5 +209,19 @@ mod tests {
         // are byte-identical.
         assert!(a.verify(&proof_b, &pub_b), "A's vk verifies B's proof");
         assert!(b.verify(&proof_a, &pub_a), "B's vk verifies A's proof");
+    }
+
+    /// The wallet's derived vk must equal the ELF-baked vk the settlement
+    /// guest verifies against (`aegis_engine::spend::baked_vk`) — otherwise
+    /// wallet proofs could pass the node but fail settlement.
+    #[test]
+    fn wallet_vk_equals_baked_settlement_vk() {
+        let c = SpendCircuit::new();
+        let baked = aegis_engine::spend::baked_vk::baked_spend_vk();
+        assert_eq!(c.vk().width, baked.width, "vk width");
+        assert_eq!(c.vk().degree_bits, baked.degree_bits, "vk degree_bits");
+        let derived: &[[u8; 32]] = c.vk().commitment.as_ref();
+        let baked_cap: &[[u8; 32]] = baked.commitment.as_ref();
+        assert_eq!(derived, baked_cap, "vk commitment cap");
     }
 }

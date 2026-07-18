@@ -2,9 +2,10 @@
 //
 // Proves, for one epoch of the hash-native chain:
 //   1. the peg-out SPEND PROOF verifies in-field (hiding monolith 2-in/2-out,
-//      BabyBear / Plonky3 uni-STARK) against the vk REBUILT IN-GUEST from the
-//      fixed public preprocessed salt (so the vk is pinned by the image id —
-//      a malicious prover cannot substitute a different circuit);
+//      BabyBear / Plonky3 uni-STARK) against the BAKED vk
+//      (`aegis_engine::spend::baked_vk`, ELF constants — so the vk is pinned
+//      by the image id; a malicious prover cannot substitute a different
+//      circuit. Oracle parity vs `setup_preprocessed` is asserted engine-side);
 //   2. the spend's out0 commitment is the deterministic BURN note for exactly
 //      `withdrawal_amount + peg_fee` with nonces derived from the spend's
 //      first nullifier (the consensus binding — value provably left the pool
@@ -29,21 +30,16 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 use aegis_engine::burn::burn_cm_expected;
-use aegis_engine::config::{hiding_config_for_verify, make_hiding_config, HidingEngineConfig};
+use aegis_engine::config::{hiding_config_for_verify, HidingEngineConfig};
 use aegis_engine::merkle::{settle_tree_transition, Frontier};
 use aegis_engine::poseidon::{digest_to_bytes, Digest, DIGEST_ELEMS, F};
-use aegis_engine::spend::monolith::{SpendAir, N_PUB, N_ROWS, PUB_CMO0, PUB_NF0};
+use aegis_engine::spend::baked_vk::baked_spend_vk;
+use aegis_engine::spend::monolith::{SpendAir, N_PUB, PUB_CMO0, PUB_NF0};
 use p3_field::PrimeCharacteristicRing;
-use p3_uni_stark::{setup_preprocessed, verify_with_preprocessed, Proof};
-use rand::SeedableRng;
-use rand_chacha::ChaCha20Rng;
+use p3_uni_stark::{verify_with_preprocessed, Proof};
 use risc0_zkvm::guest::env;
 
 risc0_zkvm::guest::entry!(main);
-
-/// The engine wallet's fixed PUBLIC preprocessed salt (`SpendCircuit::new`).
-/// Baked into the guest so the verifying key is part of the image id.
-const PREPROCESSED_SALT_SEED: u64 = 0x5EED_5A17_0A15_0001;
 
 const JOURNAL_TAG: &[u8; 8] = b"AEGISPO3";
 
@@ -70,15 +66,13 @@ fn main() {
 
     let c0 = env::cycle_count();
 
-    // ---- 1. rebuild the vk from the fixed public salt; verify in-field ----
+    // ---- 1. the BAKED vk (ELF constants, pinned by the image id) ----
+    // T1.1 vk-bake: `setup_preprocessed` used to run here (66 M cycles under
+    // the Poseidon2 MMCS, ~7.5 M under SHA) purely to re-derive a constant.
+    // The baked constants are asserted equal to that derivation by the
+    // engine-side oracle-parity test (`spend::baked_vk`).
     let air = SpendAir;
-    let degree_bits = N_ROWS.trailing_zeros() as usize;
-    let setup_config = make_hiding_config(
-        ChaCha20Rng::seed_from_u64(PREPROCESSED_SALT_SEED),
-        ChaCha20Rng::seed_from_u64(PREPROCESSED_SALT_SEED ^ 0x9e37_79b9_7f4a_7c15),
-    );
-    let (_pd, vk) = setup_preprocessed::<HidingEngineConfig, _>(&setup_config, &air, degree_bits)
-        .expect("preprocessed vk");
+    let vk = baked_spend_vk();
     let c_vk = env::cycle_count();
     env::log(&alloc::format!("CYCLES vk_setup={}", c_vk - c0));
 
