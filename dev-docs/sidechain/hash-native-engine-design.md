@@ -33,7 +33,7 @@ what.
 |---|---|---|
 | Note commitment | Pedersen (EC point) | `Poseidon(value, owner, rho, r)` |
 | Owner key / address | `pk = nk·B` (EC) | `pk = Poseidon(nk)` (hash — NO elliptic curve) |
-| cm accumulator | Curve Tree (EC, depth 4) | **Poseidon-Merkle tree** (membership = a Merkle path) |
+| cm accumulator | Curve Tree (EC, depth 4) | **Poseidon-Merkle tree** (membership = a Merkle path; O(log n) append **frontier** for O(epoch) settlement transitions — see `merkle::Frontier`) |
 | Nullifier | `Poseidon(nk, rho)` | **unchanged** — already hash-native ✓ |
 | Spend proof | Bulletproofs R1CS over the 2-cycle | **STARK/AIR**: membership + openings + nullifier + range + balance |
 | Note encryption | ECDH (secp) + ChaCha20-Poly1305 | hash/KEM-based DH replacement (design item) |

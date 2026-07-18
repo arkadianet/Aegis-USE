@@ -75,6 +75,11 @@ pub const DOMAIN_NULLIFIER: u32 = 0x0A02;
 /// Bumped 0x0A03 → 0x0A13 when the value block became 4×16-bit limbs
 /// (64-bit amounts) — old-layout commitments must not collide with new ones.
 pub const DOMAIN_COMMITMENT: u32 = 0x0A13;
+/// Incremental note-tree FRONTIER commitment `H(leaf_count ‖ filled[0..DEPTH])`
+/// — authenticates the O(log n) append boundary into the settlement state root
+/// so the transition can advance the tree without re-walking history
+/// ([`crate::merkle::Frontier`]).
+pub const DOMAIN_FRONTIER: u32 = 0x0A04;
 
 /// The canonical BabyBear-t16 permutation (cached).
 fn perm16() -> &'static Poseidon2BabyBear<16> {
