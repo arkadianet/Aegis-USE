@@ -293,8 +293,10 @@ pub fn vault_address(spec: &VaultSpec, network: ergo_ser::address::NetworkPrefix
 /// Chunk a serialized receipt for the context-extension `Coll[Coll[Byte]]`
 /// var (mirrors the devnet oracle's chunking).
 pub fn chunk_proof(proof: &[u8]) -> (SigmaType, SigmaValue) {
+    // Each inner Coll[Byte] must fit Scala's u16 length prefix (max 65535);
+    // 60_000 keeps every chunk well under it (a ~218 KiB receipt → 4 chunks).
     let chunks: Vec<SigmaValue> = proof
-        .chunks(120 * 1024)
+        .chunks(60_000)
         .map(|c| SigmaValue::Coll(CollValue::Bytes(c.to_vec())))
         .collect();
     (
