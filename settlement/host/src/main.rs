@@ -1,11 +1,12 @@
 //! `settle` — the settlement prover host.
 //!
 //!   settle image-id
-//!   settle smoke  --out-dir DIR
-//!   settle prove  --node URL --prev-root HEX32 --prev-height N
-//!                 --withdrawal-index I --counter-next N
-//!                 --recipient-tree HEX --out-dir DIR
-//!   settle verify --dir DIR
+//!   settle smoke   --out-dir DIR
+//!   settle execute            (measurement: cycle breakdown, no prove)
+//!   settle prove   --node URL --prev-root HEX32 --prev-height N
+//!                  --withdrawal-index I --counter-next N
+//!                  --recipient-tree HEX --out-dir DIR
+//!   settle verify  --dir DIR
 //!
 //! `prove` gathers the epoch from a LIVE hn node (blocks + recorded
 //! withdrawals over HTTP), rebuilds the consensus leaf sequence exactly as
@@ -25,7 +26,7 @@ use aegis_node::hn::state::{digest_to_limbs, limbs_to_digest, HnBlock, PegInClai
 use aegis_node::hn::{HnChain, HnChainParams, HttpChain, PegInCheck};
 use clap::{Parser, Subcommand};
 use methods::{AEGIS_SETTLEMENT_GUEST_ELF, AEGIS_SETTLEMENT_GUEST_ID};
-use risc0_zkvm::{default_prover, ExecutorEnv, ProverOpts};
+use risc0_zkvm::{default_executor, default_prover, ExecutorEnv, ProverOpts};
 
 #[derive(Parser)]
 #[command(name = "settle", about = "Aegis hn settlement prover (Statement 1)")]
@@ -45,6 +46,12 @@ enum Cmd {
         #[arg(long)]
         out_dir: PathBuf,
     },
+    /// Measurement: run the self-contained smoke statement through
+    /// the RISC0 *executor* (no proving) and print the guest cycle breakdown
+    /// (vk_setup / spend_verify / tree_transition via env::log) plus the total
+    /// user-cycle count. Fast (~minutes, CPU-only) — used to measure the
+    /// SHA-256 FRI-MMCS swap's effect on `spend_verify` without a 60-min prove.
+    Execute,
     /// Prove a recorded withdrawal from a LIVE hn node.
     Prove {
         #[arg(long, default_value = "http://127.0.0.1:8750")]
@@ -170,14 +177,10 @@ fn frontier_bytes(pre: &[Digest]) -> Vec<u8> {
     postcard::to_allocvec(&frontier).expect("frontier serializes")
 }
 
-fn prove_and_write(input: &ProveInput, out_dir: &PathBuf) {
-    assert!(
-        std::env::var("RISC0_DEV_MODE").map_or(true, |v| v.is_empty() || v == "0"),
-        "dev-mode is banned: unset RISC0_DEV_MODE"
-    );
-    std::fs::create_dir_all(out_dir).expect("out dir");
-
-    let env = ExecutorEnv::builder()
+/// Build the guest `ExecutorEnv` for a settlement input (shared by prove and
+/// the measurement `execute` path).
+fn build_env(input: &ProveInput) -> ExecutorEnv<'static> {
+    ExecutorEnv::builder()
         .write(&input.tx.proof_bytes)
         .unwrap()
         .write(&input.tx.public_values)
@@ -193,7 +196,17 @@ fn prove_and_write(input: &ProveInput, out_dir: &PathBuf) {
         .write(&input.counter_next)
         .unwrap()
         .build()
-        .unwrap();
+        .unwrap()
+}
+
+fn prove_and_write(input: &ProveInput, out_dir: &PathBuf) {
+    assert!(
+        std::env::var("RISC0_DEV_MODE").map_or(true, |v| v.is_empty() || v == "0"),
+        "dev-mode is banned: unset RISC0_DEV_MODE"
+    );
+    std::fs::create_dir_all(out_dir).expect("out dir");
+
+    let env = build_env(input);
 
     let t0 = Instant::now();
     let prove_info = default_prover()
@@ -235,6 +248,83 @@ impl PegInCheck for AlwaysConfirmed {
     }
 }
 
+/// Measurement helper: build the self-contained smoke settlement
+/// statement (a tiny hn chain: two peg-in mints then a peg-out burn) and
+/// return the guest `ProveInput` plus the pre/post-epoch roots. Shared by
+/// `smoke` (which proves it) and `execute` (which only measures cycles).
+fn smoke_input() -> (ProveInput, Digest, Digest) {
+    let dir = tempfile::tempdir().unwrap();
+    let mut bob = Wallet::from_seed(b"settle-smoke-bob");
+    let miner = Wallet::from_seed(b"settle-smoke-miner");
+    let bob_addr = bob.address();
+    let params = HnChainParams::testnet().with_genesis(vec![], 10_000);
+    let flat = params.flat_fee;
+    let mut chain = HnChain::create(dir.path(), SpendCircuit::new(), params.clone()).unwrap();
+    chain.set_pegin_check(Box::new(AlwaysConfirmed));
+
+    // Two confirmed vault deposits mint Bob two notes (the 2-in burn spend
+    // needs both) — the pegmint leaf path is exercised.
+    for (amount, box_id) in [(1_000u64, [0x11u8; 32]), (600, [0x22; 32])] {
+        let minted = amount - params.peg_fee(amount);
+        let mint = pegmint_note(&bob_addr, minted, &box_id);
+        chain.queue_pegin(PegInClaim {
+            box_id,
+            dest_owner: digest_to_limbs(&bob_addr.owner),
+            dest_enc_pk: bob_addr.enc_pk,
+            amount,
+            ciphertext: mint.ciphertext,
+        });
+    }
+    chain.produce_block(&miner.address()).unwrap();
+    bob.scan(&chain);
+
+    // Epoch boundary: the vault "deploys" at the post-mint root.
+    let prev_root = chain.current_root();
+    let prev_height = chain.blocks_since(0).last().expect("mint block").height;
+
+    let withdrawal = 990u64;
+    let peg_fee = params.peg_fee(withdrawal);
+    let recipient_prop = vec![0xAA; 36];
+    let burn_tx = bob
+        .burn_spend(&chain, chain.circuit(), withdrawal + peg_fee, flat)
+        .expect("burn spend");
+    chain
+        .submit_pegout(PegOutTx {
+            tx: burn_tx,
+            amount: withdrawal,
+            recipient_prop: recipient_prop.clone(),
+        })
+        .expect("pegout admitted");
+    chain.produce_block(&miner.address()).unwrap();
+    let new_root = chain.current_root();
+
+    // The SAME split path as `prove` (seal at the tiny chain's tip).
+    let blocks = chain.blocks_since(0);
+    let sealed = blocks.iter().map(|b| b.height).max().unwrap_or(prev_height);
+    let (pre, epoch) = split_leaves(
+        &blocks,
+        &params,
+        prev_height,
+        sealed,
+        &digest_to_bytes(&prev_root),
+    );
+    let po = &blocks
+        .iter()
+        .find(|b| b.height > prev_height && !b.pegouts.is_empty())
+        .expect("pegout block")
+        .pegouts[0];
+
+    let input = ProveInput {
+        tx: po.tx.clone(),
+        frontier_bytes: frontier_bytes(&pre),
+        epoch_leaves: to_limbs(&epoch),
+        amount: withdrawal,
+        recipient_prop,
+        counter_next: 1,
+    };
+    (input, prev_root, new_root)
+}
+
 fn main() {
     match Cli::parse().cmd {
         Cmd::ImageId => println!("{}", hex::encode(image_id_bytes())),
@@ -250,79 +340,28 @@ fn main() {
                 .expect("receipt verifies");
             println!("receipt OK for image id {}", hex::encode(image_id_bytes()));
         }
+        Cmd::Execute => {
+            // Measurement: build the self-contained smoke statement
+            // and run it through the RISC0 executor (no proving). The guest's
+            // env::log lines (CYCLES vk_setup / spend_verify / tree_transition)
+            // print during execution; SessionInfo gives the total user cycles.
+            let (input, _prev, _new) = smoke_input();
+            let env = build_env(&input);
+            let t0 = Instant::now();
+            let session = default_executor()
+                .execute(env, AEGIS_SETTLEMENT_GUEST_ELF)
+                .expect("execute");
+            let wall = t0.elapsed();
+            println!(
+                "EXECUTE (no prove): wall={wall:?} total_user_cycles={} segments={}",
+                session.cycles(),
+                session.segments.len()
+            );
+        }
         Cmd::Smoke { out_dir } => {
             let t0 = Instant::now();
-            let dir = tempfile::tempdir().unwrap();
-            let mut bob = Wallet::from_seed(b"settle-smoke-bob");
-            let miner = Wallet::from_seed(b"settle-smoke-miner");
-            let bob_addr = bob.address();
-            let params = HnChainParams::testnet().with_genesis(vec![], 10_000);
-            let flat = params.flat_fee;
-            let mut chain =
-                HnChain::create(dir.path(), SpendCircuit::new(), params.clone()).unwrap();
-            chain.set_pegin_check(Box::new(AlwaysConfirmed));
-
-            // Two confirmed vault deposits mint Bob two notes (the 2-in burn
-            // spend needs both) — the pegmint leaf path is exercised.
-            for (amount, box_id) in [(1_000u64, [0x11u8; 32]), (600, [0x22; 32])] {
-                let minted = amount - params.peg_fee(amount);
-                let mint = pegmint_note(&bob_addr, minted, &box_id);
-                chain.queue_pegin(PegInClaim {
-                    box_id,
-                    dest_owner: digest_to_limbs(&bob_addr.owner),
-                    dest_enc_pk: bob_addr.enc_pk,
-                    amount,
-                    ciphertext: mint.ciphertext,
-                });
-            }
-            chain.produce_block(&miner.address()).unwrap();
-            bob.scan(&chain);
-
-            // Epoch boundary: the vault "deploys" at the post-mint root.
-            let prev_root = chain.current_root();
-            let prev_height = chain.blocks_since(0).last().expect("mint block").height;
-
-            let withdrawal = 990u64;
-            let peg_fee = params.peg_fee(withdrawal);
-            let recipient_prop = vec![0xAA; 36];
-            let burn_tx = bob
-                .burn_spend(&chain, chain.circuit(), withdrawal + peg_fee, flat)
-                .expect("burn spend");
-            chain
-                .submit_pegout(PegOutTx {
-                    tx: burn_tx,
-                    amount: withdrawal,
-                    recipient_prop: recipient_prop.clone(),
-                })
-                .expect("pegout admitted");
-            chain.produce_block(&miner.address()).unwrap();
-            let new_root = chain.current_root();
+            let (input, prev_root, new_root) = smoke_input();
             println!("smoke chain built in {:?}", t0.elapsed());
-
-            // The SAME split path as `prove` (seal at the tiny chain's tip).
-            let blocks = chain.blocks_since(0);
-            let sealed = blocks.iter().map(|b| b.height).max().unwrap_or(prev_height);
-            let (pre, epoch) = split_leaves(
-                &blocks,
-                &params,
-                prev_height,
-                sealed,
-                &digest_to_bytes(&prev_root),
-            );
-            let po = &blocks
-                .iter()
-                .find(|b| b.height > prev_height && !b.pegouts.is_empty())
-                .expect("pegout block")
-                .pegouts[0];
-
-            let input = ProveInput {
-                tx: po.tx.clone(),
-                frontier_bytes: frontier_bytes(&pre),
-                epoch_leaves: to_limbs(&epoch),
-                amount: withdrawal,
-                recipient_prop: recipient_prop.clone(),
-                counter_next: 1,
-            };
             prove_and_write(&input, &out_dir);
 
             // The journal must be exactly what the vault reconstructs.
@@ -331,9 +370,9 @@ fn main() {
             expect.extend_from_slice(b"AEGISPO3");
             expect.extend_from_slice(&digest_to_bytes(&prev_root));
             expect.extend_from_slice(&digest_to_bytes(&new_root));
-            expect.extend_from_slice(&withdrawal.to_be_bytes());
-            expect.extend_from_slice(&1u64.to_be_bytes());
-            expect.extend_from_slice(&recipient_prop);
+            expect.extend_from_slice(&input.amount.to_be_bytes());
+            expect.extend_from_slice(&input.counter_next.to_be_bytes());
+            expect.extend_from_slice(&input.recipient_prop);
             assert_eq!(
                 journal, expect,
                 "journal byte-exact vs vault reconstruction"

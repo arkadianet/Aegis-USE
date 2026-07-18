@@ -38,6 +38,10 @@ p3-fri           = { git = "https://github.com/Plonky3/Plonky3", rev = "4aed8fe4
 p3-dft           = { git = "https://github.com/Plonky3/Plonky3", rev = "4aed8fe4195d40305175d55e58690f46171258d9" }
 p3-merkle-tree   = { git = "https://github.com/Plonky3/Plonky3", rev = "4aed8fe4195d40305175d55e58690f46171258d9" }
 p3-symmetric     = { git = "https://github.com/Plonky3/Plonky3", rev = "4aed8fe4195d40305175d55e58690f46171258d9" }
+# SHA-256 FRI-Merkle commitment hash (T2.1). Routes through `sha2`
+# (`block_api::compress256`), which RISC0 patches to its SHA accelerator in the
+# settlement guest (see settlement/methods/guest-settlement/Cargo.toml [patch]).
+p3-sha256        = { git = "https://github.com/Plonky3/Plonky3", rev = "4aed8fe4195d40305175d55e58690f46171258d9" }
 p3-util          = { git = "https://github.com/Plonky3/Plonky3", rev = "4aed8fe4195d40305175d55e58690f46171258d9" }
 
 # rand 0.10 to match Plonky3's rand (the hiding PCS/MMCS take an `R: rand::Rng`);

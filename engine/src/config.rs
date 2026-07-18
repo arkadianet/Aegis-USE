@@ -1,9 +1,34 @@
-//! The proof-system configuration: a uni-STARK over BabyBear with a Poseidon2
-//! FRI (the settlement-cheap config the client-cost spike measured).
+//! The proof-system configuration: a uni-STARK over BabyBear with a
+//! **SHA-256 FRI-Merkle commitment** (the "T2.1 SHA-256 MMCS" lever from
+//! `dev-docs/sidechain/prover-speed-plan.md`).
 //!
-//! BabyBear + Poseidon2-FRI is deliberate: it is the RISC0 verifier's field, so
-//! a settlement RISC0 guest re-verifies these client proofs in-field, with no
-//! foreign-curve MSM (`dev-docs/sidechain/hash-native-engine-design.md`).
+//! BabyBear is deliberate: it is the RISC0 verifier's field, so a settlement
+//! RISC0 guest re-verifies these client proofs in-field, with no foreign-curve
+//! MSM (`dev-docs/sidechain/hash-native-engine-design.md`). The FRI Merkle
+//! *commitment* hash is SHA-256 (`p3-sha256`), because RISC0 accelerates
+//! SHA-256 in-guest (via the patched `sha2` crate — see the guest workspace's
+//! `[patch.crates-io]`): the guest verifies the 100× FRI Merkle openings on
+//! the SHA accelerator instead of thousands of software Poseidon2-t24
+//! permutations (measured 2.79× on `spend_verify`, 2.33× on total guest
+//! cycles; the client also proves ~5.9× faster on hw-SHA hosts).
+//!
+//! What is SHA-256 here, and what is NOT:
+//! - SHA-256: the FRI-Merkle commitment MMCS leaf hash + 2-to-1 compress
+//!   (`SerializingHasher<Sha256>` leaf, `Sha256Compress` node). The digest is
+//!   a 32-byte `[u8; 32]` instead of 8 BabyBear elements. The commitment's
+//!   sole security requirement is collision resistance — SHA-256 provides it.
+//! - SHA-256 (required by the MMCS choice): the Fiat-Shamir challenger is the
+//!   byte-oriented `SerializingChallenger32<_, HashChallenger<u8, Sha256,
+//!   32>>`. This is NOT optional: in this Plonky3 rev `DuplexChallenger<F, …>`
+//!   only implements `CanObserve<Hash<F, F, N>>` (field-word digests) — it
+//!   *cannot* observe the SHA byte roots `Hash<F, u8, 32>`. Only
+//!   `SerializingChallenger32` implements `CanObserve<Hash<F, u8, N>>`.
+//!   Fiat-Shamir over SHA-256 is a standard, sound transcript (SHA as a
+//!   random oracle) and it too accelerates in-guest.
+//! - Poseidon2 in-field, UNCHANGED: note crypto (commitments, nullifiers,
+//!   owner keys, the accumulator) stays **Poseidon2** (`crate::poseidon`),
+//!   because the guest re-verifies in-field. Only the proof system's Merkle
+//!   commitment hash + transcript are byte-oriented.
 //!
 //! # Security (carried caveat — REVIEW ITEM)
 //! Uses `FriParameters::new_benchmark_high_arity` (log_blowup = 1, high-arity
@@ -12,15 +37,15 @@
 //! deployment raises log_blowup / query count (≈2–3× prove time, larger proof,
 //! still sub-second / ~MB). The FRI parameter choice is a flagged review item.
 
-use p3_baby_bear::{default_babybear_poseidon2_16, default_babybear_poseidon2_24, BabyBear};
-use p3_challenger::DuplexChallenger;
+use p3_baby_bear::BabyBear;
+use p3_challenger::{HashChallenger, SerializingChallenger32};
 use p3_commit::ExtensionMmcs;
 use p3_dft::Radix2DitParallel;
 use p3_field::extension::BinomialExtensionField;
-use p3_field::Field;
 use p3_fri::{FriParameters, HidingFriPcs, TwoAdicFriPcs};
 use p3_merkle_tree::{MerkleTreeHidingMmcs, MerkleTreeMmcs};
-use p3_symmetric::{PaddingFreeSponge, TruncatedPermutation};
+use p3_sha256::{Sha256, Sha256Compress};
+use p3_symmetric::SerializingHasher;
 use p3_uni_stark::StarkConfig;
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
@@ -30,38 +55,45 @@ use crate::poseidon::F;
 /// Degree-4 binomial extension of BabyBear — the challenge field.
 pub type EF = BinomialExtensionField<BabyBear, 4>;
 
-type Perm16 = p3_baby_bear::Poseidon2BabyBear<16>;
-type Perm24 = p3_baby_bear::Poseidon2BabyBear<24>;
+// ---- SHA-256 FRI-Merkle commitment ----
+//
+// `SerializingHasher<Sha256>` bridges BabyBear→bytes then SHA-256s (leaf hash);
+// `Sha256Compress` is the 2-to-1 node compress over 32-byte digests. Both route
+// through `sha2` (`sha2::block_api::compress256`), which RISC0 patches to its
+// SHA accelerator in the guest. The MMCS commits over the SCALAR field `F`
+// (`SerializingHasher` only implements `CryptographicHasher<F: Field, …>`, not
+// over `F::Packing`), so the digest word type is `u8` and `DIGEST_ELEMS = 32`.
+type ByteHash = Sha256;
+type FieldHash = SerializingHasher<ByteHash>;
+type Compress = Sha256Compress;
 
-type FieldHash = PaddingFreeSponge<Perm24, 24, 16, 8>;
-type Compress = TruncatedPermutation<Perm16, 2, 8, 16>;
-type ValMmcs =
-    MerkleTreeMmcs<<F as Field>::Packing, <F as Field>::Packing, FieldHash, Compress, 2, 8>;
+type ValMmcs = MerkleTreeMmcs<F, u8, FieldHash, Compress, 2, 32>;
 type ChallengeMmcs = ExtensionMmcs<F, EF, ValMmcs>;
 type Dft = Radix2DitParallel<F>;
 type Pcs = TwoAdicFriPcs<F, Dft, ValMmcs, ChallengeMmcs>;
-type Challenger = DuplexChallenger<F, Perm24, 24, 16>;
+/// Byte-oriented Fiat-Shamir challenger — REQUIRED with a SHA (byte-digest)
+/// MMCS (see the module doc): it is the only challenger that can observe the
+/// 32-byte SHA Merkle roots. Its SHA-256 sponge also accelerates in-guest.
+type Challenger = SerializingChallenger32<F, HashChallenger<u8, ByteHash, 32>>;
 
 /// The concrete STARK config for the engine's spend proofs.
 pub type EngineConfig = StarkConfig<Pcs, EF, Challenger>;
 
-/// Build the engine STARK config. Uses the canonical (deterministic) BabyBear
-/// Poseidon2 permutations for the FRI Merkle tree and challenger — reproducible
-/// across prover/verifier (no rng seed to agree on).
+/// Build the engine STARK config with the SHA-256 FRI-Merkle commitment.
+/// Deterministic (no rng seed to agree on): SHA-256 is a fixed function.
 pub fn make_config() -> EngineConfig {
-    let perm16 = default_babybear_poseidon2_16();
-    let perm24 = default_babybear_poseidon2_24();
-
-    let field_hash = FieldHash::new(perm24.clone());
-    let compress = Compress::new(perm16);
+    let byte_hash = ByteHash {};
+    let field_hash = FieldHash::new(Sha256);
+    let compress = Sha256Compress;
     let val_mmcs = ValMmcs::new(field_hash, compress, 3);
 
-    let challenge_mmcs = ChallengeMmcs::new(val_mmcs.clone());
+    // `ValMmcs` (SHA-256 hashers are `Copy`) is itself `Copy`, so this copies.
+    let challenge_mmcs = ChallengeMmcs::new(val_mmcs);
     let fri_params = FriParameters::new_benchmark_high_arity(challenge_mmcs);
 
     let dft = Dft::default();
     let pcs = Pcs::new(dft, val_mmcs, fri_params);
-    let challenger = Challenger::new(perm24);
+    let challenger = Challenger::from_hasher(vec![], byte_hash);
 
     StarkConfig::new(pcs, challenger)
 }
@@ -83,14 +115,18 @@ pub fn make_config() -> EngineConfig {
 //     Σ-correcting last chunk (2024/1037 §4.2).
 //   * `MerkleTreeHidingMmcs`: salts every leaf with `SALT_ELEMS` random field
 //     elements, making the Merkle commitment itself hiding (no dictionary
-//     attack on low-entropy rows).
+//     attack on low-entropy rows). The salt is still `SALT_ELEMS` BabyBear
+//     elements (`P::Value = F`) regardless of the SHA digest-word type — the
+//     hiding construction is hash-agnostic, so the SHA swap preserves it.
 //   * `FriParameters::new_benchmark_zk`: log_blowup = 2, 100 queries, 16-bit
 //     query PoW — the crate's production-shaped ZK parameter set (conjectured
 //     soundness 2·100+16 = 216 bits by the ethSTARK conjecture).
 //
 // The masking budget: NUM_QUERIES (100) + O(1) out-of-domain points must not
 // exceed the number of random rows (= the trace height, ≥ 128 for the spend).
-// This inequality is asserted in tests and is a pinned REVIEW ITEM.
+// This inequality is asserted in tests and is a pinned REVIEW ITEM. The SHA
+// swap does NOT touch this budget: it is an argument about queries/rows, not
+// about the leaf-hash choice.
 //
 // ⚠ The mask RNG MUST be cryptographically secure — the masks ARE the privacy.
 // Plonky3's own ZK test uses a fixed-seed `SmallRng` (fine for tests, fatal in
@@ -103,16 +139,8 @@ pub const NUM_RANDOM_CODEWORDS: usize = 4;
 /// Salt elements per Merkle leaf (~124 bits of salt over BabyBear).
 pub const SALT_ELEMS: usize = 4;
 
-type HidingValMmcs = MerkleTreeHidingMmcs<
-    <F as Field>::Packing,
-    <F as Field>::Packing,
-    FieldHash,
-    Compress,
-    ChaCha20Rng,
-    2,
-    8,
-    SALT_ELEMS,
->;
+type HidingValMmcs =
+    MerkleTreeHidingMmcs<F, u8, FieldHash, Compress, ChaCha20Rng, 2, 32, SALT_ELEMS>;
 type HidingChallengeMmcs = ExtensionMmcs<F, EF, HidingValMmcs>;
 type HidingPcs = HidingFriPcs<F, Dft, HidingValMmcs, HidingChallengeMmcs, ChaCha20Rng>;
 
@@ -133,11 +161,9 @@ pub type HidingCommitment = <HidingPcs as p3_commit::Pcs<EF, Challenger>>::Commi
 /// merges the random-codeword openings), so a fixed seed is safe
 /// ([`hiding_config_for_verify`]).
 pub fn make_hiding_config(mask_rng: ChaCha20Rng, salt_rng: ChaCha20Rng) -> HidingEngineConfig {
-    let perm16 = default_babybear_poseidon2_16();
-    let perm24 = default_babybear_poseidon2_24();
-
-    let field_hash = FieldHash::new(perm24.clone());
-    let compress = Compress::new(perm16);
+    let byte_hash = ByteHash {};
+    let field_hash = FieldHash::new(Sha256);
+    let compress = Sha256Compress;
     let val_mmcs = HidingValMmcs::new(field_hash, compress, 3, salt_rng);
 
     let challenge_mmcs = HidingChallengeMmcs::new(val_mmcs.clone());
@@ -145,7 +171,7 @@ pub fn make_hiding_config(mask_rng: ChaCha20Rng, salt_rng: ChaCha20Rng) -> Hidin
 
     let dft = Dft::default();
     let pcs = HidingPcs::new(dft, val_mmcs, fri_params, NUM_RANDOM_CODEWORDS, mask_rng);
-    let challenger = Challenger::new(perm24);
+    let challenger = Challenger::from_hasher(vec![], byte_hash);
 
     StarkConfig::new(pcs, challenger)
 }

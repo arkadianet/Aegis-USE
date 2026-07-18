@@ -24,3 +24,15 @@ rand_chacha = { version = "0.10", default-features = false }
 [profile.release]
 opt-level = 3
 lto = true
+
+# T2.1: route `sha2` to RISC0's SHA-256 ACCELERATOR in-guest. The
+# engine's SHA-256 FRI-Merkle MMCS (engine/src/config.rs) calls
+# `sha2::block_api::compress256`; without this patch it would run as *software*
+# SHA in the guest and the whole speedup would be lost. `p3-sha256` (v0.6.0
+# at this Plonky3 rev) depends on sha2 **0.11.0**, so the accelerated fork tag is
+# `sha2-v0.11.0-risczero.0`. GUEST-ONLY: the host/client build (settlement
+# workspace) keeps the stock crates.io sha2, since the risc0 fork only compiles
+# for the zkVM target. (The engine's *note-encryption* sha2 0.10.x is not on the
+# guest hot path, so it stays stock — the patch applies to the 0.11 line only.)
+[patch.crates-io]
+sha2 = { git = "https://github.com/risc0/RustCrypto-hashes", tag = "sha2-v0.11.0-risczero.0" }
