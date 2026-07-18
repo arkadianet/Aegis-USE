@@ -118,15 +118,23 @@ pub fn make_config() -> EngineConfig {
 //     attack on low-entropy rows). The salt is still `SALT_ELEMS` BabyBear
 //     elements (`P::Value = F`) regardless of the SHA digest-word type — the
 //     hiding construction is hash-agnostic, so the SHA swap preserves it.
-//   * `FriParameters::new_benchmark_zk`: log_blowup = 2, 100 queries, 16-bit
-//     query PoW — the crate's production-shaped ZK parameter set (conjectured
-//     soundness 2·100+16 = 216 bits by the ethSTARK conjecture).
+//   * [`hiding_fri_parameters`] (T1.2 query↔blowup rebalance): log_blowup = 3,
+//     67 queries, 16-bit query PoW. This REPLACES the previous
+//     `FriParameters::new_benchmark_zk` (log_blowup 2, 100 queries, pow 16) at
+//     equal-or-better security in BOTH regimes, verified against the vendored
+//     `p3-security` crate (see the soundness-regression test below):
+//       conjectured 213.6 vs 212.0 bits, proven composite 97.2 vs 96.5 bits
+//     (the proven bound binds on the batch-combination term in the
+//     list-decoding regime for both parameter sets). The guest-verifier cost
+//     scales ~linearly in query count → −33 % queries; the client pays the
+//     larger blowup (×2 LDE) — a cost REBALANCE at constant-or-better
+//     soundness, not a weakening.
 //
-// The masking budget: NUM_QUERIES (100) + O(1) out-of-domain points must not
+// The masking budget: NUM_QUERIES (67) + O(1) out-of-domain points must not
 // exceed the number of random rows (= the trace height, ≥ 128 for the spend).
 // This inequality is asserted in tests and is a pinned REVIEW ITEM. The SHA
 // swap does NOT touch this budget: it is an argument about queries/rows, not
-// about the leaf-hash choice.
+// about the leaf-hash choice (and the query cut 100 → 67 only eases it).
 //
 // ⚠ The mask RNG MUST be cryptographically secure — the masks ARE the privacy.
 // Plonky3's own ZK test uses a fixed-seed `SmallRng` (fine for tests, fatal in
@@ -138,6 +146,36 @@ pub fn make_config() -> EngineConfig {
 pub const NUM_RANDOM_CODEWORDS: usize = 4;
 /// Salt elements per Merkle leaf (~124 bits of salt over BabyBear).
 pub const SALT_ELEMS: usize = 4;
+
+/// Hiding-config FRI: log2 of the LDE blowup (T1.2 — see the module comment).
+pub const HIDING_LOG_BLOWUP: usize = 3;
+/// Hiding-config FRI: number of query rounds (T1.2).
+pub const HIDING_NUM_QUERIES: usize = 67;
+/// Hiding-config FRI: query-phase proof-of-work bits (T1.2).
+pub const HIDING_QUERY_POW_BITS: usize = 16;
+
+// The ZK masking budget, enforced at COMPILE TIME: query count + an O(1)
+// out-of-domain margin must stay below the number of random rows the hiding
+// interleave adds (= the trace height N_ROWS). See the module comment.
+const _: () = assert!(
+    HIDING_NUM_QUERIES + 8 <= crate::spend::monolith::N_ROWS,
+    "ZK mask budget violated: queries + OOD margin must not exceed random rows"
+);
+
+/// The hiding-config FRI parameters (T1.2 query↔blowup rebalance; the
+/// soundness-regression test pins them to at-least-ZK-baseline security in
+/// both the conjectured and proven regimes).
+pub fn hiding_fri_parameters<M>(mmcs: M) -> FriParameters<M> {
+    FriParameters {
+        log_blowup: HIDING_LOG_BLOWUP,
+        log_final_poly_len: 0,
+        max_log_arity: 1,
+        num_queries: HIDING_NUM_QUERIES,
+        commit_proof_of_work_bits: 0,
+        query_proof_of_work_bits: HIDING_QUERY_POW_BITS,
+        mmcs,
+    }
+}
 
 type HidingValMmcs =
     MerkleTreeHidingMmcs<F, u8, FieldHash, Compress, ChaCha20Rng, 2, 32, SALT_ELEMS>;
@@ -167,7 +205,7 @@ pub fn make_hiding_config(mask_rng: ChaCha20Rng, salt_rng: ChaCha20Rng) -> Hidin
     let val_mmcs = HidingValMmcs::new(field_hash, compress, 3, salt_rng);
 
     let challenge_mmcs = HidingChallengeMmcs::new(val_mmcs.clone());
-    let fri_params = FriParameters::new_benchmark_zk(challenge_mmcs);
+    let fri_params = hiding_fri_parameters(challenge_mmcs);
 
     let dft = Dft::default();
     let pcs = HidingPcs::new(dft, val_mmcs, fri_params, NUM_RANDOM_CODEWORDS, mask_rng);
@@ -192,4 +230,84 @@ pub fn hiding_config() -> HidingEngineConfig {
 /// settlement guest).
 pub fn hiding_config_for_verify() -> HidingEngineConfig {
     make_hiding_config(ChaCha20Rng::seed_from_u64(0), ChaCha20Rng::seed_from_u64(0))
+}
+
+#[cfg(test)]
+mod tests {
+    use p3_air::symbolic::AirLayout;
+    use p3_security::fri::{conjectured_error, FriRegime};
+    use p3_security::stark::proven_security_report;
+    use p3_security::{InstanceShape, StarkAirParams};
+
+    use super::*;
+    use crate::spend::monolith::SpendAir;
+
+    // ----- helpers -----
+
+    /// AIR shape derived symbolically from the real `SpendAir` (base +
+    /// preprocessed widths; the monolith uses no permutation argument, so
+    /// `AirLayout::from_air` covers every committed column).
+    fn spend_air_params() -> StarkAirParams {
+        let air = SpendAir;
+        StarkAirParams::from_air::<F, EF, _>(&air, AirLayout::from_air(&air), 2)
+    }
+
+    /// Instance shape shared by every parameter set under comparison:
+    /// committed degree 2^8 (N_ROWS = 128 doubled by the ZK interleave),
+    /// challenges from the ~2^124 quartic extension, SHA-256 commitment
+    /// (128-bit collision resistance), and a conservative OVERCOUNT of 8
+    /// batched codewords (preprocessed + main + 4 random codewords +
+    /// quotient chunks; overcounting understates security, so the asserted
+    /// floor is safe).
+    fn shape() -> InstanceShape {
+        InstanceShape {
+            log_trace_length: 8,
+            modulus_bits: 124,
+            collision_resistance: 128,
+            num_batched_functions: 8,
+        }
+    }
+
+    fn regime(log_blowup: usize, num_queries: usize, query_pow_bits: usize) -> FriRegime {
+        FriRegime {
+            log_blowup,
+            num_queries,
+            log_final_poly_len: 0,
+            max_log_arity: 1,
+            commit_pow_bits: 0,
+            query_pow_bits,
+        }
+    }
+
+    // ----- oracle parity -----
+
+    /// T1.2 soundness regression: the adopted hiding FRI parameters must be
+    /// at least as sound as the previous ZK baseline
+    /// (`FriParameters::new_benchmark_zk`: log_blowup 2, 100 queries, 16-bit
+    /// PoW) in BOTH the conjectured (random-words 2025/2010) and proven
+    /// (best-of-UDR/LDR composite, 2024/1553 + 2025/2055) regimes, per the
+    /// vendored `p3-security` oracle. A parameter change that fails this is a
+    /// security downgrade and must not ship.
+    #[test]
+    fn hiding_fri_params_at_least_as_sound_as_zk_baseline() {
+        let air = spend_air_params();
+        let shape = shape();
+
+        let baseline = regime(2, 100, 16);
+        let adopted = hiding_fri_parameters(()).security_regime();
+
+        let base_conj = conjectured_error(&baseline, &shape).bits();
+        let ours_conj = conjectured_error(&adopted, &shape).bits();
+        let base_proven = proven_security_report(&baseline, &air, &shape, &[]).security_bits();
+        let ours_proven = proven_security_report(&adopted, &air, &shape, &[]).security_bits();
+
+        assert!(
+            ours_conj >= base_conj,
+            "conjectured bits dropped: {ours_conj:.1} < {base_conj:.1}"
+        );
+        assert!(
+            ours_proven >= base_proven,
+            "proven bits dropped: {ours_proven:.1} < {base_proven:.1}"
+        );
+    }
 }

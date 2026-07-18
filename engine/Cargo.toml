@@ -64,6 +64,10 @@ serde            = { version = "1", default-features = false, features = ["deriv
 [dev-dependencies]
 hex = "0.4"
 postcard = { version = "1", features = ["alloc"] }
+# Soundness oracle for the FRI parameter choice (proven + conjectured bits;
+# ethSTARK 2021/582, 2024/1553, 2025/2010, 2025/2055) — the regression test in
+# `config.rs` holds the hiding params to the ZK-baseline security floor.
+p3-security = { git = "https://github.com/Plonky3/Plonky3", rev = "4aed8fe4195d40305175d55e58690f46171258d9" }
 
 # The FRI/STARK stack is unusably slow at opt-level 0; keep it optimized even in
 # dev/test so the prove/verify tests run in seconds, not minutes (mirrors the
