@@ -37,6 +37,7 @@ dependencies = [
  "postcard",
  "rand",
  "rand_chacha",
+ "serde",
  "sha2",
  "x25519-dalek",
 ]

@@ -511,6 +511,21 @@ both directions, credited to the POT), `pegin_confirmations` 10,
   `Δ(shielded_total + pot) == Σ deposits − Σ withdrawals` — value enters and
   leaves the system only through the vault.
 
+### Settlement cost datum (measured, real RISC0)
+
+The settlement proof cost is dominated by the **state-transition** sub-statement,
+and that cost grows with the **epoch span** (number of hn blocks the epoch
+covers), not just the peg-out count. A live prove over a ~9,921-block pre-epoch +
+~2,014-leaf epoch measured **~10.5 B RISC0 cycles (~10.6 k segments)**, of which
+the tree-transition over the block span is ~9 B — an order of magnitude above the
+early per-proof estimate. CPU-only succinct proving of that is 1–3 h; a
+GPU (CUDA/sppark) prove of the identical deterministic statement is ~10–20 min.
+**Design implication / future optimization:** settlement cost should not scale
+with epoch length — a checkpointed / incremental state-transition (prove
+`prev_root → checkpoint_root` once, then only the new tail per epoch) bounds the
+per-settlement work to the epoch's own activity. Pinned here as a real datum for
+the batching-cadence and prover-hardware decisions.
+
 ### Settlement + PegVault (Ergo side)
 
 Journal (byte-exact, guest ↔ contract): `b"AEGISPO3"` ‖ prev_root(32) ‖

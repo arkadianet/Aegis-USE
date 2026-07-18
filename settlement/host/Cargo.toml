@@ -1,0 +1,22 @@
+[package]
+name = "settle"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+methods = { path = "../methods" }
+risc0-zkvm = { version = "^3.0.5" }
+aegis-engine = { path = "../../engine" }
+aegis-hn-wallet = { path = "../../engine/wallet" }
+aegis-node = { path = "../../aegis-node" }
+p3-field = { git = "https://github.com/Plonky3/Plonky3", rev = "4aed8fe4195d40305175d55e58690f46171258d9" }
+bincode = "1.3"
+clap = { version = "4", features = ["derive"] }
+hex = "0.4"
+postcard = { version = "1", features = ["alloc"] }
+reqwest = { version = "0.12", features = ["blocking"] }
+serde = { version = "1", features = ["derive"] }
+tempfile = "3"
+
+[features]
+cuda = ["risc0-zkvm/cuda"]
