@@ -9,8 +9,10 @@
 //      `withdrawal_amount + peg_fee` with nonces derived from the spend's
 //      first nullifier (the consensus binding — value provably left the pool
 //      for exactly this withdrawal);
-//   3. appending the epoch's leaves (which include the burn commitment) to
-//      the pre-epoch tree takes prev_root → new_root.
+//   3. advancing the committed PRE-EPOCH FRONTIER (the compact append boundary,
+//      authenticated by prev_root: a wrong frontier reproduces a wrong root)
+//      over the epoch's leaves (which include the burn commitment) takes
+//      prev_root → new_root — O(epoch), independent of chain history.
 //
 // The journal commits EXACTLY the bytes the PegVault contract reconstructs
 // from the release transaction:
@@ -28,7 +30,7 @@ use alloc::vec::Vec;
 
 use aegis_engine::burn::burn_cm_expected;
 use aegis_engine::config::{hiding_config_for_verify, make_hiding_config, HidingEngineConfig};
-use aegis_engine::merkle::NoteTree;
+use aegis_engine::merkle::{settle_tree_transition, Frontier};
 use aegis_engine::poseidon::{digest_to_bytes, Digest, DIGEST_ELEMS, F};
 use aegis_engine::spend::monolith::{SpendAir, N_PUB, N_ROWS, PUB_CMO0, PUB_NF0};
 use p3_field::PrimeCharacteristicRing;
@@ -57,7 +59,10 @@ fn main() {
     // ---- private inputs ----
     let proof_bytes: Vec<u8> = env::read();
     let public_values: Vec<u32> = env::read();
-    let pre_leaves: Vec<[u32; DIGEST_ELEMS]> = env::read();
+    // The committed PRE-EPOCH frontier (postcard, like `proof_bytes`): the
+    // compact append boundary, NOT the pre-epoch leaves. Its `root()` is bound
+    // to the public `prev_root` below, so a wrong boundary cannot pass.
+    let frontier_bytes: Vec<u8> = env::read();
     let epoch_leaves: Vec<[u32; DIGEST_ELEMS]> = env::read();
     let withdrawal_amount: u64 = env::read();
     let recipient_prop: Vec<u8> = env::read();
@@ -100,28 +105,24 @@ fn main() {
         "out0 must be the deterministic burn note for this withdrawal"
     );
 
-    // ---- 3. tree transition prev_root → new_root over the epoch ----
-    let mut tree = NoteTree::new();
-    for l in &pre_leaves {
-        tree.append(limbs_to_digest(l));
-    }
-    let prev_root = tree.root();
-    let mut burn_in_epoch = false;
-    for l in &epoch_leaves {
-        let d = limbs_to_digest(l);
-        if d == cm0 {
-            burn_in_epoch = true;
-        }
-        tree.append(d);
-    }
+    // ---- 3. INCREMENTAL transition prev_root → new_root over the epoch ----
+    // O(epoch): advance the committed frontier over just the epoch leaves.
+    // `prev_root` from the frontier must equal the public root the PegVault
+    // binds (checked implicitly — the journal commits this prev_root, and the
+    // contract requires it to equal the vault's R4). A wrong frontier yields a
+    // wrong prev_root and the release cannot match the vault.
+    let frontier: Frontier =
+        postcard::from_bytes(&frontier_bytes).expect("pre-epoch frontier decodes");
+    let epoch: Vec<Digest> = epoch_leaves.iter().map(limbs_to_digest).collect();
+    let burn_in_epoch = epoch.iter().any(|d| *d == cm0);
     assert!(burn_in_epoch, "burn commitment must be an epoch leaf");
-    let new_root = tree.root();
+    let (prev_root, new_frontier) = settle_tree_transition(&frontier, &epoch);
+    let new_root = new_frontier.root();
     let c_tree = env::cycle_count();
     env::log(&alloc::format!(
-        "CYCLES tree_transition={} (pre={} epoch={})",
+        "CYCLES tree_transition={} (epoch={})",
         c_tree - c_verify,
-        pre_leaves.len(),
-        epoch_leaves.len()
+        epoch.len()
     ));
 
     // ---- 4. the journal: exactly what PegVault reconstructs from the tx ----

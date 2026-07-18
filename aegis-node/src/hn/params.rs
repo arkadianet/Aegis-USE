@@ -25,7 +25,7 @@ use aegis_engine::address::{Address, WalletKeys, HRP_TEST};
 /// profiles so the two networks can never confuse blocks or peers.
 /// v3: the trustless-bridge cut (peg-in mints, peg-out burns in the block
 /// format) — chain-id-breaking vs the v2 spec-economics testnet.
-pub const HN_TESTNET_CHAIN_ID: u32 = 0x484E_0003; // "HN" ‖ v3
+pub const HN_TESTNET_CHAIN_ID: u32 = 0x484E_0004; // "HN" ‖ v4 (incremental-settlement cut)
 
 /// Base-unit scale: 1 USE = 100 base units ("cents"). All amounts in the
 /// engine, wallet, and chain are integer cents.

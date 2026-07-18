@@ -66,6 +66,13 @@ enum Cmd {
         /// recorded withdrawal; journaled verbatim).
         #[arg(long)]
         recipient_tree: String,
+        /// SEAL the epoch at this hn height (inclusive): the epoch is blocks in
+        /// `(prev_height, sealed_tip]`, pinned at settle start so the proof is
+        /// DETERMINISTIC and does not chase the advancing chain (the earlier
+        /// tip-grabbing caused divergent new_roots). Must be `>=` the
+        /// withdrawal's height. Omit to seal at the current tip (recorded).
+        #[arg(long)]
+        sealed_tip: Option<u64>,
         #[arg(long)]
         out_dir: PathBuf,
     },
@@ -117,6 +124,7 @@ fn split_leaves(
     blocks: &[HnBlock],
     params: &HnChainParams,
     prev_height: u64,
+    sealed_tip: u64,
     prev_root: &[u8; 32],
 ) -> (Vec<Digest>, Vec<Digest>) {
     let pre: Vec<Digest> = blocks
@@ -124,9 +132,11 @@ fn split_leaves(
         .filter(|b| b.height <= prev_height)
         .flat_map(|b| leaves_of_block(b, params))
         .collect();
+    // SEALED epoch: only blocks in (prev_height, sealed_tip]. Pinning the upper
+    // bound makes the proof deterministic regardless of chain advancement.
     let epoch: Vec<Digest> = blocks
         .iter()
-        .filter(|b| b.height > prev_height)
+        .filter(|b| b.height > prev_height && b.height <= sealed_tip)
         .flat_map(|b| leaves_of_block(b, params))
         .collect();
     let mut tree = aegis_engine::merkle::NoteTree::new();
@@ -143,11 +153,21 @@ fn split_leaves(
 
 struct ProveInput {
     tx: Tx,
-    pre_leaves: Vec<[u32; DIGEST_ELEMS]>,
+    /// The committed PRE-EPOCH frontier (postcard) — the compact append
+    /// boundary, NOT the pre-epoch leaves. Built host-side via
+    /// `Frontier::from_leaves(&pre)` (unconstrained O(pre)); the guest advances
+    /// it over the epoch in O(epoch).
+    frontier_bytes: Vec<u8>,
     epoch_leaves: Vec<[u32; DIGEST_ELEMS]>,
     amount: u64,
     recipient_prop: Vec<u8>,
     counter_next: u64,
+}
+
+/// Build the postcard-encoded pre-epoch frontier the guest consumes.
+fn frontier_bytes(pre: &[Digest]) -> Vec<u8> {
+    let frontier = aegis_engine::merkle::Frontier::from_leaves(pre);
+    postcard::to_allocvec(&frontier).expect("frontier serializes")
 }
 
 fn prove_and_write(input: &ProveInput, out_dir: &PathBuf) {
@@ -162,7 +182,7 @@ fn prove_and_write(input: &ProveInput, out_dir: &PathBuf) {
         .unwrap()
         .write(&input.tx.public_values)
         .unwrap()
-        .write(&input.pre_leaves)
+        .write(&input.frontier_bytes)
         .unwrap()
         .write(&input.epoch_leaves)
         .unwrap()
@@ -279,10 +299,16 @@ fn main() {
             let new_root = chain.current_root();
             println!("smoke chain built in {:?}", t0.elapsed());
 
-            // The SAME split path as `prove`.
+            // The SAME split path as `prove` (seal at the tiny chain's tip).
             let blocks = chain.blocks_since(0);
-            let (pre, epoch) =
-                split_leaves(&blocks, &params, prev_height, &digest_to_bytes(&prev_root));
+            let sealed = blocks.iter().map(|b| b.height).max().unwrap_or(prev_height);
+            let (pre, epoch) = split_leaves(
+                &blocks,
+                &params,
+                prev_height,
+                sealed,
+                &digest_to_bytes(&prev_root),
+            );
             let po = &blocks
                 .iter()
                 .find(|b| b.height > prev_height && !b.pegouts.is_empty())
@@ -291,7 +317,7 @@ fn main() {
 
             let input = ProveInput {
                 tx: po.tx.clone(),
-                pre_leaves: to_limbs(&pre),
+                frontier_bytes: frontier_bytes(&pre),
                 epoch_leaves: to_limbs(&epoch),
                 amount: withdrawal,
                 recipient_prop: recipient_prop.clone(),
@@ -321,6 +347,7 @@ fn main() {
             withdrawal_index,
             counter_next,
             recipient_tree,
+            sealed_tip,
             out_dir,
         } => {
             let params = HnChainParams::testnet();
@@ -360,21 +387,29 @@ fn main() {
                 .find(|p| digest_to_limbs(&digest_at(&p.tx.public_values, PUB_NF0)) == w.nf0)
                 .expect("peg-out tx for withdrawal");
 
-            // Rebuild the full leaf sequence; split at the settled boundary.
+            // Rebuild the full leaf sequence; split at the settled boundary,
+            // sealing the epoch's upper bound (deterministic; default = tip).
             let target: [u8; 32] = hex::decode(&prev_root)
                 .expect("prev-root hex")
                 .try_into()
                 .expect("prev-root must be 32 bytes");
-            let (pre, epoch) = split_leaves(&blocks, &params, prev_height, &target);
+            let tip = blocks.iter().map(|b| b.height).max().unwrap_or(prev_height);
+            let sealed = sealed_tip.unwrap_or(tip);
+            assert!(
+                sealed >= w.hn_height && sealed <= tip,
+                "--sealed-tip {sealed} must be in [withdrawal height {}, tip {tip}]",
+                w.hn_height
+            );
+            let (pre, epoch) = split_leaves(&blocks, &params, prev_height, sealed, &target);
             println!(
-                "epoch: pre-leaves={} epoch-leaves={} (new_root will cover the tip)",
+                "epoch: pre-leaves={} epoch-leaves={} sealed_tip={sealed} (deterministic)",
                 pre.len(),
                 epoch.len()
             );
 
             let input = ProveInput {
                 tx: po.tx.clone(),
-                pre_leaves: to_limbs(&pre),
+                frontier_bytes: frontier_bytes(&pre),
                 epoch_leaves: to_limbs(&epoch),
                 amount: w.amount,
                 recipient_prop: recipient,
