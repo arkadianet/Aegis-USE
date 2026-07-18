@@ -35,8 +35,16 @@ demonstration; the crypto-maturity tier gates **real value** only.
 - [ ] **Narrow-trace rework.** ~3–10× off the per-tx verify term, and pushes phone
       proving back under ~1s (currently extrapolates to ~1.5–4s post-ZK). Same
       lever that cheapens settlement.
-- [ ] **Poseidon2 precompile / accelerator** in the settlement guest — further
-      in-field verify speedup.
+- [x] ~~**Poseidon2 precompile / accelerator** in the settlement guest~~ — **RULED
+      OUT 2026-07-19 (feasibility spike, source-grounded).** RISC0's Poseidon2 ecall
+      exists but is a **different function**: t=24 / R_P=21 / RISC0-proprietary
+      constants+MDS, vs our client's Plonky3 t=16 / R_P=13. Cryptographically
+      distinct — cannot verify our hashes. Using it would require re-basing the
+      client's entire Poseidon2 (→ note-commitment + nullifier crypto) on RISC0's
+      t=24 instance: chain-id-breaking, review-gated, not offered by Plonky3. Bad
+      trade for a settlement-only win. **→ narrow-trace is THE settlement lever.**
+      Only precompile-compatible route = make the CLIENT proof RISC0-native
+      recursion format (architecture swap, parked — see below).
 - [ ] **Productionize GPU proving.** The `~/apps/risc0-cuda` container becomes the
       standard settler path (host gcc-16 vs CUDA toolchain worked around via an
       Ubuntu-LTS build container; image-id pin-matched).
