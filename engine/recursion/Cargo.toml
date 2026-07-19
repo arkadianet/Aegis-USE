@@ -30,6 +30,10 @@ default  = ["parallel"]
 # Rayon parallelism in the recursion prover — REQUIRED for the measured envelope
 # (I1: 9.5 s -> ~2 s layer-1 with it; 27x spread without both this and native ISA).
 parallel = ["p3-circuit-prover/parallel"]
+# M-E1 measurement dump harness (tests/dump_epoch.rs): forwards the engine's
+# aux-pow feature so the harness can mine real shares + build the anchor chain
+# (E2/E4) via engine::epoch::testgen. Off by default (keeps the Ergo graph out).
+aux-pow = ["aegis-engine/aux-pow"]
 
 [dependencies]
 aegis-engine = { path = ".." }

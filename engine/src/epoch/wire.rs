@@ -8,7 +8,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::poseidon::{Digest, DIGEST_ELEMS, F};
+use crate::poseidon::{digest_to_limbs, Digest, DIGEST_ELEMS, F};
 use crate::settled::SETTLED_DEPTH;
 use p3_field::PrimeCharacteristicRing;
 
@@ -19,6 +19,10 @@ type LimbDigest = [u32; DIGEST_ELEMS];
 
 fn to_d(l: &LimbDigest) -> Digest {
     core::array::from_fn(|i| F::from_u32(l[i]))
+}
+
+fn to_l(d: &Digest) -> LimbDigest {
+    digest_to_limbs(d)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -32,6 +36,17 @@ pub struct SpendWire {
 }
 
 impl SpendWire {
+    fn from_spend(s: &SpendPublics) -> Self {
+        Self {
+            root: to_l(&s.root),
+            nf0: to_l(&s.nf0),
+            nf1: to_l(&s.nf1),
+            cm0: to_l(&s.cm0),
+            cm1: to_l(&s.cm1),
+            fee: s.fee,
+        }
+    }
+
     fn to_spend(&self) -> SpendPublics {
         SpendPublics {
             root: to_d(&self.root),
@@ -77,6 +92,41 @@ pub struct SuffixBlockWire {
 }
 
 impl SuffixBlockWire {
+    fn from_block(b: &SuffixBlock) -> Self {
+        Self {
+            height: b.height,
+            prev_header_id: b.prev_header_id,
+            prev_root: to_l(&b.prev_root),
+            state_root: to_l(&b.state_root),
+            timestamp_ms: b.timestamp_ms,
+            sc_nbits: b.sc_nbits,
+            txs: b.txs.iter().map(SpendWire::from_spend).collect(),
+            pegouts: b
+                .pegouts
+                .iter()
+                .map(|p| PegOutWire {
+                    spend: SpendWire::from_spend(&p.spend),
+                    amount: p.amount,
+                    recipient_prop: p.recipient_prop.clone(),
+                })
+                .collect(),
+            pegins: b
+                .pegins
+                .iter()
+                .map(|p| PegInWire {
+                    box_id: p.box_id,
+                    dest_owner: to_l(&p.dest_owner),
+                    amount: p.amount,
+                })
+                .collect(),
+            miner_owner: to_l(&b.miner_owner),
+            coinbase_amount: b.coinbase_amount,
+            coinbase_cm: to_l(&b.coinbase_cm),
+            coinbase_is_reward: b.coinbase_is_reward,
+            pot_after: b.pot_after,
+        }
+    }
+
     fn to_block(&self) -> SuffixBlock {
         SuffixBlock {
             height: self.height,
@@ -132,6 +182,28 @@ pub struct EpochWitnessWire {
 }
 
 impl EpochWitnessWire {
+    /// Serialize an `F`-typed witness to wire form (host side).
+    pub fn from_witness(w: &EpochWitness) -> Self {
+        Self {
+            chain_id: w.chain_id,
+            blocks: w.blocks.iter().map(SuffixBlockWire::from_block).collect(),
+            frontier_bytes: w.frontier_bytes.clone(),
+            tip_id_prev: w.tip_id_prev,
+            pot_before: w.pot_before,
+            shielded_before: w.shielded_before,
+            seam_roots: w.seam_roots.iter().map(to_l).collect(),
+            settled_root_in: to_l(&w.settled_root_in),
+            settled_paths: w
+                .settled_paths
+                .iter()
+                .map(|p| p.iter().map(to_l).collect())
+                .collect(),
+            spend_root_digest: to_l(&w.spend_root_digest),
+            ergo_ref_id: w.ergo_ref_id,
+            counter_next: w.counter_next,
+        }
+    }
+
     /// Rehydrate the `F`-typed witness. Panics if any settled path is not exactly
     /// [`SETTLED_DEPTH`] siblings (a malformed witness the guest must reject).
     pub fn into_witness(&self) -> EpochWitness {

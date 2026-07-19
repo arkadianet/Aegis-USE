@@ -1,0 +1,19 @@
+# M-E1 aux-PoW epoch-validity guest EXECUTE measurement. Reads the artifact set
+# dumped by aegis-recursion/tests/dump_epoch.rs and runs the FULL aux-pow
+# epoch-validity guest through the RISC0 executor (no prove), reporting the
+# in-guest cycle breakdown (root_verify / epoch_validity / aux_pow_e2 / anchor_e4)
+# + total — the M-E1 measurement (epoch-validity-design.md §4).
+#
+# Build with AEGIS_EPOCH_AUXPOW=1 so `methods` embeds the aux-pow guest ELF.
+[package]
+name = "exec-epoch"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+methods = { path = "../methods" }
+risc0-zkvm = { version = "^3.0.5" }
+aegis-engine = { path = "../../engine", features = ["aux-pow"] }
+postcard = { version = "1", features = ["alloc"] }
+serde = { version = "1", features = ["derive"] }
+clap = { version = "4", features = ["derive"] }

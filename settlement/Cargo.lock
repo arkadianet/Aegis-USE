@@ -72,7 +72,12 @@ version = "0.0.1"
 dependencies = [
  "bech32",
  "chacha20poly1305",
+ "ergo-crypto",
+ "ergo-primitives",
+ "ergo-rest-json",
+ "ergo-ser",
  "hkdf",
+ "num-bigint 0.4.8",
  "p3-air",
  "p3-baby-bear",
  "p3-batch-stark",
@@ -93,6 +98,7 @@ dependencies = [
  "rand 0.10.2",
  "rand_chacha 0.10.0",
  "serde",
+ "serde_json",
  "sha2 0.10.9",
  "thiserror 2.0.18",
  "x25519-dalek",
@@ -2174,6 +2180,18 @@ checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "exec-epoch"
+version = "0.1.0"
+dependencies = [
+ "aegis-engine",
+ "clap",
+ "methods",
+ "postcard",
+ "risc0-zkvm",
+ "serde",
 ]
 
 [[package]]

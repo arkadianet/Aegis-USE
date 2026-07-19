@@ -6,7 +6,7 @@
 # aegis-node are read-only path dependencies.
 [workspace]
 resolver = "2"
-members = ["host", "methods", "exec-i4"]
+members = ["host", "methods", "exec-i4", "exec-epoch"]
 
 [profile.dev]
 opt-level = 3
