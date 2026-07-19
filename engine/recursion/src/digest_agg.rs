@@ -463,6 +463,40 @@ pub fn verify_root_digest(
     Ok(digest_publics(&root.0))
 }
 
+/// Verify a root proof from its bytes alone — the settlement-guest entry point.
+///
+/// Takes only the [`BatchStarkProof`] (the guest never sees the prover-side
+/// `CircuitProverData`); the table packing rides inside the proof
+/// (`proof.table_packing`). Reconstructs the verifier — poseidon2 + recompose +
+/// the `aegis/digest` table — runs `verify_all_tables` in-field, and returns the
+/// surfaced withdrawals digest limbs. Constant work in N (one root verify).
+pub fn verify_root_proof(
+    params: &AggParams,
+    proof: &BatchStarkProof<PlainAggConfig>,
+) -> Result<Vec<F>, String> {
+    let agg_config = plain_agg_config(params);
+    let verifier = digest_batch_prover(agg_config, proof.table_packing.clone());
+    verifier
+        .verify_all_tables::<Challenge>(proof)
+        .map_err(|e| format!("{e:?}"))?;
+    Ok(digest_publics(proof))
+}
+
+/// Deserialize a postcard-encoded root proof and verify it — the exact call the
+/// RISC0 settlement guest makes (the guest never names a p3 type). Returns the
+/// surfaced withdrawals digest limbs.
+pub fn verify_root_bytes(params: &AggParams, bytes: &[u8]) -> Result<Vec<F>, String> {
+    let proof: BatchStarkProof<PlainAggConfig> =
+        postcard::from_bytes(bytes).map_err(|e| format!("root proof decode: {e}"))?;
+    verify_root_proof(params, &proof)
+}
+
+/// Serialize a root proof for the guest/wire (postcard) — the settlement host's
+/// counterpart to [`verify_root_bytes`].
+pub fn serialize_root(root: &RecursionOutput<PlainAggConfig>) -> Vec<u8> {
+    postcard::to_allocvec(&root.0).expect("serialize root proof")
+}
+
 // ============================================================================
 // native digest recomputation (the guest-side oracle)
 // ============================================================================
