@@ -42,18 +42,18 @@ pub fn block_id(height: u64, prev_root: &Digest) -> [u8; 32] {
 }
 
 /// The merge-mining anchor: the STARK-devnet Ergo header this hn block is mined
-/// against. Merge-mining binds hn liveness to the devnet's Autolykos PoW chain —
-/// each hn block references a real, advancing devnet header.
+/// against — a LIVENESS reference (monotone devnet height + the header id),
+/// paced by the devnet's Autolykos PoW chain.
 ///
-/// ⚠ CONSENSUS SURFACE (documented, partially implemented). This pass carries
-/// the anchor and enforces MONOTONICITY (the devnet height a block anchors to
-/// never goes backwards) + non-empty id, and the deployment's miner only
-/// anchors to a header it fetched from the live devnet. The FULL aux-PoW binding
-/// — the devnet block's extension Merkle-commits to the hn `state_root`, so one
-/// solved Autolykos PoW is bound to exactly one hn block (reusing
-/// `crate::auxpow::extension_root` + a `BatchMerkleProof`, verified with
-/// `ergo_crypto::autolykos::v2::check_pow_v2`) — is the remaining step. Until it
-/// lands, the anchor is a devnet-paced liveness scaffold, not yet PoW-binding.
+/// The aux-PoW **binding** (E0) lives elsewhere: [`HnBlock::aux_pow`] carries a
+/// [`super::auxpow::HnAuxPow`] whose Autolykos v2 solution commits this block's
+/// [`hn_header_id`](super::header::hn_header_id) and clears its `sc_nbits`
+/// target — one solved PoW bound to exactly one hn block. In Strict mode
+/// (`params.require_aux_pow`) `apply_block` enforces it and fork choice weighs
+/// the real work; in DevStub the anchor's monotone height is the only devnet
+/// check (liveness-only, `epoch-validity-design.md` §6.5). The anchor and the
+/// binding are complementary: the anchor says *which* devnet header, the
+/// `aux_pow` witness proves that header's work commits this block.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuxAnchor {
     pub devnet_header_id: [u8; 32],
