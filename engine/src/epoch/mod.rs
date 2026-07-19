@@ -18,6 +18,8 @@
 //! The journal is the §2.2 `AEGISPV1` layout; the PegVault reconstructs it
 //! byte-exact and chains R4/R6/R7 (`bridge-tools/src/vault.rs`).
 
+#[cfg(feature = "aux-pow")]
+pub mod anchor;
 pub mod digest;
 pub mod header_id;
 #[cfg(feature = "aux-pow")]

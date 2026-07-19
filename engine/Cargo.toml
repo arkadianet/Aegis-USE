@@ -68,6 +68,7 @@ thiserror = "2"
 #     is the design's flagged make-or-break measurement (M-E1). ---
 ergo-crypto     = { git = "https://github.com/arkadianet/ergo.git", tag = "v0.5.2", optional = true }
 ergo-ser        = { git = "https://github.com/arkadianet/ergo.git", tag = "v0.5.2", optional = true }
+ergo-primitives = { git = "https://github.com/arkadianet/ergo.git", tag = "v0.5.2", optional = true }
 ergo-validation = { git = "https://github.com/arkadianet/ergo.git", tag = "v0.5.2", optional = true }
 # Test-only (the share-mining helper decodes a real testnet block); pulled only
 # with `aux-pow`, so the default build never resolves the ergo REST graph.
@@ -100,6 +101,7 @@ default = []
 aux-pow = [
     "dep:ergo-crypto",
     "dep:ergo-ser",
+    "dep:ergo-primitives",
     "dep:ergo-validation",
     "dep:ergo-rest-json",
     "dep:num-bigint",

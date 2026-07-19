@@ -33,9 +33,10 @@ use ergo_validation::popow::verify_batch_merkle_proof;
 use num_bigint::BigUint;
 
 // The MM commitment constants (pinned; mirror `aegis-spec`) — the extension
-// field key/version/length the miner splices to carry the hn header id.
-const AEGIS_MM_KEY: [u8; 2] = [0xAE, 0x00];
-const MM_COMMITMENT_VERSION: u8 = 0x01;
+// field key/version/length the miner splices to carry the hn header id. Shared
+// with the E4 anchor verifier (`super::anchor`).
+pub(crate) const AEGIS_MM_KEY: [u8; 2] = [0xAE, 0x00];
+pub(crate) const MM_COMMITMENT_VERSION: u8 = 0x01;
 const MM_FIELD_VALUE_LEN: usize = 33;
 /// Scala `Extension` leaf node prefix (`0x00` for a data leaf).
 const LEAF_NODE_PREFIX: u8 = 0x00;
@@ -79,7 +80,8 @@ pub enum ShareError {
 
 /// Extension-merkle leaf digest of a field: `blake2b256(0x00 ‖ kvToLeaf(field))`
 /// where `kvToLeaf = [key.len() as u8] ‖ key ‖ value` (Scala `Extension`).
-fn leaf_digest(field: &ExtensionField) -> [u8; 32] {
+/// Shared with the E4 anchor verifier (`super::anchor`).
+pub(crate) fn mm_leaf_digest(field: &ExtensionField) -> [u8; 32] {
     let mut leaf = Vec::with_capacity(1 + field.key.len() + field.value.len());
     leaf.push(field.key.len() as u8);
     leaf.extend_from_slice(&field.key);
@@ -117,7 +119,7 @@ pub fn verify_share(
             got: witness.proof.indices.len(),
         });
     }
-    if witness.proof.indices[0].1 != leaf_digest(&witness.field) {
+    if witness.proof.indices[0].1 != mm_leaf_digest(&witness.field) {
         return Err(ShareError::ProofLeafMismatch);
     }
     if !verify_batch_merkle_proof(
