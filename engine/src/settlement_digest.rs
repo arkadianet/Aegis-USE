@@ -250,7 +250,7 @@ mod tests {
     fn withdrawals_root_single_pads_with_identity() {
         // N=1 pads to 1 (already a power of two): root == leaf_digest.
         let e = entry(990, b"recipient", 10, 20);
-        assert_eq!(withdrawals_root(&[e.clone()]), leaf_digest(&e));
+        assert_eq!(withdrawals_root(std::slice::from_ref(&e)), leaf_digest(&e));
     }
 
     #[test]
