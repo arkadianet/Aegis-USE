@@ -17,7 +17,9 @@
 //! only the proof-system wrapper differs. See
 //! `dev-docs/sidechain/recursion-feasibility.md` §8.4.
 
-use p3_batch_stark::{prove_batch, verify_batch, BatchProof, CommonData, ProverData, StarkInstance};
+use p3_batch_stark::{
+    prove_batch, verify_batch, BatchProof, CommonData, ProverData, StarkInstance,
+};
 use p3_matrix::dense::RowMajorMatrix;
 
 use crate::config::recursion::RecursionHidingConfig;
@@ -90,8 +92,20 @@ mod tests {
 
     /// A valid 2-in/2-out spend (mirrors the monolith test scenario).
     fn scenario() -> (NoteTree, [InputNote; 2], [OutputNote; 2], u64) {
-        let in0 = InputNote { value: 1_000, nk: digest(1), rho: digest(50), r: digest(90), index: 0 };
-        let in1 = InputNote { value: 500, nk: digest(200), rho: digest(250), r: digest(290), index: 0 };
+        let in0 = InputNote {
+            value: 1_000,
+            nk: digest(1),
+            rho: digest(50),
+            r: digest(90),
+            index: 0,
+        };
+        let in1 = InputNote {
+            value: 500,
+            nk: digest(200),
+            rho: digest(250),
+            r: digest(290),
+            index: 0,
+        };
         let mut tree = NoteTree::new();
         let cm0 = note_commitment(in0.value, &owner_key(&in0.nk), &in0.rho, &in0.r);
         let cm1 = note_commitment(in1.value, &owner_key(&in1.nk), &in1.rho, &in1.r);
@@ -99,16 +113,23 @@ mod tests {
         let i1 = tree.append(cm1);
         let in0 = InputNote { index: i0, ..in0 };
         let in1 = InputNote { index: i1, ..in1 };
-        let out0 = OutputNote { value: 900, owner: digest(400), rho: digest(450), r: digest(490) };
-        let out1 = OutputNote { value: 590, owner: digest(600), rho: digest(650), r: digest(690) };
+        let out0 = OutputNote {
+            value: 900,
+            owner: digest(400),
+            rho: digest(450),
+            r: digest(490),
+        };
+        let out1 = OutputNote {
+            value: 590,
+            owner: digest(600),
+            rho: digest(650),
+            r: digest(690),
+        };
         (tree, [in0, in1], [out0, out1], 10)
     }
 
     fn cfg() -> RecursionHidingConfig {
-        make_recursion_hiding_config(
-            ChaCha20Rng::seed_from_u64(1),
-            ChaCha20Rng::seed_from_u64(2),
-        )
+        make_recursion_hiding_config(ChaCha20Rng::seed_from_u64(1), ChaCha20Rng::seed_from_u64(2))
     }
 
     // ----- happy path -----

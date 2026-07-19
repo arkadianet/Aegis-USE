@@ -90,7 +90,10 @@ pub fn circuit_sponge(inputs: &[F]) -> Digest {
 /// domain-separated engine sponge over the ErgoTree bytes (each byte a field
 /// element). Fixed 8-limb output regardless of recipient length.
 pub fn recipient_commit(recipient_prop: &[u8]) -> Digest {
-    let limbs: Vec<F> = recipient_prop.iter().map(|&b| F::from_u32(b as u32)).collect();
+    let limbs: Vec<F> = recipient_prop
+        .iter()
+        .map(|&b| F::from_u32(b as u32))
+        .collect();
     hash_domain(DOMAIN_SETTLE_RECIPIENT, &limbs)
 }
 
