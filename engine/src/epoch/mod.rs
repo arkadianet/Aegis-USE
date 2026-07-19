@@ -20,6 +20,8 @@
 
 pub mod digest;
 pub mod header_id;
+#[cfg(feature = "aux-pow")]
+pub mod share;
 pub mod types;
 pub mod verify;
 

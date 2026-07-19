@@ -60,6 +60,21 @@ postcard = { version = "1", default-features = false, features = ["alloc"] }
 # `thiserror` convention); std-capable in the RISC0 guest.
 thiserror = "2"
 
+# --- E2 aux-PoW share verify (epoch/share.rs), behind the `aux-pow` feature so
+#     the core E1/E3 engine + guest build stay lean unless the pricer is wired.
+#     These are the SAME reviewed Ergo primitives the node's HnAuxPow uses
+#     (blake2b256, Autolykos v2, batch-merkle inclusion), pinned to the same tag
+#     as the root workspace. Whether they cross-compile to the RISC0 guest target
+#     is the design's flagged make-or-break measurement (M-E1). ---
+ergo-crypto     = { git = "https://github.com/arkadianet/ergo.git", tag = "v0.5.2", optional = true }
+ergo-ser        = { git = "https://github.com/arkadianet/ergo.git", tag = "v0.5.2", optional = true }
+ergo-validation = { git = "https://github.com/arkadianet/ergo.git", tag = "v0.5.2", optional = true }
+# Test-only (the share-mining helper decodes a real testnet block); pulled only
+# with `aux-pow`, so the default build never resolves the ergo REST graph.
+ergo-rest-json  = { git = "https://github.com/arkadianet/ergo.git", tag = "v0.5.2", optional = true }
+num-bigint      = { version = "0.4", optional = true }
+serde_json      = { version = "1", optional = true }
+
 # rand 0.10 to match Plonky3's rand (the hiding PCS/MMCS take an `R: rand::Rng`);
 # a mismatched rand major would fail the trait bound on the mask/salt RNG.
 rand = { version = "0.10", default-features = false, features = ["std", "std_rng", "sys_rng", "thread_rng"] }
@@ -76,6 +91,20 @@ hkdf             = "0.12"
 sha2             = { version = "0.10", default-features = false }
 bech32           = "0.9"
 serde            = { version = "1", default-features = false, features = ["derive", "alloc"] }
+
+[features]
+default = []
+# The E2 in-guest aux-PoW share verifier (the fabrication pricer). Pulls the
+# reviewed Ergo primitives; kept default-off so the core E1/E3 engine + guest
+# build stay lean unless the pricer is wired.
+aux-pow = [
+    "dep:ergo-crypto",
+    "dep:ergo-ser",
+    "dep:ergo-validation",
+    "dep:ergo-rest-json",
+    "dep:num-bigint",
+    "dep:serde_json",
+]
 
 [dev-dependencies]
 hex = "0.4"
