@@ -343,6 +343,7 @@ mod tests {
         HnBlock {
             height: 5,
             prev_root: [7u32; 8],
+            prev_header_id: [0u8; 32],
             state_root: [8u32; 8],
             timestamp_ms: 1_760_000_000_000,
             sc_nbits: ergo_ser::difficulty::encode_compact_bits(&BigUint::from(1u8)),

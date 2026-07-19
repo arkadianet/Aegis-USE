@@ -106,9 +106,10 @@ pub fn hn_header_id(chain_id: u32, block: &HnBlock) -> [u8; 32] {
         core::array::from_fn(|i| body[i].as_canonical_u32())
     };
 
-    let mut input: Vec<F> = Vec::with_capacity(64);
+    let mut input: Vec<F> = Vec::with_capacity(72);
     push_u32(&mut input, chain_id);
     push_u64(&mut input, block.height);
+    push_bytes(&mut input, &block.prev_header_id);
     push_digest_limbs(&mut input, &block.prev_root);
     push_digest_limbs(&mut input, &block.state_root);
     push_u64(&mut input, block.pot_after);
@@ -136,6 +137,7 @@ mod tests {
         HnBlock {
             height: 7,
             prev_root: [1u32; 8],
+            prev_header_id: [0u8; 32],
             state_root: [2u32; 8],
             timestamp_ms: 1_760_000_000_123,
             sc_nbits: 0x2000_0100,
@@ -175,6 +177,7 @@ mod tests {
         let mutators: Vec<fn(&mut HnBlock)> = vec![
             |b| b.height += 1,
             |b| b.prev_root[0] += 1,
+            |b| b.prev_header_id[0] ^= 1,
             |b| b.state_root[0] += 1,
             |b| b.timestamp_ms += 1,
             |b| b.sc_nbits += 1,

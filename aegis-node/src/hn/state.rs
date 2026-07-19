@@ -133,6 +133,14 @@ pub fn limbs_to_digest(l: &[u32; DIGEST_ELEMS]) -> Digest {
 pub struct HnBlock {
     pub height: u64,
     pub prev_root: [u32; DIGEST_ELEMS],
+    /// The parent block's [`hn_header_id`](super::header::hn_header_id) — the
+    /// hash-linkage the fork-choice tree follows (E0; the all-zero sentinel at
+    /// height 0). Committed by the header id, so a suffix's `prev_header_id`
+    /// chain is what epoch-validity (E1) walks. `prev_root` (the parent's
+    /// state root) still binds the STATE transition; the two together weld the
+    /// header chain to the value-tree chain.
+    #[serde(default)]
+    pub prev_header_id: [u8; 32],
     pub state_root: [u32; DIGEST_ELEMS],
     /// Wall-clock stamp (ms) — the LWMA difficulty adjustment's solve-time
     /// input, and part of the header id.
@@ -771,6 +779,7 @@ mod tests {
         HnBlock {
             height: st.height(),
             prev_root: st.tip_root_limbs(),
+            prev_header_id: [0u8; 32],
             state_root: st.simulate_state_root(&[mint.cm]),
             timestamp_ms: 1_760_000_000_000 + st.height() * 15_000,
             sc_nbits: st.expected_nbits(),
@@ -877,6 +886,7 @@ mod tests {
         let bad = HnBlock {
             height: st.height(),
             prev_root: st.tip_root_limbs(),
+            prev_header_id: [0u8; 32],
             state_root: st.simulate_state_root(&[mint.cm]),
             timestamp_ms: 1_760_000_000_000 + st.height() * 15_000,
             sc_nbits: st.expected_nbits(),
@@ -910,6 +920,7 @@ mod tests {
         let bad = HnBlock {
             height: st.height(),
             prev_root: st.tip_root_limbs(),
+            prev_header_id: [0u8; 32],
             state_root: st.simulate_state_root(&[mint.cm]),
             timestamp_ms: 1_760_000_000_000 + st.height() * 15_000,
             sc_nbits: st.expected_nbits(),
@@ -941,6 +952,7 @@ mod tests {
         let bad = HnBlock {
             height: st.height(),
             prev_root: st.tip_root_limbs(),
+            prev_header_id: [0u8; 32],
             state_root: st.simulate_state_root(&[mint.cm]),
             timestamp_ms: 1_760_000_000_000 + st.height() * 15_000,
             sc_nbits: st.expected_nbits(),
@@ -1049,6 +1061,7 @@ mod tests {
         let genesis = HnBlock {
             height: 0,
             prev_root: st.tip_root_limbs(),
+            prev_header_id: [0u8; 32],
             state_root: st.simulate_state_root(&[m.cm]),
             timestamp_ms: 1_760_000_000_000,
             sc_nbits: st.expected_nbits(),
@@ -1125,6 +1138,7 @@ mod tests {
         let redirect = HnBlock {
             height: 0,
             prev_root: st.tip_root_limbs(),
+            prev_header_id: [0u8; 32],
             state_root: st.simulate_state_root(&[m1.cm]),
             timestamp_ms: 1_760_000_000_000 + st.height() * 15_000,
             sc_nbits: st.expected_nbits(),
@@ -1150,6 +1164,7 @@ mod tests {
         let inflated = HnBlock {
             height: 0,
             prev_root: st.tip_root_limbs(),
+            prev_header_id: [0u8; 32],
             state_root: st.simulate_state_root(&[m2.cm]),
             timestamp_ms: 1_760_000_000_000 + st.height() * 15_000,
             sc_nbits: st.expected_nbits(),
@@ -1175,6 +1190,7 @@ mod tests {
         let good = HnBlock {
             height: 0,
             prev_root: st.tip_root_limbs(),
+            prev_header_id: [0u8; 32],
             state_root: st.simulate_state_root(&[m3.cm]),
             timestamp_ms: 1_760_000_000_000 + st.height() * 15_000,
             sc_nbits: st.expected_nbits(),

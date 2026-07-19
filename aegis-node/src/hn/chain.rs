@@ -6,7 +6,7 @@
 //! Reorg-safety is [`HnState::rollback`] (exact inverse of `apply_block`);
 //! this facade exposes the append path a fork-choice driver would call.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::fs::OpenOptions;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -16,7 +16,10 @@ use aegis_engine::merkle::MerklePath;
 use aegis_engine::poseidon::{Digest, DIGEST_ELEMS};
 use aegis_hn_wallet::chain::OutputRecord;
 use aegis_hn_wallet::{ChainView, SpendCircuit, Tx};
+use ergo_ser::difficulty::decode_compact_bits;
+use num_bigint::BigUint;
 
+use super::header::hn_header_id;
 use super::mint::{coinbase_note, MintOut};
 use super::params::HnChainParams;
 use super::state::{
@@ -25,6 +28,20 @@ use super::state::{
 };
 
 const BLOCK_LOG: &str = "hn_blocks.log";
+
+/// The sentinel "parent" of a genesis (height-0) block — no real predecessor.
+const GENESIS_PARENT: [u8; 32] = [0u8; 32];
+
+/// A validated block in the fork-choice tree: the block, its parent's hn header
+/// id, and the cumulative aux-PoW work of the branch ending here (E0 —
+/// `mm_forkchoice.rs` `BlockNode`, adapted to the hn header id + `HnState`).
+struct HnNode {
+    block: HnBlock,
+    parent: [u8; 32],
+    /// `W = W(parent) + decode_compact_bits(sc_nbits)` — real aux-PoW weight
+    /// (self-declared `sc_nbits` in DevStub; genuine PoW in Strict).
+    cumulative_work: BigUint,
+}
 
 /// A node-local view of the devnet vault used to admit peg-in claims. The
 /// producer queues only claims its own view confirms; a FOLLOWER re-checks
@@ -53,8 +70,15 @@ pub struct HnChain {
     /// admission; blocks with claims are deferred until a view is set).
     pegin_check: Option<Box<dyn PegInCheck>>,
     mempool_nfs: HashSet<[u32; DIGEST_ELEMS]>,
-    /// Every applied block (index == height) — served to syncing peers.
+    /// The CANONICAL branch (index == height), genesis → tip — served to
+    /// syncing peers and materialized by `state`. Rebuilt on a reorg.
     blocks: Vec<HnBlock>,
+    /// The fork-choice tree: every validated block by its hn header id, linked
+    /// to its parent by `prev_header_id` (E0).
+    nodes: BTreeMap<[u8; 32], HnNode>,
+    /// The canonical tip's hn header id (`GENESIS_PARENT` when empty) — the
+    /// heaviest-work branch head (`state` materializes genesis → here).
+    canonical_tip: [u8; 32],
 }
 
 impl HnChain {
@@ -79,6 +103,8 @@ impl HnChain {
             pegin_check: None,
             mempool_nfs: HashSet::new(),
             blocks: Vec::new(),
+            nodes: BTreeMap::new(),
+            canonical_tip: GENESIS_PARENT,
         })
     }
 
@@ -109,15 +135,17 @@ impl HnChain {
         params: HnChainParams,
     ) -> std::io::Result<Self> {
         let mut chain = Self::create(dir, circuit, params)?;
+        // Replay the log through fork choice (blocks are persisted parent-
+        // before-child, so every ingest finds its parent). This rebuilds the
+        // tree AND re-selects the heaviest-work canonical branch — the
+        // store.rs replay discipline, now weight-aware (E0).
         for payload in read_log(&chain.dir.join(BLOCK_LOG))? {
             let Ok(block) = postcard::from_bytes::<HnBlock>(&payload) else {
                 break; // corrupt tail
             };
             chain
-                .state
-                .apply_block(&block, &chain.circuit)
+                .ingest_persisted(block)
                 .expect("a persisted block must re-apply cleanly");
-            chain.blocks.push(block);
         }
         Ok(chain)
     }
@@ -228,17 +256,17 @@ impl HnChain {
             .unwrap_or_default()
     }
 
-    /// Ingest a block received from a peer (P2P / IBD). Fork choice this pass is
-    /// **longest-valid-chain by linear extension**: a block is accepted iff it
-    /// extends the current tip (`height == self.height` and its `prev_root`
-    /// matches, both re-checked by `apply_block`); a stale/duplicate block
-    /// (height already reached) is a no-op; anything else is rejected. Deep
-    /// reorg / aux-PoW-weight fork choice across competing tips is deferred (see
-    /// dev-docs) — for a single-producer testnet with followers this suffices.
+    /// Ingest a block received from a peer (P2P / IBD). Fork choice is
+    /// **heaviest accumulated aux-PoW work** (E0, ported from
+    /// `mm_forkchoice.rs`), NOT longest-chain: a block joins the validated
+    /// tree, and the canonical branch is whichever tip carries the most
+    /// `Σ decode_compact_bits(sc_nbits)`. Extending the current tip is the fast
+    /// path (apply in place); a heavier competing branch triggers a reorg that
+    /// re-materializes `state` to the new winner. A duplicate is a no-op; an
+    /// unknown-parent (orphan) block is dropped (peers feed parents first —
+    /// out-of-order buffering is deferred). A peer can withhold, never forge:
+    /// every block is re-validated by `apply_block`.
     pub fn ingest_block(&mut self, block: HnBlock) -> Result<bool, HnError> {
-        if block.height < self.state.height() {
-            return Ok(false); // already have it
-        }
         // Peg-in claims must be confirmed in OUR OWN devnet view too. A claim
         // our view has not (yet) confirmed is a DEFERRAL — the sync loop stops
         // and retries next tick — never a hard reject (devnet-reorg posture).
@@ -254,18 +282,128 @@ impl HnChain {
                 }
             }
         }
-        self.state.apply_block(&block, &self.circuit)?;
-        self.blocks.push(block.clone());
-        self.persist(&block);
-        // Drop any mempool tx whose nullifier just landed on-chain.
+        self.fork_choice_ingest(block, true)
+    }
+
+    /// Replay path: ingest a persisted block through fork choice WITHOUT
+    /// re-persisting or re-checking the live peg-in view (it was admitted when
+    /// first applied).
+    fn ingest_persisted(&mut self, block: HnBlock) -> Result<bool, HnError> {
+        self.fork_choice_ingest(block, false)
+    }
+
+    /// Weight fork-choice ingest (the shared core of P2P ingest, replay, and —
+    /// the fast path — local production).
+    fn fork_choice_ingest(&mut self, block: HnBlock, persist: bool) -> Result<bool, HnError> {
+        let chain_id = self.state.params().chain_id;
+        let id = hn_header_id(chain_id, &block);
+        if self.nodes.contains_key(&id) {
+            return Ok(false); // already validated
+        }
+        let parent = block.prev_header_id;
+        if parent != GENESIS_PARENT && !self.nodes.contains_key(&parent) {
+            return Ok(false); // orphan: parent not (yet) known
+        }
+
+        if parent == self.canonical_tip {
+            // Fast path: the block extends the materialized canonical tip.
+            self.state.apply_block(&block, &self.circuit)?;
+            if persist {
+                self.persist(&block);
+            }
+            self.blocks.push(block.clone());
+            self.register_node(id, block, parent);
+            self.canonical_tip = id;
+            self.drop_conflicting_mempool();
+            return Ok(true);
+        }
+
+        // Competing branch: validate against a rebuilt parent post-state, then
+        // let weight decide whether to reorg.
+        let mut parent_state = self.rebuild_state_to(parent);
+        parent_state.apply_block(&block, &self.circuit)?;
+        if persist {
+            self.persist(&block);
+        }
+        let cum = self.work_of(parent) + decode_compact_bits(block.sc_nbits);
+        let heavier = cum > self.work_of(self.canonical_tip);
+        self.register_node(id, block, parent);
+        if heavier {
+            self.set_canonical(id);
+            self.drop_conflicting_mempool();
+        }
+        Ok(true)
+    }
+
+    /// Cumulative aux-PoW work of a validated node (`0` for the genesis
+    /// sentinel).
+    fn work_of(&self, id: [u8; 32]) -> BigUint {
+        if id == GENESIS_PARENT {
+            BigUint::ZERO
+        } else {
+            self.nodes[&id].cumulative_work.clone()
+        }
+    }
+
+    /// Insert a validated block into the tree + parent index (no canonical
+    /// change).
+    fn register_node(&mut self, id: [u8; 32], block: HnBlock, parent: [u8; 32]) {
+        let cumulative_work = self.work_of(parent) + decode_compact_bits(block.sc_nbits);
+        self.nodes.insert(
+            id,
+            HnNode {
+                block,
+                parent,
+                cumulative_work,
+            },
+        );
+    }
+
+    /// Ids on the path genesis → `target` (root first, excluding the sentinel).
+    fn path_ids(&self, target: [u8; 32]) -> Vec<[u8; 32]> {
+        let mut path = Vec::new();
+        let mut cur = target;
+        while cur != GENESIS_PARENT {
+            path.push(cur);
+            cur = self.nodes[&cur].parent;
+        }
+        path.reverse();
+        path
+    }
+
+    /// A fresh `HnState` materializing genesis → `target` by replaying the
+    /// branch's stored blocks (the store.rs replay discipline; every block
+    /// re-passes `apply_block`).
+    fn rebuild_state_to(&self, target: [u8; 32]) -> HnState {
+        let mut st = HnState::new(self.state.params().clone());
+        for id in self.path_ids(target) {
+            st.apply_block(&self.nodes[&id].block, &self.circuit)
+                .expect("re-applying a previously validated branch must succeed");
+        }
+        st
+    }
+
+    /// Re-materialize `state` + the canonical `blocks` list onto `target`.
+    fn set_canonical(&mut self, target: [u8; 32]) {
+        self.state = self.rebuild_state_to(target);
+        self.canonical_tip = target;
+        self.blocks = self
+            .path_ids(target)
+            .into_iter()
+            .map(|id| self.nodes[&id].block.clone())
+            .collect();
+    }
+
+    /// Drop any mempool tx whose nullifier is now spent on the canonical chain.
+    fn drop_conflicting_mempool(&mut self) {
+        let state = &self.state;
         self.mempool.retain(|tx| {
             let nfs = [
                 digest_at_pub(tx, aegis_engine::spend::monolith::PUB_NF0),
                 digest_at_pub(tx, aegis_engine::spend::monolith::PUB_NF1),
             ];
-            !nfs.iter().any(|nf| self.state.nullifier_seen(nf))
+            !nfs.iter().any(|nf| state.nullifier_seen(nf))
         });
-        Ok(true)
     }
 
     pub fn height(&self) -> u64 {
@@ -383,6 +521,7 @@ impl HnChain {
         let block = HnBlock {
             height: self.state.height(),
             prev_root: self.state.tip_root_limbs(),
+            prev_header_id: self.canonical_tip,
             state_root,
             timestamp_ms: now_ms(),
             sc_nbits: self.state.expected_nbits(),
@@ -398,9 +537,14 @@ impl HnChain {
             anchor,
             aux_pow: None,
         };
+        // Production always extends the canonical tip (the fast path).
+        let parent = self.canonical_tip;
+        let id = hn_header_id(self.state.params().chain_id, &block);
         self.state.apply_block(&block, &self.circuit)?;
-        self.blocks.push(block.clone());
         self.persist(&block);
+        self.blocks.push(block.clone());
+        self.register_node(id, block, parent);
+        self.canonical_tip = id;
         self.mempool_nfs.clear();
         Ok(())
     }
@@ -419,6 +563,7 @@ impl HnChain {
         let block = HnBlock {
             height: self.state.height(),
             prev_root: self.state.tip_root_limbs(),
+            prev_header_id: self.canonical_tip,
             state_root,
             timestamp_ms: now_ms(),
             sc_nbits: self.state.expected_nbits(),
@@ -434,9 +579,13 @@ impl HnChain {
             anchor: AuxAnchor::genesis(),
             aux_pow: None,
         };
+        let parent = self.canonical_tip;
+        let id = hn_header_id(self.state.params().chain_id, &block);
         self.state.apply_block(&block, &self.circuit)?;
-        self.blocks.push(block.clone());
         self.persist(&block);
+        self.blocks.push(block.clone());
+        self.register_node(id, block, parent);
+        self.canonical_tip = id;
         Ok(())
     }
 
@@ -519,4 +668,128 @@ fn read_log(path: &Path) -> std::io::Result<Vec<Vec<u8>>> {
         i += len;
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use aegis_engine::address::WalletKeys;
+
+    // ----- helpers -----
+
+    fn empty_chain(dir: &std::path::Path) -> HnChain {
+        let params = HnChainParams::testnet().with_genesis(vec![], 1_000_000);
+        HnChain::create(dir, SpendCircuit::new(), params).expect("chain creates")
+    }
+
+    fn miner(seed: &[u8]) -> Address {
+        WalletKeys::from_seed(seed).address()
+    }
+
+    /// Produce `n` empty reward blocks on a fresh chain and return them.
+    fn produce_branch(seed: &[u8], n: usize) -> Vec<HnBlock> {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut chain = empty_chain(dir.path());
+        let m = miner(seed);
+        for _ in 0..n {
+            chain.produce_block(&m).expect("block produces");
+        }
+        chain.blocks_since(0)
+    }
+
+    // ----- happy path -----
+
+    #[test]
+    fn heavier_fork_wins_and_reorgs_the_follower() {
+        // Two competing branches from the same empty genesis (distinct miners,
+        // so distinct blocks): A has 2 blocks, B has 3. At the devnet floor
+        // difficulty every block weighs 1, so B (weight 3) must beat A
+        // (weight 2) — most accumulated work, not "first seen".
+        let branch_a = produce_branch(b"miner-a", 2);
+        let branch_b = produce_branch(b"miner-b", 3);
+        assert_ne!(
+            branch_a[0].state_root, branch_b[0].state_root,
+            "distinct fork"
+        );
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut c = empty_chain(dir.path());
+
+        for blk in &branch_a {
+            assert_eq!(c.ingest_block(blk.clone()), Ok(true));
+        }
+        assert_eq!(c.height(), 2, "branch A is canonical first");
+        let chain_id = c.state.params().chain_id;
+        assert_eq!(
+            c.canonical_tip,
+            hn_header_id(chain_id, branch_a.last().unwrap())
+        );
+
+        // Ingest the heavier branch B; the first two of its blocks do NOT
+        // reorg (equal-or-lighter work), the third flips the tip.
+        assert_eq!(c.ingest_block(branch_b[0].clone()), Ok(true));
+        assert_eq!(
+            c.canonical_tip,
+            hn_header_id(chain_id, branch_a.last().unwrap())
+        );
+        assert_eq!(c.ingest_block(branch_b[1].clone()), Ok(true));
+        assert_eq!(
+            c.canonical_tip,
+            hn_header_id(chain_id, branch_a.last().unwrap()),
+            "equal work does not reorg"
+        );
+        assert_eq!(c.ingest_block(branch_b[2].clone()), Ok(true));
+
+        // B wins on weight: canonical tip, height, and the served chain all flip.
+        assert_eq!(c.height(), 3, "heavier branch B reorgs the follower");
+        assert_eq!(
+            c.canonical_tip,
+            hn_header_id(chain_id, branch_b.last().unwrap())
+        );
+        let served = c.blocks_since(0);
+        assert_eq!(served.len(), 3);
+        assert_eq!(served[2].state_root, branch_b[2].state_root);
+        // A's blocks remain in the tree (its weight stays comparable).
+        assert!(c
+            .nodes
+            .contains_key(&hn_header_id(chain_id, branch_a.last().unwrap())));
+    }
+
+    // ----- round-trips -----
+
+    #[test]
+    fn reorged_chain_survives_reopen() {
+        // After a reorg, the persisted log replays through fork choice to the
+        // SAME canonical tip (weight-aware restart).
+        let branch_a = produce_branch(b"ra", 2);
+        let branch_b = produce_branch(b"rb", 3);
+        let dir = tempfile::tempdir().expect("tempdir");
+        {
+            let mut c = empty_chain(dir.path());
+            for blk in branch_a.iter().chain(branch_b.iter()) {
+                c.ingest_block(blk.clone()).expect("ingest");
+            }
+            assert_eq!(c.height(), 3);
+        }
+        let params = HnChainParams::testnet().with_genesis(vec![], 1_000_000);
+        let reopened = HnChain::open(dir.path(), SpendCircuit::new(), params).expect("reopen");
+        assert_eq!(reopened.height(), 3, "reorg survives a restart");
+        assert_eq!(
+            reopened.canonical_tip,
+            hn_header_id(reopened.state.params().chain_id, branch_b.last().unwrap())
+        );
+    }
+
+    // ----- error paths -----
+
+    #[test]
+    fn orphan_block_without_known_parent_is_dropped() {
+        // A block whose parent id we have never seen is a no-op (not an error).
+        let branch = produce_branch(b"orphan", 2);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut c = empty_chain(dir.path());
+        // Feed only the SECOND block (its parent, block 0, is missing).
+        assert_eq!(c.ingest_block(branch[1].clone()), Ok(false));
+        assert_eq!(c.height(), 0);
+    }
 }
