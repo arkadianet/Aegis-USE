@@ -209,6 +209,54 @@ fn build_env(input: &ProveInput, segment_po2: u32) -> ExecutorEnv<'static> {
         .unwrap()
 }
 
+/// How many times a failed prove is attempted before giving up. The CUDA
+/// prover has shown TRANSIENT single-run faults ("verify segment / proof
+/// invalid") that a straight retry of the identical input clears, so one
+/// failure is not treated as fatal.
+const PROVE_ATTEMPTS: u32 = 3;
+
+/// Run the prover with up to [`PROVE_ATTEMPTS`] attempts, rebuilding the
+/// `ExecutorEnv` each time (it is consumed by a prove). Catches both `Err`
+/// returns and prover panics — the observed CUDA fault PANICS rather than
+/// returning an error — and logs every attempt.
+fn prove_with_retry(input: &ProveInput, segment_po2: u32) -> risc0_zkvm::ProveInfo {
+    for attempt in 1..=PROVE_ATTEMPTS {
+        let t0 = Instant::now();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let env = build_env(input, segment_po2);
+            default_prover().prove_with_opts(
+                env,
+                AEGIS_SETTLEMENT_GUEST_ELF,
+                &ProverOpts::succinct(),
+            )
+        }));
+        match result {
+            Ok(Ok(info)) => {
+                if attempt > 1 {
+                    println!("prove attempt {attempt}/{PROVE_ATTEMPTS} succeeded (retry worked)");
+                }
+                return info;
+            }
+            Ok(Err(e)) => eprintln!(
+                "prove attempt {attempt}/{PROVE_ATTEMPTS} FAILED after {:?}: {e:#}",
+                t0.elapsed()
+            ),
+            Err(panic) => {
+                let msg = panic
+                    .downcast_ref::<String>()
+                    .map(String::as_str)
+                    .or_else(|| panic.downcast_ref::<&str>().copied())
+                    .unwrap_or("<non-string panic>");
+                eprintln!(
+                    "prove attempt {attempt}/{PROVE_ATTEMPTS} PANICKED after {:?}: {msg}",
+                    t0.elapsed()
+                );
+            }
+        }
+    }
+    panic!("prove failed {PROVE_ATTEMPTS} times — giving up (see attempt logs above)");
+}
+
 fn prove_and_write(input: &ProveInput, out_dir: &PathBuf, segment_po2: u32) {
     assert!(
         std::env::var("RISC0_DEV_MODE").map_or(true, |v| v.is_empty() || v == "0"),
@@ -217,12 +265,8 @@ fn prove_and_write(input: &ProveInput, out_dir: &PathBuf, segment_po2: u32) {
     std::fs::create_dir_all(out_dir).expect("out dir");
 
     println!("segment_po2={segment_po2} (programmatic; env var is inert in risc0 3.0.5)");
-    let env = build_env(input, segment_po2);
-
     let t0 = Instant::now();
-    let prove_info = default_prover()
-        .prove_with_opts(env, AEGIS_SETTLEMENT_GUEST_ELF, &ProverOpts::succinct())
-        .expect("prove");
+    let prove_info = prove_with_retry(input, segment_po2);
     let wall = t0.elapsed();
     let stats = &prove_info.stats;
     println!(
