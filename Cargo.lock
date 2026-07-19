@@ -69,10 +69,12 @@ dependencies = [
  "p3-symmetric",
  "p3-uni-stark",
  "p3-util",
+ "postcard",
  "rand 0.10.2",
  "rand_chacha 0.10.0",
  "serde",
  "sha2 0.10.9",
+ "thiserror 2.0.18",
  "x25519-dalek",
 ]
 

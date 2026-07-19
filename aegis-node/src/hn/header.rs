@@ -9,125 +9,127 @@
 //! Poseidon2 digest over **every consensus-relevant header field plus a body
 //! commitment**, so one solved Autolykos PoW attests to exactly one hn block.
 //!
-//! Design choices, matching the reviewed Curve-Trees construction
-//! (`aegis-types/src/header.rs` — an id over the canonical fields, PoW witness
-//! deliberately EXCLUDED so one share commits one id and a block can be
-//! re-mined) and `epoch-validity-design.md` §2.1-E0 / D-EV5:
+//! **Node ↔ guest parity (E0/E1 cut, gate 2 of the M-E1 build).** The header id
+//! is the object the epoch-validity guest RE-COMPUTES from the presented suffix
+//! (`aegis_engine::epoch::header_id::header_id`). If the node and the guest
+//! encoded it differently, honest blocks would fail the guest's share-verify /
+//! header-chain check. So this module is now a **thin adapter**: it maps a node
+//! [`HnBlock`] to the engine's guest-visible [`EngineSuffixBlock`] and calls the
+//! engine's field-native `header_id`. The engine is the single source of truth —
+//! node-computed and guest-recomputed ids are IDENTICAL by construction (the
+//! `node_matches_engine_header_id` parity test is the guard).
 //!
-//! - **Poseidon2, not blake2b** (D-EV5): the hn chain is field-native, so an
-//!   in-circuit id recomputation (epoch-validity's E1) is ~1 permutation
-//!   instead of a software blake2b. The 8-limb digest packs to the 32 opaque
-//!   bytes the Ergo extension field carries (`crate::auxpow` treats the value
-//!   as opaque — `merge-mining.md` §2.2).
-//! - **`chain_id` bound in** — cross-chain replay protection (a block id can
-//!   never be reused on another hn profile).
+//! **Scope of the body commitment (deliberate, reviewed narrowing).** The
+//! engine body commitment binds the **bridge-relevant** body the guest can
+//! re-derive — every tx's spend public values (`root/nf0/nf1/cm0/cm1/fee`), each
+//! peg-out's `amount` + `recipient_prop`, each peg-in's `box_id/dest_owner/
+//! amount`, and the coinbase (`miner_owner/coinbase_amount/coinbase_cm/
+//! coinbase_is_reward`). It does NOT fold the note **ciphertexts**
+//! (`Tx.out_ciphertexts`, `PegInClaim.ciphertext/dest_enc_pk`, `coinbase_ct`) —
+//! those are recipient-facing transport, not consensus state, and are size-
+//! checked separately. This is a change from E0's original postcard-image body
+//! commitment (which folded them opaquely and was NOT guest-recomputable). Every
+//! value-relevant field — the nullifiers, output commitments, amounts, and the
+//! withdrawal recipient — remains bound.
+//!
+//! Design choices, matching the reviewed Curve-Trees construction and
+//! `epoch-validity-design.md` §2.1-E0 / D-EV5:
+//!
+//! - **Poseidon2, not blake2b** (D-EV5): the hn chain is field-native, so the
+//!   guest's in-circuit / in-zkVM id recomputation is ~1 permutation per field.
+//! - **`chain_id` bound in** — cross-chain replay protection.
 //! - **Anchor EXCLUDED** — the aux-PoW witness attests the id; the id does not
-//!   commit the witness (the reviewed model: one share ⇒ one id, re-mineable).
-//! - **Body commitment** — `state_root` commits only the appended output
-//!   commitments; a re-miner keeping the same id could otherwise swap a
-//!   peg-out's `recipient_prop` (not in `state_root`) and redirect a
-//!   withdrawal. The body commitment closes that: it binds every tx, peg-out,
-//!   and peg-in by their canonical serialization.
+//!   commit the witness (one share ⇒ one id, block re-mineable).
 
-use aegis_engine::poseidon::{digest_to_bytes, hash_domain, Digest, F};
+use aegis_engine::commit::{limbs_to_u64, N_LIMBS};
+use aegis_engine::epoch::header_id::header_id as engine_header_id;
+use aegis_engine::epoch::types::{
+    PegIn as EnginePegIn, PegOut as EnginePegOut, SpendPublics as EngineSpend,
+    SuffixBlock as EngineSuffixBlock,
+};
+use aegis_engine::poseidon::F;
+use aegis_engine::spend::monolith::{PUB_CMO0, PUB_CMO1, PUB_FEE, PUB_NF0, PUB_NF1, PUB_ROOT};
 use p3_field::PrimeCharacteristicRing;
 
-use super::state::{HnBlock, PegInClaim, PegOutTx};
+use aegis_hn_wallet::chain::digest_at;
 
-/// Poseidon2 domain for the hn header id.
-const DOMAIN_HN_HEADER: u32 = 0x0B11;
-/// Poseidon2 domain for the hn body commitment.
-const DOMAIN_HN_BODY: u32 = 0x0B12;
+use super::state::{limbs_to_digest, HnBlock};
 
-/// Push a `u64` as four 16-bit BabyBear limbs (little-endian). Each chunk is
-/// `< 2^16 < p`, so the encoding is always canonical (no field wraparound
-/// hiding a distinct integer).
-fn push_u64(out: &mut Vec<F>, v: u64) {
-    for i in 0..4 {
-        out.push(F::from_u32(((v >> (16 * i)) & 0xFFFF) as u32));
+/// Read a spend's flat fee from its public-value limbs (`PUB_FEE`, `N_LIMBS`).
+fn spend_fee(public_values: &[u32]) -> u64 {
+    let limbs: [F; N_LIMBS] = core::array::from_fn(|i| F::from_u32(public_values[PUB_FEE + i]));
+    limbs_to_u64(&limbs)
+}
+
+/// A monolith spend's public values → the engine's guest-visible `SpendPublics`.
+fn engine_spend(public_values: &[u32]) -> EngineSpend {
+    EngineSpend {
+        root: digest_at(public_values, PUB_ROOT),
+        nf0: digest_at(public_values, PUB_NF0),
+        nf1: digest_at(public_values, PUB_NF1),
+        cm0: digest_at(public_values, PUB_CMO0),
+        cm1: digest_at(public_values, PUB_CMO1),
+        fee: spend_fee(public_values),
     }
 }
 
-/// Push a `u32` as two 16-bit BabyBear limbs (little-endian).
-fn push_u32(out: &mut Vec<F>, v: u32) {
-    out.push(F::from_u32(v & 0xFFFF));
-    out.push(F::from_u32(v >> 16));
-}
-
-/// Push a byte slice as 16-bit limbs (two bytes per limb, length-prefixed so a
-/// shorter slice can never be a prefix of a longer one under the same hash).
-fn push_bytes(out: &mut Vec<F>, bytes: &[u8]) {
-    push_u64(out, bytes.len() as u64);
-    for chunk in bytes.chunks(2) {
-        let lo = chunk[0] as u32;
-        let hi = chunk.get(1).copied().unwrap_or(0) as u32;
-        out.push(F::from_u32(lo | (hi << 8)));
+/// Map a node [`HnBlock`] to the engine's guest-visible [`EngineSuffixBlock`] —
+/// the exact view the epoch-validity guest re-derives the header id from.
+fn to_engine_block(block: &HnBlock) -> EngineSuffixBlock {
+    EngineSuffixBlock {
+        height: block.height,
+        prev_header_id: block.prev_header_id,
+        prev_root: limbs_to_digest(&block.prev_root),
+        state_root: limbs_to_digest(&block.state_root),
+        timestamp_ms: block.timestamp_ms,
+        sc_nbits: block.sc_nbits,
+        txs: block
+            .txs
+            .iter()
+            .map(|t| engine_spend(&t.public_values))
+            .collect(),
+        pegouts: block
+            .pegouts
+            .iter()
+            .map(|po| EnginePegOut {
+                spend: engine_spend(&po.tx.public_values),
+                amount: po.amount,
+                recipient_prop: po.recipient_prop.clone(),
+            })
+            .collect(),
+        pegins: block
+            .pegins
+            .iter()
+            .map(|pi| EnginePegIn {
+                box_id: pi.box_id,
+                dest_owner: limbs_to_digest(&pi.dest_owner),
+                amount: pi.amount,
+            })
+            .collect(),
+        miner_owner: limbs_to_digest(&block.miner_owner),
+        coinbase_amount: block.coinbase_amount,
+        coinbase_cm: limbs_to_digest(&block.coinbase_cm),
+        coinbase_is_reward: block.coinbase_is_reward,
+        pot_after: block.pot_after,
     }
 }
 
-/// Push eight already-canonical BabyBear limbs (a root / owner / cm digest).
-fn push_digest_limbs(out: &mut Vec<F>, limbs: &[u32; 8]) {
-    for &l in limbs {
-        // These come from field elements (< p) by construction; a hostile
-        // non-canonical value only changes the hash, never forges a match.
-        out.push(F::from_u32(l));
-    }
-}
-
-/// Commitment over the block body — every tx, peg-out, and peg-in, by their
-/// canonical (postcard) serialization. Binds the parts of the block NOT
-/// already pinned by `state_root` (peg-out `recipient_prop`, peg-in
-/// box-id/dest/amount, ciphertexts) so the id commits the *whole* block.
-pub fn hn_body_commitment(
-    txs: &[aegis_hn_wallet::Tx],
-    pegouts: &[PegOutTx],
-    pegins: &[PegInClaim],
-) -> Digest {
-    // postcard is already the block's persistence codec (chain.rs); reuse it as
-    // the canonical byte image of the body.
-    let bytes = postcard::to_allocvec(&(txs, pegouts, pegins))
-        .expect("block body serializes for the body commitment");
-    let mut limbs = Vec::with_capacity(4 + bytes.len() / 2 + 1);
-    push_bytes(&mut limbs, &bytes);
-    hash_domain(DOMAIN_HN_BODY, &limbs)
-}
-
-/// The hn **header id**: a Poseidon2 digest over the canonical header fields —
-/// the object the aux-PoW extension commitment carries, packed to 32 bytes.
+/// The hn **header id**: the engine's field-native Poseidon2 digest over the
+/// canonical header fields + the body commitment, packed to 32 bytes. Delegates
+/// to `aegis_engine::epoch::header_id::header_id` so the value is byte-identical
+/// to what the epoch-validity guest recomputes (the E0/E1 cut gate).
 ///
 /// `chain_id` is bound in (cross-chain replay protection) and comes from the
 /// validator's own params, so both the miner (constructing the commitment) and
-/// every validator (recomputing the id from the presented block) derive the
-/// same value. The merge-mining anchor is intentionally NOT part of the id.
+/// every validator (recomputing the id) derive the same value.
 pub fn hn_header_id(chain_id: u32, block: &HnBlock) -> [u8; 32] {
-    let body = hn_body_commitment(&block.txs, &block.pegouts, &block.pegins);
-    let body_limbs: [u32; 8] = {
-        use p3_field::PrimeField32;
-        core::array::from_fn(|i| body[i].as_canonical_u32())
-    };
-
-    let mut input: Vec<F> = Vec::with_capacity(72);
-    push_u32(&mut input, chain_id);
-    push_u64(&mut input, block.height);
-    push_bytes(&mut input, &block.prev_header_id);
-    push_digest_limbs(&mut input, &block.prev_root);
-    push_digest_limbs(&mut input, &block.state_root);
-    push_u64(&mut input, block.pot_after);
-    push_u32(&mut input, block.sc_nbits);
-    push_u64(&mut input, block.timestamp_ms);
-    push_digest_limbs(&mut input, &block.miner_owner);
-    push_u64(&mut input, block.coinbase_amount);
-    push_digest_limbs(&mut input, &block.coinbase_cm);
-    input.push(F::from_u32(u32::from(block.coinbase_is_reward)));
-    push_digest_limbs(&mut input, &body_limbs);
-
-    digest_to_bytes(&hash_domain(DOMAIN_HN_HEADER, &input))
+    engine_header_id(chain_id, &to_engine_block(block))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hn::state::AuxAnchor;
+    use crate::hn::state::{AuxAnchor, PegInClaim};
 
     const CHAIN_ID: u32 = 0x484E_0005;
 
@@ -201,8 +203,8 @@ mod tests {
     #[test]
     fn header_id_ignores_the_anchor() {
         // The aux-PoW witness attests the id; the id must NOT commit the anchor
-        // (the reviewed model: one share ⇒ one id, block re-mineable). Two
-        // blocks differing only in their anchor share the same header id.
+        // (one share ⇒ one id, block re-mineable). Two blocks differing only in
+        // their anchor share the same header id.
         let mut a = base_block();
         let mut b = base_block();
         a.anchor = AuxAnchor {
@@ -244,5 +246,112 @@ mod tests {
     fn header_id_is_deterministic() {
         let b = base_block();
         assert_eq!(hn_header_id(CHAIN_ID, &b), hn_header_id(CHAIN_ID, &b));
+    }
+
+    // ----- oracle parity (node ↔ engine, the E0/E1 cut gate) -----
+
+    /// The node's `hn_header_id` equals the engine's guest-recomputed
+    /// `header_id` for the SAME logical block, built independently on both sides.
+    /// This is the load-bearing parity claim: honest blocks the node produces
+    /// pass the epoch-validity guest's header-chain + share-verify checks.
+    #[test]
+    fn node_matches_engine_header_id() {
+        use aegis_engine::epoch::header_id::header_id as engine_id;
+        use aegis_engine::epoch::types::{
+            PegIn as EPegIn, PegOut as EPegOut, SpendPublics as ESpend, SuffixBlock as ESuffixBlock,
+        };
+        use aegis_engine::poseidon::{Digest, F};
+        use aegis_hn_wallet::Tx;
+
+        fn edigest(base: u32) -> Digest {
+            core::array::from_fn(|i| F::from_u32(base + i as u32))
+        }
+        // A full monolith public-value vector (44 limbs) for a spend keyed `base`.
+        fn publics(base: u32, fee: u64) -> Vec<u32> {
+            let mut pv = vec![0u32; aegis_engine::spend::monolith::N_PUB];
+            for (off, b) in [
+                (PUB_ROOT, base),
+                (PUB_NF0, base + 10),
+                (PUB_NF1, base + 20),
+                (PUB_CMO0, base + 30),
+                (PUB_CMO1, base + 40),
+            ] {
+                for i in 0..8 {
+                    pv[off + i] = b + i as u32;
+                }
+            }
+            // Fee: N_LIMBS little-endian limbs (base 2^16 per `value_limbs`).
+            for i in 0..N_LIMBS {
+                pv[PUB_FEE + i] = ((fee >> (16 * i)) & 0xFFFF) as u32;
+            }
+            pv
+        }
+        fn espend(base: u32, fee: u64) -> ESpend {
+            ESpend {
+                root: edigest(base),
+                nf0: edigest(base + 10),
+                nf1: edigest(base + 20),
+                cm0: edigest(base + 30),
+                cm1: edigest(base + 40),
+                fee,
+            }
+        }
+
+        let fee = 3u64;
+        let tx = Tx {
+            proof_bytes: vec![],
+            public_values: publics(100, fee),
+            out_ciphertexts: [vec![0u8; 0], vec![0u8; 0]],
+        };
+        let pegout_tx = Tx {
+            proof_bytes: vec![],
+            public_values: publics(500, fee),
+            out_ciphertexts: [vec![], vec![]],
+        };
+
+        let mut hn = base_block();
+        hn.txs = vec![tx];
+        hn.pegouts = vec![crate::hn::state::PegOutTx {
+            tx: pegout_tx,
+            amount: 777,
+            recipient_prop: b"\x00\x08\xcd recipient".to_vec(),
+        }];
+        hn.pegins = vec![a_pegin(0x07)];
+
+        // Build the engine block independently (NOT via the adapter).
+        let engine_block = ESuffixBlock {
+            height: hn.height,
+            prev_header_id: hn.prev_header_id,
+            prev_root: edigest_from(&hn.prev_root),
+            state_root: edigest_from(&hn.state_root),
+            timestamp_ms: hn.timestamp_ms,
+            sc_nbits: hn.sc_nbits,
+            txs: vec![espend(100, fee)],
+            pegouts: vec![EPegOut {
+                spend: espend(500, fee),
+                amount: 777,
+                recipient_prop: b"\x00\x08\xcd recipient".to_vec(),
+            }],
+            pegins: vec![EPegIn {
+                box_id: [0x07; 32],
+                dest_owner: edigest_from(&[9u32; 8]),
+                amount: 1_000,
+            }],
+            miner_owner: edigest_from(&hn.miner_owner),
+            coinbase_amount: hn.coinbase_amount,
+            coinbase_cm: edigest_from(&hn.coinbase_cm),
+            coinbase_is_reward: hn.coinbase_is_reward,
+            pot_after: hn.pot_after,
+        };
+
+        assert_eq!(
+            hn_header_id(CHAIN_ID, &hn),
+            engine_id(CHAIN_ID, &engine_block),
+            "node-computed and engine/guest-recomputed header ids must be identical"
+        );
+    }
+
+    fn edigest_from(limbs: &[u32; 8]) -> aegis_engine::poseidon::Digest {
+        core::array::from_fn(|i| aegis_engine::poseidon::F::from_u32(limbs[i]))
     }
 }

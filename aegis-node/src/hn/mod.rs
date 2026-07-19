@@ -24,7 +24,7 @@ pub mod state;
 
 pub use api::{HnApiServer, HnApiState};
 pub use chain::{HnChain, PegInCheck};
-pub use header::{hn_body_commitment, hn_header_id};
+pub use header::hn_header_id;
 pub use http_client::HttpChain;
 pub use params::HnChainParams;
 pub use pegin_watch::VaultWatch;
