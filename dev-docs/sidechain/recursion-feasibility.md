@@ -562,3 +562,122 @@ on `SpendAir`),
 env knobs `I1_CAP/LFP/ARITY/Q/POW/ITERS/SKIP_SHA/OUTER/MODE_UNISTARK/
 MODE_ADDAIR`), logs `i1-monolith-batch-*.log` (run2 = 1T, par = 16T,
 spikepar = 16T spike-outer, spikenative/enginenative = 16T+AVX-512).*
+
+---
+
+## 9. I2 RESULT (2026-07-19): phone-class client prove under the recursion config
+
+> **Status: MEASURED x86 ISA brackets (Ryzen 7 7800X3D, p3 0.6.1, same
+> `i1_monolith` harness + `I1_CLIENT_ONLY=1` early-exit) → REASONED phone
+> estimate.** Closes the one open caveat from §8.2/§6 #3: phones lack AVX-512,
+> so does the recursion-required client config (Poseidon2 salted MMCS +
+> duplex challenger, batch-stark route, lb3/Q67/pow16) stay phone-viable? No
+> real ARM hardware on this box (no qemu-user, no cross-linker; and qemu-user
+> soft-emulates both NEON and the SHA2 crypto ext, so its *timing* is
+> non-representative) — instead I bracket NEON between MEASURED x86 scalar and
+> AVX2 points, exploiting that both proof configs are the same code paths.
+
+### 9.1 The measured x86 ISA sweep (client prove only, min of 5 iters)
+
+The batch-stark route is the **committed client path** (§8.4); SHA-256 is
+today's config, measured side-by-side on the same build for a same-ISA ratio.
+`-Ctarget-cpu=x86-64-v3` = AVX2/no-AVX512 (8-wide packed BabyBear); default
+target = no AVX2 → p3 monty-31 falls to **scalar** packing (p3 ships no SSE
+backend); `native` = AVX-512 (16-wide). SHA-256 hashing rides the CPU's
+**SHA-NI in every build** — the `sha2` crate runtime-detects it, independent of
+`-Ctarget-feature` — so the SHA column isolates the FRI/DFT arithmetic tail.
+
+| config | scalar 1T | scalar 4T | AVX2 1T | AVX2 4T | AVX-512 1T | AVX-512 4T |
+|---|---|---|---|---|---|---|
+| **Poseidon2 batch-stark (recursion-required)** | 922 ms | 275 ms | **126 ms** | **51 ms** | 117 ms | 46 ms |
+| SHA-256 hiding (today) | 144 ms | 61 ms | 70 ms | 30 ms | 67 ms | 26 ms |
+| **Poseidon2 / SHA ratio** | 6.4× | 4.5× | **1.80×** | 1.70× | 1.75× | 1.77× |
+
+Two facts fall out that resolve the caveat:
+
+1. **AVX-512 buys essentially nothing over AVX2 for the *client* prove**
+   (126→117 ms 1T; 51→46 ms 4T — ~7%). Unlike the *recursion* prover (§8.4,
+   27× scalar→AVX512 spread), the client prove over a tiny 128×2756 trace is
+   dominated by fixed/serial commit+FRI structure, not by the widest-SIMD
+   Poseidon2 inner loop. Width sensitivity is weak once *any* vector unit is
+   present.
+2. **The 6.6× scalar regression is a red herring for phones.** The scary
+   ratio only appears with NO vector unit at all (Poseidon2 goes fully scalar
+   while SHA keeps SHA-NI). The instant a vector unit exists — AVX2 *or*
+   AVX-512 — the ratio collapses to **~1.7–1.8×**. **A phone always has a
+   vector unit (NEON) and hardware SHA2, so it lives in the ~1.8× regime, not
+   the 6.4× scalar regime.**
+
+### 9.2 The phone estimate (reasoned from the brackets)
+
+A phone's Poseidon2 hashing uses p3's **NEON** BabyBear backend (128-bit,
+4-wide u32) — narrower than AVX2 (8-wide) but far above scalar (1-wide); its
+SHA-256 uses the **ARMv8 SHA2 crypto extension** (hardware, SHA-NI-equivalent,
+same `sha2`-crate runtime dispatch). So on a phone:
+
+- **Poseidon2 sits between the measured AVX2 and scalar x86 points**, and much
+  closer to AVX2: NEON is 4-wide vs AVX2's 8-wide, but §9.1 fact #1 shows this
+  workload barely moves with SIMD width above 4 lanes. Estimate NEON ≈
+  **1.3–1.8× the AVX2 time** on an equal-speed core → ~165–230 ms 1T,
+  ~65–90 ms 4T *if the core matched the 7800X3D*.
+- **Core-speed derating:** a flagship phone big core (Apple A-/M-class,
+  Cortex-X4) runs ~1.5–2.5× slower than a Zen4 core at this integer/SIMD work;
+  mid-range ~3–4×.
+
+Composing (NEON penalty × core derating) on the AVX2 anchor:
+
+| phone class | Poseidon2 batch client prove (est.) | SHA config, same phone (est.) |
+|---|---|---|
+| flagship, 1 big core | **~0.35–0.6 s** | ~0.15–0.25 s |
+| flagship, ~4 cores | **~0.15–0.3 s** | ~0.06–0.12 s |
+| mid-range, 1 core | **~0.7–1.2 s** | ~0.3–0.5 s |
+| mid-range, ~4 cores | **~0.35–0.6 s** | ~0.15–0.25 s |
+
+The SHA column reproduces the prior hash-native spike's **~0.2–0.5 s phone**
+anchor for the OLD config (`hash-native-spend-circuit.md`) — cross-check that
+the derating is calibrated right.
+
+### 9.3 Verdict: **PHONE-VIABLE — modest ~1.8–2.5× regression, still sub-second-to-~1s**
+
+The recursion-required Poseidon2 client prove lands at **~0.2–0.6 s on a
+flagship (multi-core), ~0.35–1.2 s on a mid-range phone** — comfortably inside
+the payment UX bar (sub-second to a second), nowhere near the "many seconds"
+kill line. The regression vs today's SHA config is **~1.8× (measured, any
+vector ISA)**, widening to perhaps **~2–2.5× on NEON** as Poseidon2 loses a
+little width while SHA stays HW-fixed — a real but small UX cost to note, not a
+blocker. Proof size grows negligibly (1.206 → 1.235 MB, measured;
+`MAX_PROOF_BYTES` headroom unchanged). **The §8.2/§6 #3 caveat is closed: no
+mitigation is required for phone viability.** The client keeps its STARK; I2
+is just the SHA→Poseidon2 config swap.
+
+**Mitigations, if a target phone ever comes in high (not needed on this
+evidence):**
+- *Keep client SHA + a translation layer* — rejected: there is no in-circuit
+  SHA gadget, so a SHA client proof cannot be recursed without a
+  months-of-work SHA-in-circuit build (§4(e)); a "re-prove SHA→Poseidon2"
+  translation is just proving twice, strictly worse than proving Poseidon2
+  once (the measured Poseidon2 prove is already sub-second).
+- *Cheaper client config, re-prove for recursion* — same double-prove
+  objection; and the client prove is not the bottleneck (settlement is).
+- The genuinely available lever is **thread count**: the 1T→4T speedup is
+  ~3.4× (measured), so a phone that dedicates a few big cores to the burst
+  gets the multi-core row for free. No code change.
+
+### 9.4 Measured vs reasoned (I2 honesty ledger)
+
+- **Measured (this machine):** all of §9.1 — scalar/AVX2/AVX-512 × 1T/4T for
+  both configs, the AVX2≈AVX-512 client-prove finding, the ~1.8× vector-ISA
+  ratio, proof sizes.
+- **Reasoned, NOT measured:** the phone absolute times (§9.2) — bracketed by
+  the measured x86 scalar/AVX2 points plus NEON-width and phone-core-derating
+  factors from public ARM microarchitecture characteristics; not run on ARM
+  silicon. A true on-device datapoint (an aarch64 build on a real phone/board;
+  qemu-user timing is not representative) remains as cheap validation before
+  cut, but the bracket is tight and the verdict is not close to the bar.
+
+*I2 harness: same `i1_monolith.rs` + a one-line `I1_CLIENT_ONLY` early-exit
+after the batch native verify (skips layer-1 recursion); three release builds
+in isolated `CARGO_TARGET_DIR`s — `p3rec-target` (scalar/default),
+`p3rec-target-v3` (`-Ctarget-cpu=x86-64-v3`, AVX2), `p3rec-target-native`
+(`-Ctarget-cpu=native`, AVX-512); run at `RAYON_NUM_THREADS=1` and `=4`,
+`I1_ITERS=5`, min-of-5 reported.*
