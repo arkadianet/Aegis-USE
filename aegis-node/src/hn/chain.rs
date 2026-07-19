@@ -396,6 +396,7 @@ impl HnChain {
             coinbase_is_reward: true,
             pot_after,
             anchor,
+            aux_pow: None,
         };
         self.state.apply_block(&block, &self.circuit)?;
         self.blocks.push(block.clone());
@@ -431,6 +432,7 @@ impl HnChain {
             coinbase_is_reward: false,
             pot_after: self.state.pot(),
             anchor: AuxAnchor::genesis(),
+            aux_pow: None,
         };
         self.state.apply_block(&block, &self.circuit)?;
         self.blocks.push(block.clone());

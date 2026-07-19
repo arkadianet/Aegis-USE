@@ -167,6 +167,13 @@ pub struct HnBlock {
     pub pot_after: u64,
     /// The merge-mining devnet anchor (monotone across blocks).
     pub anchor: AuxAnchor,
+    /// The aux-PoW witness ([`super::auxpow::HnAuxPow`] bytes) binding this
+    /// block's [`hn_header_id`](super::header::hn_header_id) to real Autolykos
+    /// work (E0). `None` in DevStub (the API-anchored devnet); REQUIRED for
+    /// reward blocks when `params.require_aux_pow` (Strict). Excluded from the
+    /// header id — the aux-PoW attests the id, it does not extend it.
+    #[serde(default)]
+    pub aux_pow: Option<Vec<u8>>,
 }
 
 /// Captured prior state for an exact rollback.
@@ -427,6 +434,19 @@ impl HnState {
         // Curve-Trees share verifier's §3 equality).
         if block.sc_nbits != self.expected_nbits() {
             return Err(HnError::NbitsMismatch);
+        }
+        // Strict aux-PoW binding (E0): a reward (mined) block must carry a
+        // witness proving its `hn_header_id` was committed by an Ergo
+        // candidate whose Autolykos v2 hit clears `sc_nbits`. Genesis
+        // allocations (non-reward, pre-PoW prefix) are exempt. In DevStub
+        // (`require_aux_pow == false`) the check is skipped — the API-anchored
+        // devnet does not merge-mine yet (liveness-only, §6.5).
+        if self.params.require_aux_pow && block.coinbase_is_reward {
+            let bytes = block.aux_pow.as_ref().ok_or(HnError::AuxPowInvalid)?;
+            let aux =
+                super::auxpow::HnAuxPow::from_bytes(bytes).map_err(|_| HnError::AuxPowInvalid)?;
+            aux.verify(self.params.chain_id, block)
+                .map_err(|_| HnError::AuxPowInvalid)?;
         }
         if block.coinbase_ct.len() != NOTE_CT_BYTES {
             return Err(HnError::BadCiphertext);
@@ -764,6 +784,7 @@ mod tests {
             coinbase_is_reward: true,
             pot_after: st.pot() - amount,
             anchor: AuxAnchor::genesis(),
+            aux_pow: None,
         }
     }
 
@@ -869,6 +890,7 @@ mod tests {
             coinbase_is_reward: true,
             pot_after: st.pot() - amount,
             anchor: AuxAnchor::genesis(),
+            aux_pow: None,
         };
         assert!(matches!(
             st.apply_block(&bad, &circuit),
@@ -901,6 +923,7 @@ mod tests {
             coinbase_is_reward: true,
             pot_after: 0,
             anchor: AuxAnchor::genesis(),
+            aux_pow: None,
         };
         assert!(matches!(
             st.apply_block(&bad, &circuit),
@@ -931,6 +954,7 @@ mod tests {
             coinbase_is_reward: true,
             pot_after: st.pot(),
             anchor: AuxAnchor::genesis(),
+            aux_pow: None,
         };
         assert!(matches!(
             st.apply_block(&bad, &circuit),
@@ -955,6 +979,93 @@ mod tests {
             st.apply_block(&bad, &circuit),
             Err(HnError::CoinbaseCmMismatch)
         ));
+    }
+
+    // ----- aux-PoW binding (E0, Strict mode) -----
+
+    fn strict_params(pot: u64) -> HnChainParams {
+        HnChainParams::testnet()
+            .with_genesis(vec![], pot)
+            .with_strict_aux_pow()
+    }
+
+    #[test]
+    fn strict_reward_block_without_aux_pow_is_rejected() {
+        let circuit = SpendCircuit::new();
+        let miner = addr(b"miner");
+        let mut st = HnState::new(strict_params(1_000));
+        let block = reward_block(&st, &miner); // aux_pow: None
+        assert!(matches!(
+            st.apply_block(&block, &circuit),
+            Err(HnError::AuxPowInvalid)
+        ));
+    }
+
+    #[test]
+    fn strict_reward_block_with_valid_aux_pow_applies() {
+        let circuit = SpendCircuit::new();
+        let miner = addr(b"miner");
+        let mut st = HnState::new(strict_params(1_000));
+        let mut block = reward_block(&st, &miner);
+        // Merge-mine the witness binding this exact block's header id.
+        let aux = crate::hn::auxpow::mine_hn_aux_pow(st.params().chain_id, &block);
+        block.aux_pow = Some(aux.to_bytes().expect("witness serializes"));
+        st.apply_block(&block, &circuit)
+            .expect("a block backed by real aux-PoW work applies");
+        assert_eq!(st.height(), 1);
+    }
+
+    #[test]
+    fn strict_reward_block_with_aux_pow_for_a_different_block_is_rejected() {
+        let circuit = SpendCircuit::new();
+        let miner = addr(b"miner");
+        let mut st = HnState::new(strict_params(1_000));
+        let block = reward_block(&st, &miner);
+        // A witness mined for a DIFFERENT block (tampered state_root): the id
+        // it commits will not equal this block's header id.
+        let mut other = block.clone();
+        other.state_root[0] ^= 1;
+        let aux = crate::hn::auxpow::mine_hn_aux_pow(st.params().chain_id, &other);
+        let mut bad = block;
+        bad.aux_pow = Some(aux.to_bytes().expect("witness serializes"));
+        assert!(matches!(
+            st.apply_block(&bad, &circuit),
+            Err(HnError::AuxPowInvalid)
+        ));
+    }
+
+    #[test]
+    fn strict_genesis_allocation_is_exempt_from_aux_pow() {
+        // Genesis (non-reward) blocks are the pre-PoW pinned prefix — Strict
+        // mode does not require a witness for them.
+        let circuit = SpendCircuit::new();
+        let faucet = addr(b"faucet");
+        let params = HnChainParams::testnet()
+            .with_genesis(vec![(faucet, 100)], 50)
+            .with_strict_aux_pow();
+        let mut st = HnState::new(params);
+        let id = block_id(0, &st.current_root());
+        let m = coinbase_note(&faucet, 100, &id);
+        let genesis = HnBlock {
+            height: 0,
+            prev_root: st.tip_root_limbs(),
+            state_root: st.simulate_state_root(&[m.cm]),
+            timestamp_ms: 1_760_000_000_000,
+            sc_nbits: st.expected_nbits(),
+            txs: vec![],
+            pegouts: vec![],
+            pegins: vec![],
+            miner_owner: digest_to_limbs(&faucet.owner),
+            coinbase_amount: 100,
+            coinbase_cm: digest_to_limbs(&m.cm),
+            coinbase_ct: m.ciphertext,
+            coinbase_is_reward: false,
+            pot_after: 50,
+            anchor: AuxAnchor::genesis(),
+            aux_pow: None,
+        };
+        st.apply_block(&genesis, &circuit)
+            .expect("genesis allocation applies without aux-PoW");
     }
 
     #[test]
@@ -1027,6 +1138,7 @@ mod tests {
             coinbase_is_reward: false,
             pot_after: 50,
             anchor: AuxAnchor::genesis(),
+            aux_pow: None,
         };
         assert!(matches!(
             st.apply_block(&redirect, &circuit),
@@ -1051,6 +1163,7 @@ mod tests {
             coinbase_is_reward: false,
             pot_after: 50,
             anchor: AuxAnchor::genesis(),
+            aux_pow: None,
         };
         assert!(matches!(
             st.apply_block(&inflated, &circuit),
@@ -1075,6 +1188,7 @@ mod tests {
             coinbase_is_reward: false,
             pot_after: 50,
             anchor: AuxAnchor::genesis(),
+            aux_pow: None,
         };
         st.apply_block(&good, &circuit).unwrap();
         assert_eq!(st.pot(), 50, "genesis issuance does not touch the pot");

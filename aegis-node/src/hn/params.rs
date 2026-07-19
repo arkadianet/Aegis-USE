@@ -96,6 +96,16 @@ pub struct HnChainParams {
     /// LWMA window (blocks) — below `window + 1` blocks the chain stays at
     /// `min_difficulty_nbits`.
     pub daa_window: usize,
+    /// Aux-PoW enforcement mode (E0):
+    /// - `false` (**DevStub**, default): the running devnet, which is
+    ///   API-anchored but does not merge-mine yet — blocks carry no aux-PoW
+    ///   witness and consensus does NOT require one. Fork-choice weight is the
+    ///   self-declared `sc_nbits`, so this mode is LIVENESS-only (the
+    ///   `epoch-validity-design.md` §6.5 "devnet toothlessness" residual).
+    /// - `true` (**Strict**): every non-genesis block MUST carry an aux-PoW
+    ///   witness that binds its `hn_header_id` to real Autolykos work clearing
+    ///   `sc_nbits` — the fork-choice weight is then genuine PoW.
+    pub require_aux_pow: bool,
 }
 
 /// The seed the genesis faucet's keys derive from — its address funds the e2e
@@ -139,7 +149,15 @@ impl HnChainParams {
             min_difficulty_nbits: difficulty_to_nbits(&BigUint::from(1u8)),
             daa_target_secs: HN_BLOCK_TARGET_SECS,
             daa_window: HN_DAA_WINDOW,
+            require_aux_pow: false,
         }
+    }
+
+    /// This profile with Strict aux-PoW enforcement (every non-genesis block
+    /// must carry a verified aux-PoW witness) — the mainnet-grade posture.
+    pub fn with_strict_aux_pow(mut self) -> Self {
+        self.require_aux_pow = true;
+        self
     }
 
     /// The LWMA difficulty-adjustment parameters for this profile — the single

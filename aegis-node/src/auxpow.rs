@@ -79,8 +79,11 @@ pub fn kv_to_leaf(field: &ExtensionField) -> Vec<u8> {
 }
 
 /// Merkle leaf digest of a field: `blake2b256(0x00 ‖ kvToLeaf(field))`
-/// — the digest a `BatchMerkleProof` carries for a proven leaf.
-fn leaf_digest(field: &ExtensionField) -> [u8; 32] {
+/// — the digest a `BatchMerkleProof` carries for a proven leaf. Public
+/// so the hn aux-PoW verifier ([`crate::hn::auxpow`], E0) reuses the
+/// exact same leaf construction instead of re-deriving it (both are
+/// pinned by `tests/auxpow_real_extension_oracle.rs`).
+pub fn leaf_digest(field: &ExtensionField) -> [u8; 32] {
     let leaf = kv_to_leaf(field);
     let mut pre = Vec::with_capacity(1 + leaf.len());
     pre.push(LEAF_NODE_PREFIX);

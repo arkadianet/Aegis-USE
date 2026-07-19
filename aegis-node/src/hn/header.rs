@@ -149,6 +149,7 @@ mod tests {
             coinbase_is_reward: true,
             pot_after: 999,
             anchor: AuxAnchor::genesis(),
+            aux_pow: None,
         }
     }
 
