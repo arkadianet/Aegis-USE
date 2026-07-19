@@ -267,15 +267,27 @@ Comfortable.
   `new_root != prev_root` always: every epoch block appends ≥ 1 leaf (the
   coinbase, host `leaves_of_block` :129), and Poseidon2 root collision
   resistance does the rest.
-- **Cross-batch double-release is structural.** Settled windows chain:
-  batch k proves the transition over `(watermark_k, sealed_k]` where the
-  frontier's `leaf_count` (the watermark) is authenticated by `prev_root`
-  (a forged frontier reproducing R4's root is a Poseidon2 collision — the
-  engine's forge-membership guard covers this, `engine/src/merkle.rs`
-  oracle tests). A burn leaf lies below exactly one watermark boundary, so it
-  can be inside at most one settled window, ever. Within a window, §2 check 6
-  (distinct `nf0`) prevents duplication. **No released-set accumulator is
-  needed on-chain.**
+- **Cross-batch double-release — CORRECTED (red-review 2026-07-19): NOT
+  fully structural.** The frontier's `leaf_count` (watermark) is authenticated
+  by `prev_root`, and within a window §2 check 6 (distinct `nf0`) prevents
+  duplication — but "a burn leaf lies below exactly one watermark boundary"
+  holds ONLY under **epoch canonicality**, which is explicitly honest-scope
+  (§7, guest header: nothing proves `new_root` is the *canonical* hn chain's
+  root). **ATTACK (pre-existing, identical in v5 single-withdrawal — NOT
+  introduced by batching):** a malicious permissionless settler builds a
+  NON-CANONICAL epoch that re-appends an already-settled burn commitment as a
+  fresh leaf on the current authenticated frontier, reuses the original spend
+  proof (nothing consumes it), and produces a second valid settlement →
+  **double-pay / peg-inflation** (D1 forces payment to the *original*
+  recipient, so not theft-to-attacker, but the vault releases 2× USE for one
+  burn → drains the vault / breaks the 1:1 peg). **So the earlier "no
+  released-set accumulator needed" was WRONG.** REAL-VALUE-GATE FIX (one of):
+  (a) a **settled-burn accumulator** — a settlement-nullifier set in the vault
+  (R6), guest proves each batch's `nf0` ∉ set then adds them, making settlement
+  idempotent per burn — closes this *without* full epoch-validity; or (b) the
+  full **epoch-validity proof** (`new_root` = canonical hn root). Until one
+  ships, cross-batch anti-replay rests on the **honest-settler / epoch-
+  canonicality assumption** — testnet-acceptable, mainnet-blocking.
 - **R5: cumulative withdrawal count — `R5' = R5 + N`** (decision D4,
   recommended over a `+1` batch index). It costs the same one addition,
   makes `counter_next` double as the explicit N binding in the journal, and

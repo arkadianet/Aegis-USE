@@ -60,6 +60,18 @@ demonstration; the crypto-maturity tier gates **real value** only.
 
 ## Tier 3 — cryptographic maturity (the real-value gate)
 
+- [ ] **Settlement epoch-canonicality / double-pay (HIGH — red-review 2026-07-19).**
+      The settlement guest proves a burn is a leaf of `(prev_root, new_root]` but
+      NOT that `new_root` is the *canonical* hn chain root. A malicious permissionless
+      settler can build a non-canonical epoch re-appending an already-settled burn +
+      reuse its spend proof → **double-pay / peg-inflation** (pays the original
+      recipient, so not theft, but releases 2× USE for one burn → drains the vault).
+      Pre-existing in v5; NOT introduced by batching/D1. This is what makes the bridge
+      "trustless *modulo epoch canonicality*", not fully trustless. FIX (one of):
+      (a) **settled-burn accumulator** (settlement-nullifier set in the vault R6 —
+      idempotent-per-burn, cheaper, closes it without full epoch-validity), or
+      (b) full **epoch-validity proof**. Testnet-acceptable (honest settler);
+      mainnet-blocking. Likely the top post-batching security priority.
 - [ ] **FRI parameters to production.** Currently ~113-bit *conjectured*; raise
       queries / log-blowup for mainnet margin.
 - [ ] **R1-T threshold turnstile.** Bounds unbounded nullifier-set growth (the
