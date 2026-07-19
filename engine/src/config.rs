@@ -237,3 +237,109 @@ pub fn hiding_config_for_verify() -> HidingEngineConfig {
 // here because `p3-security` is not published on crates.io. The hiding FRI
 // constants are unchanged; re-establishing this oracle (vendored copy or a
 // dev-only git pin) is tracked as an I5 params/soundness review item.
+
+// =================== the RECURSION-COMPATIBLE client config ===================
+//
+// The recursive aggregation verifier (Plonky3-recursion) hashes in-circuit with
+// Poseidon2 ONLY — there is no in-circuit SHA-256 gadget anywhere in the library.
+// The SHA config above was chosen for the RISC0 SHA accelerator, but under
+// recursion the settlement zkVM never verifies client proofs directly (it
+// verifies the fixed-size aggregate ROOT), so that motivation disappears. The
+// recursion path therefore reverts the client to a Poseidon2-W16 **salted
+// hiding** MMCS + **duplex** challenger — same masking construction and same
+// hiding FRI numbers as the SHA config ([`hiding_fri_parameters`],
+// lb3/Q67/pow16/cap3/salt4/rc4), only the leaf-hash and transcript change.
+//
+// This is additive: the SHA config above is the current chain's client/settlement
+// path (retired at the recursion testnet re-cut, I5). See
+// `dev-docs/sidechain/recursion-feasibility.md` §I2/§8.
+pub mod recursion {
+    use p3_baby_bear::{default_babybear_poseidon2_16, Poseidon2BabyBear};
+    use p3_challenger::DuplexChallenger;
+    use p3_commit::ExtensionMmcs;
+    use p3_dft::Radix2DitParallel;
+    use p3_field::Field;
+    use p3_fri::HidingFriPcs;
+    use p3_merkle_tree::MerkleTreeHidingMmcs;
+    use p3_symmetric::{PaddingFreeSponge, TruncatedPermutation};
+    use p3_uni_stark::StarkConfig;
+    use rand::SeedableRng;
+    use rand_chacha::ChaCha20Rng;
+
+    use super::{hiding_fri_parameters, EF, NUM_RANDOM_CODEWORDS, SALT_ELEMS};
+    use crate::poseidon::F;
+
+    /// The proof-system Poseidon2 permutation (BabyBear W16) — the canonical
+    /// `default_babybear_poseidon2_16`, i.e. `Poseidon2Config::BABY_BEAR_D4_W16`,
+    /// which is exactly what the recursive verifier is hardwired to. (Distinct in
+    /// role from the engine's in-circuit note-hash perm, though same field/width.)
+    pub type Perm = Poseidon2BabyBear<16>;
+    /// Sponge leaf hash: rate 8, digest 8 (`[row | salt]` → 8 field elems).
+    pub type Hash = PaddingFreeSponge<Perm, 16, 8, 8>;
+    /// 2-to-1 node compress over 8-elem digests.
+    pub type Compress = TruncatedPermutation<Perm, 2, 8, 16>;
+    /// Poseidon2 digest width: 8 BabyBear elems (~248 bits), vs SHA's 32 bytes.
+    pub const DIGEST_ELEMS: usize = 8;
+    /// MMCS cap height — parity with the SHA config's `val_mmcs` cap (= 3).
+    pub const CAP_HEIGHT: usize = 3;
+
+    type Dft = Radix2DitParallel<F>;
+    /// The salted (hiding) Poseidon2 MMCS over packed BabyBear.
+    pub type SaltedValMmcs = MerkleTreeHidingMmcs<
+        <F as Field>::Packing,
+        <F as Field>::Packing,
+        Hash,
+        Compress,
+        ChaCha20Rng,
+        2,
+        DIGEST_ELEMS,
+        SALT_ELEMS,
+    >;
+    pub type SaltedChallengeMmcs = ExtensionMmcs<F, EF, SaltedValMmcs>;
+    /// Duplex (field-word) Fiat-Shamir challenger — it CAN observe the 8-elem
+    /// Poseidon2 roots (unlike the SHA byte-root config, which needs the
+    /// serializing challenger), and it is what the recursion verifier expects.
+    pub type RecursionChallenger = DuplexChallenger<F, Perm, 16, 8>;
+    pub type RecursionHidingPcs =
+        HidingFriPcs<F, Dft, SaltedValMmcs, SaltedChallengeMmcs, ChaCha20Rng>;
+    /// The recursion-compatible hiding STARK config for client spend proofs.
+    pub type RecursionHidingConfig = StarkConfig<RecursionHidingPcs, EF, RecursionChallenger>;
+
+    /// Build the recursion hiding config from caller-supplied mask/salt RNGs
+    /// (mirrors [`super::make_hiding_config`], Poseidon2 leaf/transcript).
+    pub fn make_recursion_hiding_config(
+        mask_rng: ChaCha20Rng,
+        salt_rng: ChaCha20Rng,
+    ) -> RecursionHidingConfig {
+        let perm = default_babybear_poseidon2_16();
+        let hash = Hash::new(perm.clone());
+        let compress = Compress::new(perm.clone());
+        let val_mmcs = SaltedValMmcs::new(hash, compress, CAP_HEIGHT, salt_rng);
+        let challenge_mmcs = SaltedChallengeMmcs::new(val_mmcs.clone());
+        let fri_params = hiding_fri_parameters(challenge_mmcs);
+        let pcs = RecursionHidingPcs::new(
+            Dft::default(),
+            val_mmcs,
+            fri_params,
+            NUM_RANDOM_CODEWORDS,
+            mask_rng,
+        );
+        let challenger = RecursionChallenger::new(perm);
+        StarkConfig::new(pcs, challenger)
+    }
+
+    /// The PROVER's recursion config: masks/salts seeded from OS entropy. Use
+    /// this to prove real spends — the witness privacy rests on these masks.
+    pub fn recursion_hiding_config() -> RecursionHidingConfig {
+        make_recursion_hiding_config(
+            rand::make_rng::<ChaCha20Rng>(),
+            rand::make_rng::<ChaCha20Rng>(),
+        )
+    }
+
+    /// The VERIFIER's recursion config: fixed seed (the RNG is never drawn from
+    /// during verification, so no entropy is required).
+    pub fn recursion_hiding_config_for_verify() -> RecursionHidingConfig {
+        make_recursion_hiding_config(ChaCha20Rng::seed_from_u64(0), ChaCha20Rng::seed_from_u64(0))
+    }
+}

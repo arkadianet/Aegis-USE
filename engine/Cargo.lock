@@ -22,6 +22,7 @@ dependencies = [
  "hkdf",
  "p3-air",
  "p3-baby-bear",
+ "p3-batch-stark",
  "p3-challenger",
  "p3-commit",
  "p3-dft",
@@ -84,6 +85,12 @@ dependencies = [
  "ghash",
  "subtle",
 ]
+
+[[package]]
+name = "allocator-api2"
+version = "0.2.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 
 [[package]]
 name = "atomic-polyfill"
@@ -308,10 +315,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "edd0f118536f44f5ccd48bcb8b111bdc3de888b58c74639dfb034a357d0f206d"
 
 [[package]]
+name = "equivalent"
+version = "1.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "877a4ace8713b0bcf2a4e7eec82529c029f1d0619886d18145fea96c3ffe5c0f"
+
+[[package]]
 name = "fiat-crypto"
 version = "0.2.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "28dea519a9695b9977216879a3ebfddf92f1c08c05d984f8996aecd6ecdc811d"
+
+[[package]]
+name = "foldhash"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
 name = "generic-array"
@@ -352,6 +371,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b0c35f58762feb77d74ebe43bdbc3210f09be9fe6742234d573bacc26ed92b67"
 dependencies = [
  "byteorder",
+]
+
+[[package]]
+name = "hashbrown"
+version = "0.17.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
+dependencies = [
+ "allocator-api2",
+ "equivalent",
+ "foldhash",
 ]
 
 [[package]]
@@ -502,6 +532,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "p3-batch-stark"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2ffe185f6ea5239ac73a394ca0b4bce21384ff13cd5bfe3d1777a30055603c6d"
+dependencies = [
+ "hashbrown",
+ "p3-air",
+ "p3-challenger",
+ "p3-commit",
+ "p3-field",
+ "p3-lookup",
+ "p3-matrix",
+ "p3-maybe-rayon",
+ "p3-uni-stark",
+ "p3-util",
+ "serde",
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
 name = "p3-challenger"
 version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -579,6 +630,24 @@ dependencies = [
  "rand",
  "serde",
  "spin 0.12.2",
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
+name = "p3-lookup"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f0ccc1d2199fe8057d384b8e85f64432158dc4530a55c473d413b0128daa3e86"
+dependencies = [
+ "hashbrown",
+ "num-bigint",
+ "p3-air",
+ "p3-field",
+ "p3-matrix",
+ "p3-maybe-rayon",
+ "p3-uni-stark",
+ "serde",
  "thiserror",
  "tracing",
 ]

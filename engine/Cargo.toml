@@ -32,6 +32,11 @@ p3-poseidon2-air = "=0.6.1"
 p3-air           = "=0.6.1"
 p3-matrix        = "=0.6.1"
 p3-uni-stark     = "=0.6.1"
+# Single-instance batch-stark: the recursion-compatible client spend proof
+# wrapper (`spend::batch`) — the aggregation pipeline's layer-1 input. The ZK
+# uni-stark recursion entry point is broken upstream; batch-stark is the tested
+# route (recursion-feasibility.md §8.4).
+p3-batch-stark   = "=0.6.1"
 p3-commit        = "=0.6.1"
 p3-challenger    = "=0.6.1"
 p3-fri           = "=0.6.1"
