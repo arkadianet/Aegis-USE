@@ -384,6 +384,8 @@ impl HnChain {
             height: self.state.height(),
             prev_root: self.state.tip_root_limbs(),
             state_root,
+            timestamp_ms: now_ms(),
+            sc_nbits: self.state.expected_nbits(),
             txs: std::mem::take(&mut self.mempool),
             pegouts: std::mem::take(&mut self.mempool_pegouts),
             pegins: std::mem::take(&mut self.pegin_queue),
@@ -417,6 +419,8 @@ impl HnChain {
             height: self.state.height(),
             prev_root: self.state.tip_root_limbs(),
             state_root,
+            timestamp_ms: now_ms(),
+            sc_nbits: self.state.expected_nbits(),
             txs: vec![],
             pegouts: vec![],
             pegins: vec![],
@@ -439,6 +443,16 @@ impl HnChain {
         append_record(&self.dir.join(BLOCK_LOG), &payload)
             .expect("persisting a block must not fail");
     }
+}
+
+/// Wall-clock now in milliseconds since the Unix epoch (the block timestamp /
+/// LWMA solve-time input). A backwards system clock only perturbs the DAA
+/// (clamped) — it can never break block validity.
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 fn nf_limb(nf: &Digest, i: usize) -> u32 {

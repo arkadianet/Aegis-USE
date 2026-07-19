@@ -30,6 +30,7 @@ use serde::{Deserialize, Serialize};
 
 use super::mint::{coinbase_cm_expected, pegmint_cm_expected};
 use super::params::HnChainParams;
+use crate::daa::next_nbits;
 use aegis_engine::burn::burn_cm_expected;
 
 const DOMAIN_BLOCK_ID: u32 = 0x0B10;
@@ -133,6 +134,13 @@ pub struct HnBlock {
     pub height: u64,
     pub prev_root: [u32; DIGEST_ELEMS],
     pub state_root: [u32; DIGEST_ELEMS],
+    /// Wall-clock stamp (ms) — the LWMA difficulty adjustment's solve-time
+    /// input, and part of the header id.
+    pub timestamp_ms: u64,
+    /// The aux-PoW difficulty (compact nbits) this block was mined at.
+    /// Consensus-checked against the LWMA expectation; its decoded value is the
+    /// block's real-work weight in fork choice (E0).
+    pub sc_nbits: u32,
     pub txs: Vec<aegis_hn_wallet::Tx>,
     /// Peg-out spends (each also a full spend proof; leaf order after `txs`).
     pub pegouts: Vec<PegOutTx>,
@@ -175,6 +183,9 @@ pub struct HnBlockUndo {
     /// A root evicted from the front of the window when this block's tip root
     /// was pushed (restored on rollback so the window is exact).
     evicted_root: Option<Digest>,
+    /// A `(timestamp, nbits)` pair evicted from the front of the DAA view when
+    /// this block's pair was pushed (restored on rollback so the view is exact).
+    evicted_daa: Option<(u64, u32)>,
 }
 
 /// Why a block (or a single tx, at admission) was rejected.
@@ -196,6 +207,10 @@ pub enum HnError {
     PrevRootMismatch,
     #[error("merge-mining anchor regressed (devnet height went backwards)")]
     AnchorRegressed,
+    #[error("block sc_nbits does not equal the LWMA difficulty expectation")]
+    NbitsMismatch,
+    #[error("aux-PoW share is missing or does not bind this block's header id")]
+    AuxPowInvalid,
     #[error("block state_root does not match the applied tip")]
     StateRootMismatch,
     #[error("coinbase amount does not equal min(pot_parent, base + per_tx × txs)")]
@@ -228,6 +243,11 @@ pub struct HnState {
     height: u64,
     /// The devnet height the last block anchored to (monotone).
     anchor_height: u64,
+    /// `(timestamp_ms, sc_nbits)` of the recent chain, oldest first — the LWMA
+    /// solve-time view. Capped at `daa_window + 1` entries (all `next_nbits`
+    /// ever consults); the same view the share verifier's `sc_nbits` equality
+    /// consumes.
+    daa_view: VecDeque<(u64, u32)>,
     /// The emission pot (public security budget) — starts at
     /// `params.genesis_pot`, credits fees, funds coinbases.
     pot: u64,
@@ -256,6 +276,7 @@ impl HnState {
             outputs: Vec::new(),
             height: 0,
             anchor_height: 0,
+            daa_view: VecDeque::new(),
             pot: params.genesis_pot,
             shielded_total: 0,
             used_pegins: HashSet::new(),
@@ -276,6 +297,21 @@ impl HnState {
 
     pub fn height(&self) -> u64 {
         self.height
+    }
+
+    /// The LWMA difficulty (compact nbits) the NEXT block must declare — the
+    /// single spelling shared by production, validation, and the aux-PoW share
+    /// verifier (E0). Below `daa_window + 1` blocks this is the floor
+    /// (`min_difficulty_nbits`).
+    pub fn expected_nbits(&self) -> u32 {
+        let view: Vec<(u64, u32)> = self.daa_view.iter().copied().collect();
+        next_nbits(&self.params.daa(), &view)
+    }
+
+    /// The current DAA solve-time view (oldest first) — what a share verifier
+    /// checking a child of this tip needs for the `sc_nbits` equality.
+    pub fn daa_view(&self) -> Vec<(u64, u32)> {
+        self.daa_view.iter().copied().collect()
     }
 
     /// The emission pot's current balance (public).
@@ -384,6 +420,13 @@ impl HnState {
         // Merge-mining anchor must never regress (devnet height monotone).
         if block.anchor.devnet_height < self.anchor_height {
             return Err(HnError::AnchorRegressed);
+        }
+        // The aux-PoW difficulty is consensus: a miner cannot self-declare an
+        // easy (or an inflated-weight) `sc_nbits` — it must equal the LWMA
+        // expectation for this chain position (E0; the same defense as the
+        // Curve-Trees share verifier's §3 equality).
+        if block.sc_nbits != self.expected_nbits() {
+            return Err(HnError::NbitsMismatch);
         }
         if block.coinbase_ct.len() != NOTE_CT_BYTES {
             return Err(HnError::BadCiphertext);
@@ -558,6 +601,7 @@ impl HnState {
             added_pegin_box_ids: block.pegins.iter().map(|p| p.box_id).collect(),
             prev_withdrawal_count: self.pending_withdrawals.len(),
             evicted_root: None,
+            evicted_daa: None,
         };
         for tx in block.txs.iter().chain(block.pegouts.iter().map(|p| &p.tx)) {
             let cm0 = digest_at(&tx.public_values, aegis_engine::spend::monolith::PUB_CMO0);
@@ -592,6 +636,13 @@ impl HnState {
             undo.evicted_root = self.recent_roots.pop_front();
         }
         self.recent_roots.push_back(self.tree.root());
+        // Advance the LWMA solve-time view (cap at window + 1, the most
+        // next_nbits ever consults).
+        self.daa_view
+            .push_back((block.timestamp_ms, block.sc_nbits));
+        if self.daa_view.len() > self.params.daa_window + 1 {
+            undo.evicted_daa = self.daa_view.pop_front();
+        }
         self.height += 1;
         self.anchor_height = block.anchor.devnet_height;
         self.pot = pot_next;
@@ -604,6 +655,10 @@ impl HnState {
         self.recent_roots.pop_back();
         if let Some(front) = undo.evicted_root {
             self.recent_roots.push_front(front);
+        }
+        self.daa_view.pop_back();
+        if let Some(front) = undo.evicted_daa {
+            self.daa_view.push_front(front);
         }
         for k in &undo.added_nullifiers {
             self.nullifiers.remove(k);
@@ -697,6 +752,8 @@ mod tests {
             height: st.height(),
             prev_root: st.tip_root_limbs(),
             state_root: st.simulate_state_root(&[mint.cm]),
+            timestamp_ms: 1_760_000_000_000 + st.height() * 15_000,
+            sc_nbits: st.expected_nbits(),
             txs: vec![],
             pegouts: vec![],
             pegins: vec![],
@@ -800,6 +857,8 @@ mod tests {
             height: st.height(),
             prev_root: st.tip_root_limbs(),
             state_root: st.simulate_state_root(&[mint.cm]),
+            timestamp_ms: 1_760_000_000_000 + st.height() * 15_000,
+            sc_nbits: st.expected_nbits(),
             txs: vec![],
             pegouts: vec![],
             pegins: vec![],
@@ -830,6 +889,8 @@ mod tests {
             height: st.height(),
             prev_root: st.tip_root_limbs(),
             state_root: st.simulate_state_root(&[mint.cm]),
+            timestamp_ms: 1_760_000_000_000 + st.height() * 15_000,
+            sc_nbits: st.expected_nbits(),
             txs: vec![],
             pegouts: vec![],
             pegins: vec![],
@@ -858,6 +919,8 @@ mod tests {
             height: st.height(),
             prev_root: st.tip_root_limbs(),
             state_root: st.simulate_state_root(&[mint.cm]),
+            timestamp_ms: 1_760_000_000_000 + st.height() * 15_000,
+            sc_nbits: st.expected_nbits(),
             txs: vec![],
             pegouts: vec![],
             pegins: vec![],
@@ -891,6 +954,21 @@ mod tests {
         assert!(matches!(
             st.apply_block(&bad, &circuit),
             Err(HnError::CoinbaseCmMismatch)
+        ));
+    }
+
+    #[test]
+    fn wrong_sc_nbits_is_rejected() {
+        // The aux-PoW difficulty is consensus: a self-declared nbits that does
+        // not equal the LWMA expectation is invalid (E0).
+        let circuit = SpendCircuit::new();
+        let miner = addr(b"m");
+        let mut st = HnState::new(params_pot(1_000));
+        let mut bad = reward_block(&st, &miner);
+        bad.sc_nbits = st.expected_nbits().wrapping_add(1);
+        assert!(matches!(
+            st.apply_block(&bad, &circuit),
+            Err(HnError::NbitsMismatch)
         ));
     }
 
@@ -937,6 +1015,8 @@ mod tests {
             height: 0,
             prev_root: st.tip_root_limbs(),
             state_root: st.simulate_state_root(&[m1.cm]),
+            timestamp_ms: 1_760_000_000_000 + st.height() * 15_000,
+            sc_nbits: st.expected_nbits(),
             txs: vec![],
             pegouts: vec![],
             pegins: vec![],
@@ -959,6 +1039,8 @@ mod tests {
             height: 0,
             prev_root: st.tip_root_limbs(),
             state_root: st.simulate_state_root(&[m2.cm]),
+            timestamp_ms: 1_760_000_000_000 + st.height() * 15_000,
+            sc_nbits: st.expected_nbits(),
             txs: vec![],
             pegouts: vec![],
             pegins: vec![],
@@ -981,6 +1063,8 @@ mod tests {
             height: 0,
             prev_root: st.tip_root_limbs(),
             state_root: st.simulate_state_root(&[m3.cm]),
+            timestamp_ms: 1_760_000_000_000 + st.height() * 15_000,
+            sc_nbits: st.expected_nbits(),
             txs: vec![],
             pegouts: vec![],
             pegins: vec![],

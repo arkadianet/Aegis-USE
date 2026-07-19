@@ -15,6 +15,7 @@
 pub mod api;
 pub mod auxpow;
 pub mod chain;
+pub mod header;
 pub mod http_client;
 pub mod mint;
 pub mod params;
@@ -23,7 +24,8 @@ pub mod state;
 
 pub use api::{HnApiServer, HnApiState};
 pub use chain::{HnChain, PegInCheck};
+pub use header::{hn_body_commitment, hn_header_id};
 pub use http_client::HttpChain;
 pub use params::HnChainParams;
 pub use pegin_watch::VaultWatch;
-pub use state::{HnBlock, HnError, HnState, PegInClaim, PegOutTx, Withdrawal};
+pub use state::{AuxAnchor, HnBlock, HnError, HnState, PegInClaim, PegOutTx, Withdrawal};
