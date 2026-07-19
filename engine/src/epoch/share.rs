@@ -29,8 +29,9 @@ use ergo_ser::batch_merkle_proof::BatchMerkleProof;
 use ergo_ser::difficulty::decode_compact_bits;
 use ergo_ser::extension::ExtensionField;
 use ergo_ser::header::{serialize_header_without_pow, Header as ErgoHeader};
-use ergo_validation::popow::verify_batch_merkle_proof;
 use num_bigint::BigUint;
+
+use super::batch_merkle::verify_batch_merkle_proof;
 
 // The MM commitment constants (pinned; mirror `aegis-spec`) — the extension
 // field key/version/length the miner splices to carry the hn header id. Shared
@@ -311,5 +312,25 @@ mod tests {
             Err(ShareError::PowNotCleared),
             "a hit that does not clear the target is priced out"
         );
+    }
+
+    // ----- round-trips -----
+
+    /// The E2 wire round-trip (`aux_wire`) preserves a share: a mined share that
+    /// verifies typed still verifies after `from_witness` → serde → `into_witness`
+    /// (the guest reads the wire form, so the codec must be faithful).
+    #[test]
+    fn share_wire_roundtrip_still_verifies() {
+        use crate::epoch::aux_wire::ShareWitnessWire;
+        let block = diff1_block();
+        let w = mine_share(&block, true);
+        let hid = header_id(CHAIN_ID, &block);
+        verify_share(&w, &hid, block.sc_nbits).expect("baseline share verifies");
+
+        let wire = ShareWitnessWire::from_witness(&w);
+        let bytes = postcard::to_allocvec(&wire).expect("wire serializes");
+        let back: ShareWitnessWire = postcard::from_bytes(&bytes).expect("wire deserializes");
+        let w2 = back.into_witness();
+        verify_share(&w2, &hid, block.sc_nbits).expect("round-tripped share still verifies");
     }
 }

@@ -69,23 +69,32 @@ fn main() {
     // ---- 4+5. E2 aux-PoW share verify + E4 anchor linkage (priced fabrication) ----
     #[cfg(feature = "aux-pow")]
     {
-        use aegis_engine::epoch::anchor::{verify_anchor_linkage, AnchorWitness};
+        use aegis_engine::epoch::anchor::verify_anchor_linkage;
+        use aegis_engine::epoch::aux_wire::{AnchorWitnessWire, ShareWitnessWire};
         use aegis_engine::epoch::header_id::header_id;
-        use aegis_engine::epoch::share::{verify_share, ShareWitness};
+        use aegis_engine::epoch::share::verify_share;
 
         // Per suffix reward block: verify its aux-PoW share binds the block's
-        // header id to real Autolykos work at its sc_nbits target.
-        let shares: Vec<ShareWitness> = env::read();
-        assert_eq!(shares.len(), witness.blocks.len(), "one share per block");
-        for (block, share) in witness.blocks.iter().zip(&shares) {
+        // header id to real Autolykos work at its sc_nbits target. The wire form
+        // carries each Ergo object as its canonical byte image (the typed Ergo
+        // structs are not serde) — rebuild it here, in-guest.
+        let share_wires: Vec<ShareWitnessWire> = env::read();
+        assert_eq!(
+            share_wires.len(),
+            witness.blocks.len(),
+            "one share per block"
+        );
+        for (block, share_wire) in witness.blocks.iter().zip(share_wires) {
             let hid = header_id(witness.chain_id, block);
-            verify_share(share, &hid, block.sc_nbits).expect("aux-PoW share must verify");
+            let share = share_wire.into_witness();
+            verify_share(&share, &hid, block.sc_nbits).expect("aux-PoW share must verify");
         }
         let c_e2 = env::cycle_count();
         env::log(&alloc::format!("CYCLES aux_pow_e2={}", c_e2 - c_epoch));
 
         // E4: the suffix tip is committed under an ancestor of the canonical ref.
-        let anchor: AnchorWitness = env::read();
+        let anchor_wire: AnchorWitnessWire = env::read();
+        let anchor = anchor_wire.into_witness();
         let anchored_hn_id = header_id(witness.chain_id, witness.blocks.last().unwrap());
         verify_anchor_linkage(&anchor, &ergo_ref_id, &anchored_hn_id)
             .expect("canonical-Ergo anchor linkage must hold");

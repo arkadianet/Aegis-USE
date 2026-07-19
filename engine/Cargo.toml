@@ -69,7 +69,12 @@ thiserror = "2"
 ergo-crypto     = { git = "https://github.com/arkadianet/ergo.git", tag = "v0.5.2", optional = true }
 ergo-ser        = { git = "https://github.com/arkadianet/ergo.git", tag = "v0.5.2", optional = true }
 ergo-primitives = { git = "https://github.com/arkadianet/ergo.git", tag = "v0.5.2", optional = true }
-ergo-validation = { git = "https://github.com/arkadianet/ergo.git", tag = "v0.5.2", optional = true }
+# NOTE: `ergo-validation` is deliberately NOT a dependency. Its only symbol E2/E4
+# used (`popow::verify_batch_merkle_proof`) is vendored byte-for-byte in
+# `epoch/batch_merkle.rs`, because `ergo-validation` drags `ergo-sigma`, which
+# `compile_error!`s under `panic = "abort"` (its AVL `catch_unwind`) — and RISC0
+# guests are `panic = "abort"`. Dropping the edge is what lets the aux-PoW guest
+# cross-compile to `riscv32im-risc0-zkvm-elf` (M-E1 packaging fix).
 # Test-only (the share-mining helper decodes a real testnet block); pulled only
 # with `aux-pow`, so the default build never resolves the ergo REST graph.
 ergo-rest-json  = { git = "https://github.com/arkadianet/ergo.git", tag = "v0.5.2", optional = true }
@@ -102,7 +107,6 @@ aux-pow = [
     "dep:ergo-crypto",
     "dep:ergo-ser",
     "dep:ergo-primitives",
-    "dep:ergo-validation",
     "dep:ergo-rest-json",
     "dep:num-bigint",
     "dep:serde_json",

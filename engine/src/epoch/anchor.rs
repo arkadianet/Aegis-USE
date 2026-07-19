@@ -28,8 +28,8 @@
 use ergo_ser::batch_merkle_proof::BatchMerkleProof;
 use ergo_ser::extension::ExtensionField;
 use ergo_ser::header::{serialize_header, Header as ErgoHeader};
-use ergo_validation::popow::verify_batch_merkle_proof;
 
+use super::batch_merkle::verify_batch_merkle_proof;
 use super::share::{mm_leaf_digest, AEGIS_MM_KEY as MM_KEY, MM_COMMITMENT_VERSION as MM_VERSION};
 
 /// The anchor-linkage witness: a parent-linked chain of Ergo headers from
@@ -260,5 +260,36 @@ mod tests {
             Err(AnchorError::AnchoredIdMismatch),
             "the anchored hn id must match what H_anchor commits"
         );
+    }
+
+    // ----- round-trips -----
+
+    /// The E4 wire round-trip (`aux_wire`) preserves an anchor witness: an honest
+    /// linkage still links after `from_witness` → serde → `into_witness` (the
+    /// guest reads the wire form, so the header/proof codecs must be faithful).
+    #[test]
+    fn anchor_wire_roundtrip_still_links() {
+        use crate::epoch::aux_wire::AnchorWitnessWire;
+        let hn_id = [0x42u8; 32];
+        let (anchor, field, proof) = anchor_header(hn_id);
+        let headers = linked_chain(anchor, 3);
+        let ergo_ref = ergo_header_id(&headers[0]).unwrap();
+        let w = AnchorWitness {
+            headers,
+            anchor_field: field,
+            anchor_proof: proof,
+        };
+        verify_anchor_linkage(&w, &ergo_ref, &hn_id).expect("baseline links");
+
+        let wire = AnchorWitnessWire::from_witness(&w);
+        let bytes = postcard::to_allocvec(&wire).expect("wire serializes");
+        let back: AnchorWitnessWire = postcard::from_bytes(&bytes).expect("wire deserializes");
+        let w2 = back.into_witness();
+        // ergo_ref must be recomputed from the round-tripped header (the wire
+        // carries bytes, not the id) — it must equal the original.
+        let ergo_ref2 = ergo_header_id(&w2.headers[0]).unwrap();
+        assert_eq!(ergo_ref2, ergo_ref, "round-tripped ergo_ref id is stable");
+        let depth = verify_anchor_linkage(&w2, &ergo_ref2, &hn_id).expect("round-tripped links");
+        assert_eq!(depth, 3);
     }
 }
