@@ -158,7 +158,11 @@ pub struct OutputNote {
 // ------------------------------- the AIR -------------------------------
 
 /// The monolithic spend AIR.
-#[derive(Debug, Default)]
+///
+/// `Clone`/`Copy`: p3-batch-stark `StarkInstance` borrows the AIR by value into
+/// a slice of instances (the recursion-compatible client proof path), which
+/// requires the AIR to be `Clone`. It is a zero-sized unit struct.
+#[derive(Debug, Default, Clone, Copy)]
 pub struct SpendAir;
 
 impl BaseAir<F> for SpendAir {

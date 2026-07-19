@@ -25,24 +25,24 @@ publish     = false
 #     (aegis-hashnative-spike/RESULTS.md). BabyBear is deliberate: it is the
 #     RISC0 verifier's field, so a later settlement STARK re-verifies these
 #     client proofs cheaply, in-field, with no foreign-curve MSM. ---
-p3-field         = { git = "https://github.com/Plonky3/Plonky3", rev = "4aed8fe4195d40305175d55e58690f46171258d9" }
-p3-baby-bear     = { git = "https://github.com/Plonky3/Plonky3", rev = "4aed8fe4195d40305175d55e58690f46171258d9" }
-p3-poseidon2     = { git = "https://github.com/Plonky3/Plonky3", rev = "4aed8fe4195d40305175d55e58690f46171258d9" }
-p3-poseidon2-air = { git = "https://github.com/Plonky3/Plonky3", rev = "4aed8fe4195d40305175d55e58690f46171258d9" }
-p3-air           = { git = "https://github.com/Plonky3/Plonky3", rev = "4aed8fe4195d40305175d55e58690f46171258d9" }
-p3-matrix        = { git = "https://github.com/Plonky3/Plonky3", rev = "4aed8fe4195d40305175d55e58690f46171258d9" }
-p3-uni-stark     = { git = "https://github.com/Plonky3/Plonky3", rev = "4aed8fe4195d40305175d55e58690f46171258d9" }
-p3-commit        = { git = "https://github.com/Plonky3/Plonky3", rev = "4aed8fe4195d40305175d55e58690f46171258d9" }
-p3-challenger    = { git = "https://github.com/Plonky3/Plonky3", rev = "4aed8fe4195d40305175d55e58690f46171258d9" }
-p3-fri           = { git = "https://github.com/Plonky3/Plonky3", rev = "4aed8fe4195d40305175d55e58690f46171258d9" }
-p3-dft           = { git = "https://github.com/Plonky3/Plonky3", rev = "4aed8fe4195d40305175d55e58690f46171258d9" }
-p3-merkle-tree   = { git = "https://github.com/Plonky3/Plonky3", rev = "4aed8fe4195d40305175d55e58690f46171258d9" }
-p3-symmetric     = { git = "https://github.com/Plonky3/Plonky3", rev = "4aed8fe4195d40305175d55e58690f46171258d9" }
+p3-field         = "=0.6.1"
+p3-baby-bear     = "=0.6.1"
+p3-poseidon2     = "=0.6.1"
+p3-poseidon2-air = "=0.6.1"
+p3-air           = "=0.6.1"
+p3-matrix        = "=0.6.1"
+p3-uni-stark     = "=0.6.1"
+p3-commit        = "=0.6.1"
+p3-challenger    = "=0.6.1"
+p3-fri           = "=0.6.1"
+p3-dft           = "=0.6.1"
+p3-merkle-tree   = "=0.6.1"
+p3-symmetric     = "=0.6.1"
 # SHA-256 FRI-Merkle commitment hash (T2.1). Routes through `sha2`
 # (`block_api::compress256`), which RISC0 patches to its SHA accelerator in the
 # settlement guest (see settlement/methods/guest-settlement/Cargo.toml [patch]).
-p3-sha256        = { git = "https://github.com/Plonky3/Plonky3", rev = "4aed8fe4195d40305175d55e58690f46171258d9" }
-p3-util          = { git = "https://github.com/Plonky3/Plonky3", rev = "4aed8fe4195d40305175d55e58690f46171258d9" }
+p3-sha256        = "=0.6.1"
+p3-util          = "=0.6.1"
 
 # rand 0.10 to match Plonky3's rand (the hiding PCS/MMCS take an `R: rand::Rng`);
 # a mismatched rand major would fail the trait bound on the mask/salt RNG.
@@ -64,10 +64,10 @@ serde            = { version = "1", default-features = false, features = ["deriv
 [dev-dependencies]
 hex = "0.4"
 postcard = { version = "1", features = ["alloc"] }
-# Soundness oracle for the FRI parameter choice (proven + conjectured bits;
-# ethSTARK 2021/582, 2024/1553, 2025/2010, 2025/2055) — the regression test in
-# `config.rs` holds the hiding params to the ZK-baseline security floor.
-p3-security = { git = "https://github.com/Plonky3/Plonky3", rev = "4aed8fe4195d40305175d55e58690f46171258d9" }
+# NOTE: the `p3-security` soundness-oracle dev-dep is dropped at crates.io p3
+# 0.6.1 (not published there). The FRI-parameter soundness floor it guarded
+# (config.rs) moves to the I5 params/soundness review — the hiding FRI constants
+# are unchanged.
 
 # The FRI/STARK stack is unusably slow at opt-level 0; keep it optimized even in
 # dev/test so the prove/verify tests run in seconds, not minutes (mirrors the

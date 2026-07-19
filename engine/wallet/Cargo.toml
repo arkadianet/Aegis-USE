@@ -21,7 +21,7 @@ sha2    = { version = "0.10", default-features = false }
 x25519-dalek = { version = "2", default-features = false, features = ["static_secrets"] }
 rand    = { version = "0.10", default-features = false, features = ["std", "std_rng", "sys_rng", "thread_rng"] }
 rand_chacha = { version = "0.10", default-features = false }
-p3-uni-stark = { git = "https://github.com/Plonky3/Plonky3", rev = "4aed8fe4195d40305175d55e58690f46171258d9" }
-p3-field     = { git = "https://github.com/Plonky3/Plonky3", rev = "4aed8fe4195d40305175d55e58690f46171258d9" }
+p3-uni-stark = "=0.6.1"
+p3-field     = "=0.6.1"
 postcard = { version = "1", features = ["alloc"] }
 serde = { version = "1", features = ["derive"] }
