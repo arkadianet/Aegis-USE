@@ -955,3 +955,98 @@ spends, digest-folding aggregation layer, native sponge oracle),
 `engine/recursion/tests/digest_channel.rs` (6 tests incl. tamper checks). Run:
 `RUSTFLAGS="-Ctarget-cpu=native" cargo test --release --test digest_channel`
 in an isolated `CARGO_TARGET_DIR`.*
+
+---
+
+## 12. I4 BUILT (2026-07-19): the digest-bound batch settlement statement — MEASURED, guest EXECUTES
+
+> **Status: BUILT + MEASURED (this machine; recursion crate under
+> `RUSTFLAGS=-Ctarget-cpu=native` + `parallel`, RISC0 executor for the guest).**
+> The §11 option-A prototype is productionised into a real, on-chain-verifiable
+> batch settlement statement over the recursion root. Branch
+> `feat/recursion-settlement-i4-build` off the §11 spike.
+
+### 12.1 What shipped (items 1–4)
+
+1. **Entry digest schema** (`engine/src/settlement_digest.rs`,
+   `engine/recursion/src/digest_agg.rs::layer1_settlement`): the leaf digest is
+   `d_leaf = H(amount ‖ recipient_commit ‖ nf0 ‖ cm0)`, folded IN-CIRCUIT with
+   `nf0`/`cm0` taken from the verifier's `air_public_targets` (proof-bound) and
+   `amount`/`recipient_commit` as leaf publics (the settlement declaration). The
+   root's surfaced digest is the withdrawals-Merkle-root (the tree's `H(l ‖ r)`
+   fold) over exactly these tuples.
+2. **Identity padding leaves** (`identity_leaf` / `identity_digest`): a
+   non-power-of-two batch pads with a leaf pinned to `H(IDENTITY_PREIMAGE)`. A
+   padding slot contributes a fixed constant no real tuple can produce, so it
+   cannot smuggle a withdrawal. Heterogeneous real+identity pairing proves and
+   verifies (`settlement_channel::…_n3_padded`).
+3. **RISC0 settlement guest over the root**
+   (`settlement/methods/guest-settlement`): verifies the ONE aggregate root
+   in-field (constant in N; links the recursion verify path with the
+   `aegis/digest` table, no rayon/p3-recursion/rand), reads the surfaced digest,
+   **recomputes it from the §1 journal entries and checks equality** (the bind:
+   journal == what the proofs attested), does the per-withdrawal burn binding +
+   epoch membership + distinct-nf0, advances the frontier `prev_root→new_root`,
+   and commits the §1 `AEGISPB1` journal. REPLACES the v5 verify-N-in-field guest.
+4. **End-to-end measurement** — the guest EXECUTES cleanly (all checks pass,
+   correct journal committed) over burn-valid N-withdrawal roots:
+
+| N | in-guest root_verify | bind (O(N)) | tree_transition | total user cyc | journal |
+|---|---|---|---|---|---|
+| 2 | **558.5 M** | 1.7 M | 3.5 M | 650.3 M | 178 B |
+| 4 | **541.1 M** | 3.4 M | 4.9 M | 632.4 M | 276 B |
+
+- **root_verify is CONSTANT in N** (558 M vs 541 M — within packing noise), vs
+  the old verify-N-in-field cost `N × 0.30 B` (0.6 B → 1.2 B → … → 19.2 B at
+  N=64). Batch-independence holds for the REAL I4 guest, digest table included.
+- `bind` is O(N) but ~0.85 M cycles/withdrawal — the digest recompute + burn +
+  membership + distinctness are micro-scale next to the wrap.
+- Host pipeline (leaves+aggregate) N=2 ≈ 8.3 s, N=4 ≈ 18.2 s; root ≈ 735–765 KB
+  (≈ constant); native verify-from-bytes ≈ 15–17 ms (the same op the guest runs).
+- The root is the **Poseidon2** config at full engine FRI params (Q=67), which
+  is why 558 M > §7's 227 M (Q=36 proxy). The §7 **SHA-final layer** (measured
+  4.7×, ≈ 120 M) is the structured follow-on: swap the final layer's MMCS +
+  the guest's config reconstruction — the digest bind is unchanged. Guest image
+  id (Poseidon2 config): `14fc66bbfa0dedd848fc7eb182e1a8d04dc29c6506a43cbc4d6cf48e016fcbce`.
+
+### 12.2 Soundness surface + guest-parity (the load-bearing claim)
+
+The guest never runs a circuit; it recomputes the digest with a NATIVE
+`circuit_sponge` (`settlement_digest.rs`) that reproduces the recursion library's
+in-circuit `add_hash_slice` (Poseidon2-W16 overwrite sponge, each limb re-exposed
+as `(v,0,0,0)`). `engine/recursion/tests/sponge_parity.rs` asserts
+`circuit_sponge(x) == ` the in-circuit oracle for every width the schema uses —
+so the guest's recomputation is provably the value the circuit folded. New
+consensus-critical circuit code (the review surface): the §11 `aegis/digest`
+table (~650 LOC, unchanged) + `layer1_settlement`/`identity_leaf`/
+`aggregate_settlement` (~120 LOC) + the native `settlement_digest.rs` (~180 LOC).
+No upstream library patches.
+
+### 12.3 Negative tests (all GREEN)
+
+- `settlement_channel`: a tampered journal entry (wrong amount / recipient /
+  nf0 / reordered / dropped) recomputes a different `withdrawals_root` ≠ the
+  root's surfaced digest → the guest digest-check FAILS. Tampering the root's or
+  a leaf's digest publics fails verification / aggregation (§11 mechanism,
+  carried to settlement leaves). `identity_digest ≠` any real leaf digest.
+- `settlement_digest` unit tests: reorder/add/drop/amount/recipient/nf0 each
+  change the root; identity pinned; journal layout byte-exact.
+
+### 12.4 I5 (structured, not built)
+
+Epoch-validity (`new_root` canonical) and the settled-burn accumulator
+(settlement-nullifier set → each burn settles once; the §4 cross-batch
+double-release fix) add guest checks + a vault register; the per-withdrawal
+tuple and `AEGISPB1` journal are stable across that work. Also I5: the SHA-final
+layer adoption, baking the recursion tower's circuit fingerprint into the ELF
+(vk-pinning, §4(d)), the PegVault v6 batch predicate (`batch-settlement-design.md`
+§3), and the testnet re-cut. Cross-batch anti-replay currently rests on the
+honest-settler / epoch-canonicality assumption — testnet-fine, mainnet-blocking
+until I5. Chain-id-breaking; NOT cut/deployed.
+
+*I4 harness: `engine/src/settlement_digest.rs`,
+`engine/recursion/src/digest_agg.rs` (settlement leaf/identity/aggregate +
+`verify_root_bytes`), tests `sponge_parity` / `settlement_channel` /
+`settlement_measure` / `dump_artifacts`; `settlement/methods/guest-settlement`
+(the guest) + `settlement/exec-i4` (RISC0-executor measurement). Run the guest:
+`cargo build -p methods` then `exec-i4 --dir <dumped artifacts>`.*
