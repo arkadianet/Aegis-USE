@@ -410,3 +410,155 @@ with `register_poseidon2_table::<4>(BABY_BEAR_D4_W16)` +
 constants (no trusted prover-supplied params beyond the proof's own
 `table_packing`; production must bake these + the circuit fingerprint into
 the ELF, vk-pinning per §4(d)).*
+
+---
+
+## 8. I1 RESULT (2026-07-19): layer-1 on the REAL monolith — MEASURED, estimate confirmed
+
+> **Status: MEASURED (Ryzen 7 7800X3D, 16 threads + AVX-512 via
+> `RUSTFLAGS=-Ctarget-cpu=native`, `--features p3-circuit-prover/parallel`,
+> matching the M1/§2 methodology).** Closes §6 unknowns #2 (layer-1 at Q=67 on
+> the real monolith), #3 (client Poseidon2 prove regression) and #4 (0.6.x rev
+> alignment). Harness: `Plonky3-recursion/recursion/examples/i1_monolith.rs`
+> over a throwaway copy of the REAL engine (`scratchpad/i1-engine`, the actual
+> `SpendAir` + `build_spend_trace` + 2-in/2-out witness from the monolith
+> tests) re-pinned to crates.io p3 0.6.1; logs
+> `i1-monolith-batch-{run2,par,spikepar,spikenative,enginenative}.log`.
+
+### 8.1 The headline: the real monolith recurses at proxy-consistent cost
+
+One REAL hiding spend proof — 128×2756 monolith + 24-col preprocessed
+schedule, under the recursion-required client config (Poseidon2-W16 **salted**
+hiding MMCS + duplex challenger) at the engine's exact FRI numbers
+(lb3 / **Q=67** / pow16 / cap_height 3 / SALT_ELEMS 4 / 4 random codewords) —
+recursively verified in layer-1:
+
+| Layer-1 (per proof, after cacheable setup) | measured |
+|---|---|
+| **recursive prove (witness run + outer prove)** | **1.8–3.4 s** (steady-state ~2.0–2.1 s) |
+| — of which witness run (in-circuit verify execution) | 52–104 ms |
+| verification-circuit build (one-time) | 0.42 s (witness_count 995,531) |
+| outer prover prep (one-time) | 0.60 s |
+| layer-1 proof size (outer at spike params lb3/Q36/lfp6/arity2) | 381,028 B |
+| layer-1 native verify | 7.4 ms |
+
+**The §6 #2 estimate (~2.5–4 s) is confirmed — measured 1.8–3.4 s.** The
+2756-col / Q=67 / salted / preprocessed monolith costs ~1.2× the Q=36 Keccak
+proxy (1.74 s), not a blow-up: the in-circuit content grows (ALU 229 k rows vs
+144 k; Poseidon2 32.3 k vs 25.9 k) but pads to the same table heights. The
+killer-risk question of §"does the real monolith actually recurse" is closed:
+it recurses, verifies natively, and the layer-1 output is an ordinary
+batch-STARK ready for the M1-measured aggregation tree + RISC0 wrap.
+
+Outer-parameter sensitivity (same circuit, outer FRI swapped to the engine's
+own conservative numbers lb3/Q67/lfp0/arity1/cap3): prove **1.8–2.2 s** —
+statistically indistinguishable from the spike-params outer — with proof
+806,882 B (vs 381 KB) and native verify 16.8 ms (vs 7.4 ms). I.e. even
+proving every tree layer at full client-grade parameters costs ~nothing in
+time; the I5 intermediate-layer relaxation buys proof SIZE (and next-layer
+in-circuit query count), not prove time. (Without AVX-512/rayon the same
+prove is 55 s single-threaded — the recursion prover leans hard on packed
+Poseidon2; see 8.4.)
+
+### 8.2 Client prove regression (§6 #3): <2× CONFIRMED on native-ISA builds
+
+Same witness, same machine, same run, p3 0.6.1 (SHA config = the engine's
+current production shape; Poseidon2 = the I2 target):
+
+| client hiding prove (2-in/2-out) | 16T + AVX-512 | 16T, no native ISA | 1T, no native ISA | proof bytes |
+|---|---|---|---|---|
+| SHA-256 MMCS + byte challenger (today) | **34 ms** | 59 ms | 141 ms | 1,206,382 |
+| Poseidon2 salted MMCS + duplex (uni-stark) | **46 ms** | 188 ms | 924 ms | 1,234,917 |
+| Poseidon2, single-instance **batch**-stark | **37 ms** | 187 ms | 1,017 ms | 1,235,183 |
+
+- With the vector ISA the regression is **~1.1–1.35×** — the "<2×" reasoned
+  estimate holds, and absolute cost (~40 ms desktop) is nowhere near the
+  seconds-scale kill criterion. Without SIMD the ratio degrades to ~3× (16T)
+  / ~6.6× (1T) because software Poseidon2 loses its packing advantage while
+  SHA-NI keeps its hardware one — **the phone datapoint (ARMv8 NEON+SHA2 ext)
+  remains the open I2 measurement**, expect between the 1.3× and 6.6× ratios,
+  i.e. sub-second absolute either way.
+- Proof stays ~1.23 MB (digests shrink 32 B→8 elems, salts+random codewords
+  grow rows) — `MAX_PROOF_BYTES` headroom unchanged at MB scale.
+- Native out-of-circuit verify of the Poseidon2 hiding proof: 22–46 ms.
+
+### 8.3 Rev alignment (§6 #4): the assumption was INVERTED — and it's still cheap
+
+§1/§4(a) assumed crates.io 0.6.1 is *ahead* of our git pin. It is **behind**:
+0.6.1 (2026-06-13) = 0.6.0 + one perf PR (#1815); our `4aed8fe` (2026-07-15)
+carries ~30 further uni-stark-line PRs incl. the p3-lookup redesign (#1566),
+the PeriodicAirBuilder→AirBuilder merge (#1611) and API churn the recursion
+library has never seen. So "align both sides" means **step the engine BACK to
+the release line**, not forward — and that direction is measured-trivial:
+
+- Whole engine compiles against crates.io `=0.6.1` with **two one-line
+  diffs** (`RoundConstants::try_from_layers` → `RoundConstants::new` — the
+  former is post-0.6.1; `PartialRound` regains its `WIDTH` generic) plus
+  dropping the `p3-security` dev-dep (not published on crates.io — the
+  soundness-regression test needs a vendored copy or a git dev-pin) and a
+  `#[derive(Clone, Copy)]` on `SpendAir` (batch-stark instances need `Clone`).
+- **All 73 engine tests pass at 0.6.1**, including the hiding prove/verify
+  and oracle-parity suites.
+- Do NOT attempt to forward-port Plonky3-recursion to 4aed8fe in I1 — the
+  lookup/AirBuilder churn makes that days-of-porting for zero measurement
+  value. Long-term the library will track upstream releases; re-align then.
+
+### 8.4 Upstream gap found (the real integration cost I1 was hunting)
+
+**`RecursionInput::UniStark` over a `HidingFriPcs` proof is broken at
+b363397** — `prove_next_layer` dies with
+`WitnessConflict { witness_id: 0, existing: 0, new: 1 }` during the witness
+run. Bisected: reproduces with a trivial 3-col AddAir, no preprocessed
+columns, cap 0 or 3, engine or spike FRI shapes — it is the ZK-uni-stark
+recursion path itself, not our AIR. Root cause consistent with test coverage:
+**no upstream test exercises ZK + UniStark** (recursive_keccak = non-ZK
+uni-stark; every ZK test — `fibonacci_batch_stark_prover_zk`,
+`zk_aggregation`, `zk_hiding_mmcs` — goes through batch-stark). Upstream main
+== b363397, no fix available.
+
+**Resolution (measured here, recommended for I2–I4): the client proves a
+SINGLE-INSTANCE `p3-batch-stark` proof** (`prove_batch` with one
+`StarkInstance` — preprocessed schedule handled natively) and layer-1 uses
+`BatchStarkVerifierInputsBuilder` + `verify_batch_circuit` — exactly the path
+upstream tests for the salted hiding MMCS (`tests/zk_hiding_mmcs.rs`, issue
+#440 config). Cost is a wash (37 vs 46 ms client-side; same proof bytes), and
+it makes every level of the tree the same proof species (BatchStark), which
+the aggregation API already assumes. File the ZK-UniStark bug upstream; do
+not block on it.
+
+Two working notes that saved the measurement and belong in I2's build recipe:
+- the salted-MMCS recursion targets exist and work end-to-end
+  (`RecValHidingMmcs` + `HidingFriProofTargets` +
+  `set_hiding_salted_fri_mmcs_private_data`) — §4(c)'s "wiring detail" is
+  confirmed wired;
+- the prover's performance envelope REQUIRES `--features
+  p3-circuit-prover/parallel` **and** `RUSTFLAGS=-Ctarget-cpu=native`:
+  without them the same layer-1 prove is 9.5 s (16T, no AVX-512) / 55 s (1T)
+  — a 27× spread. Deployment docs must pin the build flags (and the
+  aggregation-service capacity math must use the flags actually deployed).
+
+### 8.5 Verdict: GO stands, all four §6 unknowns now measured
+
+| §6 unknown | was | now |
+|---|---|---|
+| #1 root wrap in-guest | ~0.2–0.6 B est. | **0.227 B / 48 M (SHA final) — §7** |
+| #2 layer-1 at Q=67 real monolith | ~2.5–4 s est. | **1.8–3.4 s** |
+| #3 client Poseidon2 regression | <2× est. | **~1.3× (AVX-512); 3–6.6× without SIMD; phone TBD (I2)** |
+| #4 rev alignment | LOW risk, direction unknown | **engine→0.6.1: 2-line diff, 73/73 tests green** |
+
+The proxy hid one real cost — not in the numbers but in the API: the
+ZK-uni-stark entry point is untested upstream and broken; the committed path
+routes clients through single-instance batch-stark proofs instead (measured
+equal). Remaining open items for the integration: phone-class client prove
+(I2), upstream bug report + pin/vendor policy (I1 tail), tower-parameter
+policy (I5 — now measured as an optimization, not a correctness need).
+
+*I1 harness: scratchpad `i1-engine/` (engine copy at `=0.6.1`; diffs: config
+test module removed with the unpublished `p3-security` dev-dep,
+`RoundConstants::new`, `PartialRound<_, WIDTH, _, _>`, `derive(Clone, Copy)`
+on `SpendAir`),
+`Plonky3-recursion/recursion/examples/i1_monolith.rs` (salted-ZK
+`FriRecursionConfig` impl + batch-route layer-1 + AddAir bisection probe;
+env knobs `I1_CAP/LFP/ARITY/Q/POW/ITERS/SKIP_SHA/OUTER/MODE_UNISTARK/
+MODE_ADDAIR`), logs `i1-monolith-batch-*.log` (run2 = 1T, par = 16T,
+spikepar = 16T spike-outer, spikenative/enginenative = 16T+AVX-512).*
