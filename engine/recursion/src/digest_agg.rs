@@ -45,7 +45,7 @@ use aegis_engine::config::recursion::{
 use aegis_engine::config::EF as Challenge;
 use aegis_engine::poseidon::F;
 use aegis_engine::settlement_digest::{amount_limbs, identity_preimage, recipient_commit};
-use aegis_engine::spend::monolith::{SpendAir, PUB_CMO0, PUB_NF0};
+use aegis_engine::spend::monolith::{SpendAir, PUB_CMO0, PUB_CMO1, PUB_NF0, PUB_NF1, PUB_ROOT};
 
 use crate::digest::{
     add_digest_expose, digest_op_type, generate_digest_trace, DigestAirBuilder,
@@ -784,6 +784,110 @@ pub fn layer1_settlement(
             .into_iter()
             .map(Challenge::from),
     );
+
+    let packing = TablePacking::new(1, 2)
+        .with_npo_lanes(NpoTypeId::recompose(), 1)
+        .with_fri_params(params.log_final_poly_len, params.log_blowup);
+
+    prove_digest_circuit(
+        &outer_cfg,
+        &circuit,
+        packing,
+        &publics,
+        &privates,
+        |runner| {
+            set_hiding_salted_fri_mmcs_private_data::<
+                F,
+                Challenge,
+                SaltedChallengeMmcs,
+                SaltedValMmcs,
+                DIGEST_ELEMS,
+            >(runner, &mmcs_op_ids, &input.proof.opening_proof, P2)
+            .expect("MMCS private data");
+        },
+    )
+}
+
+/// Layer-1 over a REAL client spend proof, exposing the EPOCH spend-leaf digest
+/// `d_leaf = H(root ‖ nf0 ‖ nf1 ‖ cm0 ‖ cm1 ‖ fee)`
+/// (`aegis_engine::epoch::digest::spend_leaf_digest`) — the per-spend leaf the
+/// epoch-validity recursion tree folds over EVERY suffix spend (not just the
+/// withdrawals). The aggregated root's surfaced digest equals
+/// [`aegis_engine::epoch::digest::epoch_spend_root`] over the same spends, which
+/// the settlement guest re-derives from the proven suffix and binds against
+/// (the anti-fabrication `digest.rs` bind).
+///
+/// `root/nf0/nf1/cm0/cm1` are the client proof's public values, taken from the
+/// verifier's `air_public_targets` (the option-A bind — the five digests the
+/// proof attested). `fee` enters as fresh leaf public inputs folded via
+/// `amount_limbs`, EXACTLY as `spend_leaf_digest` folds it and exactly as
+/// [`layer1_settlement`] folds its `amount` declaration; the settlement guest
+/// pins it via `verify_epoch`'s flat-fee check (`s.fee == FLAT_FEE`), so a
+/// declared fee cannot diverge from the consensus fee.
+pub fn layer1_epoch(
+    params: &AggParams,
+    input: &SpendProofInput<'_>,
+    fee: u64,
+) -> RecursionOutput<PlainAggConfig> {
+    let salted_cfg = salted_zk_config(params);
+    let outer_cfg = plain_agg_config(params);
+    let air = SpendAir;
+    let inner: &RecursionHidingConfig = &salted_cfg;
+    let pvs = vec![input.pis.to_vec()];
+    let air_public_counts = vec![input.pis.len()];
+
+    let mut cb = CircuitBuilder::new();
+    prepare_builder(&mut cb);
+    let lookup_gadget = LogUpGadget::new();
+    let verifier_inputs = BatchStarkVerifierInputsBuilder::<
+        RecursionHidingConfig,
+        MerkleCapTargets<F, DIGEST_ELEMS>,
+        SaltedInnerFri,
+    >::allocate(&mut cb, input.proof, input.common, &air_public_counts);
+    let mmcs_op_ids = verify_batch_circuit::<_, _, _, _, _, _, _, 16, 8>(
+        inner,
+        &[air],
+        &mut cb,
+        &verifier_inputs.proof_targets,
+        &verifier_inputs.air_public_targets,
+        &salted_cfg.fri_verifier_params,
+        &verifier_inputs.common_data,
+        &lookup_gadget,
+        P2,
+    )
+    .expect("build layer-1 batch verification circuit");
+
+    // Fee declaration input (allocated AFTER the verifier's publics, so it
+    // appends to the packed public-input vector below).
+    let fee_targets: Vec<ExprId> = (0..DIGEST_LIMBS).map(|_| cb.public_input()).collect();
+
+    // Proof-bound root/nf0/nf1/cm0/cm1 (the 44 client publics, monolith layout).
+    let client = &verifier_inputs.air_public_targets[0];
+    let root_targets = &client[PUB_ROOT..PUB_ROOT + DIGEST_LIMBS];
+    let nf0_targets = &client[PUB_NF0..PUB_NF0 + DIGEST_LIMBS];
+    let nf1_targets = &client[PUB_NF1..PUB_NF1 + DIGEST_LIMBS];
+    let cm0_targets = &client[PUB_CMO0..PUB_CMO0 + DIGEST_LIMBS];
+    let cm1_targets = &client[PUB_CMO1..PUB_CMO1 + DIGEST_LIMBS];
+
+    // d_leaf = H(root ‖ nf0 ‖ nf1 ‖ cm0 ‖ cm1 ‖ fee) — the exact order + inputs
+    // `spend_leaf_digest` folds, so the surfaced root binds the suffix spends.
+    let mut fold_inputs: Vec<ExprId> = Vec::with_capacity(6 * DIGEST_LIMBS);
+    fold_inputs.extend_from_slice(root_targets);
+    fold_inputs.extend_from_slice(nf0_targets);
+    fold_inputs.extend_from_slice(nf1_targets);
+    fold_inputs.extend_from_slice(cm0_targets);
+    fold_inputs.extend_from_slice(cm1_targets);
+    fold_inputs.extend_from_slice(&fee_targets);
+    let digest = cb
+        .add_hash_slice(&P2, &fold_inputs, true)
+        .expect("epoch spend-leaf digest");
+    add_digest_expose(&mut cb, &digest);
+
+    let circuit = cb.build().expect("build epoch layer-1 circuit");
+    let (mut publics, privates) = verifier_inputs.pack_values(&pvs, input.proof, input.common);
+    // Append the fee declaration in allocation order (amount_limbs — the same
+    // 8-limb big-endian byte decomposition `spend_leaf_digest` uses).
+    publics.extend(amount_limbs(fee).into_iter().map(Challenge::from));
 
     let packing = TablePacking::new(1, 2)
         .with_npo_lanes(NpoTypeId::recompose(), 1)
