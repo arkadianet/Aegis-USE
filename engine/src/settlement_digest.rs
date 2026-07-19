@@ -128,18 +128,23 @@ pub fn leaf_digest(entry: &WithdrawalEntry) -> Digest {
     circuit_sponge(&inputs)
 }
 
-/// The pinned identity digest a padding leaf contributes.
-pub fn identity_digest() -> Digest {
-    let preimage: Vec<F> = IDENTITY_PREIMAGE_TAG
+/// The pinned padding-leaf preimage: the identity tag as field elements, padded
+/// with zeros to a rate multiple. The aggregation circuit's identity leaf seeds
+/// its digest from exactly this, so `identity_leaf.digest == identity_digest()`.
+pub fn identity_preimage() -> Vec<F> {
+    let mut p: Vec<F> = IDENTITY_PREIMAGE_TAG
         .iter()
         .map(|&b| F::from_u32(b as u32))
         .collect();
-    // Pad to a multiple of 8 so the sponge is rate-aligned like every leaf.
-    let mut padded = preimage;
-    while padded.len() % 8 != 0 {
-        padded.push(F::ZERO);
+    while p.len() % 8 != 0 {
+        p.push(F::ZERO);
     }
-    circuit_sponge(&padded)
+    p
+}
+
+/// The pinned identity digest a padding leaf contributes.
+pub fn identity_digest() -> Digest {
+    circuit_sponge(&identity_preimage())
 }
 
 /// Fold a power-of-two-padded slice of leaf digests into the root digest exactly

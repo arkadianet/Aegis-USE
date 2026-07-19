@@ -44,7 +44,8 @@ use aegis_engine::config::recursion::{
 };
 use aegis_engine::config::EF as Challenge;
 use aegis_engine::poseidon::F;
-use aegis_engine::spend::monolith::SpendAir;
+use aegis_engine::settlement_digest::{amount_limbs, identity_preimage, recipient_commit};
+use aegis_engine::spend::monolith::{SpendAir, PUB_CMO0, PUB_NF0};
 
 use crate::digest::{
     add_digest_expose, digest_op_type, generate_digest_trace, DigestAirBuilder,
@@ -491,4 +492,131 @@ pub fn sponge_digest(inputs: &[F]) -> Vec<F> {
         .downcast_ref::<DigestTrace<F>>()
         .expect("digest trace type");
     t.rows[0].limbs.clone()
+}
+
+// ============================================================================
+// settlement leaf + identity padding + settlement aggregation (the real I4)
+// ============================================================================
+
+/// Layer-1 over a REAL client spend proof, exposing the SETTLEMENT leaf digest
+/// `d_leaf = H(amount ‖ recipient_commit ‖ nf0 ‖ cm0)`
+/// (`aegis_engine::settlement_digest::leaf_digest`).
+///
+/// `nf0`/`cm0` are the client proof's public values, taken from the verifier's
+/// `air_public_targets` — so they are the values THIS proof attested (the
+/// option-A bind). `amount`/`recipient_commit` enter as fresh leaf public inputs
+/// (the settlement declaration): they are folded into the digest so the root
+/// commits to them, and the settlement guest ties `amount` back to the proof via
+/// its burn-note check on the same `nf0`/`cm0`.
+pub fn layer1_settlement(
+    params: &AggParams,
+    input: &SpendProofInput<'_>,
+    amount: u64,
+    recipient_prop: &[u8],
+) -> RecursionOutput<PlainAggConfig> {
+    let salted_cfg = salted_zk_config(params);
+    let outer_cfg = plain_agg_config(params);
+    let air = SpendAir;
+    let inner: &RecursionHidingConfig = &salted_cfg;
+    let pvs = vec![input.pis.to_vec()];
+    let air_public_counts = vec![input.pis.len()];
+
+    let mut cb = CircuitBuilder::new();
+    prepare_builder(&mut cb);
+    let lookup_gadget = LogUpGadget::new();
+    let verifier_inputs = BatchStarkVerifierInputsBuilder::<
+        RecursionHidingConfig,
+        MerkleCapTargets<F, DIGEST_ELEMS>,
+        SaltedInnerFri,
+    >::allocate(&mut cb, input.proof, input.common, &air_public_counts);
+    let mmcs_op_ids = verify_batch_circuit::<_, _, _, _, _, _, _, 16, 8>(
+        inner,
+        &[air],
+        &mut cb,
+        &verifier_inputs.proof_targets,
+        &verifier_inputs.air_public_targets,
+        &salted_cfg.fri_verifier_params,
+        &verifier_inputs.common_data,
+        &lookup_gadget,
+        P2,
+    )
+    .expect("build layer-1 batch verification circuit");
+
+    // Settlement declaration inputs (allocated AFTER the verifier's publics, so
+    // they append to the packed public-input vector below).
+    let amount_targets: Vec<ExprId> = (0..DIGEST_LIMBS).map(|_| cb.public_input()).collect();
+    let recipient_targets: Vec<ExprId> = (0..DIGEST_LIMBS).map(|_| cb.public_input()).collect();
+
+    // Proof-bound nf0/cm0 (the 44 client publics, in monolith layout order).
+    let client = &verifier_inputs.air_public_targets[0];
+    let nf0_targets = &client[PUB_NF0..PUB_NF0 + DIGEST_LIMBS];
+    let cm0_targets = &client[PUB_CMO0..PUB_CMO0 + DIGEST_LIMBS];
+
+    // d_leaf = H(amount ‖ recipient_commit ‖ nf0 ‖ cm0) — same order the guest's
+    // `leaf_digest` folds, so the surfaced root binds the journal entries.
+    let mut fold_inputs: Vec<ExprId> = Vec::with_capacity(4 * DIGEST_LIMBS);
+    fold_inputs.extend_from_slice(&amount_targets);
+    fold_inputs.extend_from_slice(&recipient_targets);
+    fold_inputs.extend_from_slice(nf0_targets);
+    fold_inputs.extend_from_slice(cm0_targets);
+    let digest = cb
+        .add_hash_slice(&P2, &fold_inputs, true)
+        .expect("settlement leaf digest");
+    add_digest_expose(&mut cb, &digest);
+
+    let circuit = cb.build().expect("build settlement layer-1 circuit");
+    let (mut publics, privates) = verifier_inputs.pack_values(&pvs, input.proof, input.common);
+    // Append the settlement declaration values in allocation order.
+    publics.extend(amount_limbs(amount).into_iter().map(Challenge::from));
+    publics.extend(
+        recipient_commit(recipient_prop)
+            .into_iter()
+            .map(Challenge::from),
+    );
+
+    let packing = TablePacking::new(1, 2)
+        .with_npo_lanes(NpoTypeId::recompose(), 1)
+        .with_fri_params(params.log_final_poly_len, params.log_blowup);
+
+    prove_digest_circuit(
+        &outer_cfg,
+        &circuit,
+        packing,
+        &publics,
+        &privates,
+        |runner| {
+            set_hiding_salted_fri_mmcs_private_data::<
+                F,
+                Challenge,
+                SaltedChallengeMmcs,
+                SaltedValMmcs,
+                DIGEST_ELEMS,
+            >(runner, &mmcs_op_ids, &input.proof.opening_proof, P2)
+            .expect("MMCS private data");
+        },
+    )
+}
+
+/// A padding leaf: a toy proof whose digest is the pinned
+/// [`aegis_engine::settlement_digest::identity_digest`]. It carries no
+/// withdrawal — its digest is a fixed constant no real tuple can produce — so
+/// padding a non-power-of-two batch cannot smuggle a withdrawal.
+pub fn identity_leaf(params: &AggParams) -> RecursionOutput<PlainAggConfig> {
+    toy_leaf(params, &identity_preimage())
+}
+
+/// Aggregate `N >= 1` real settlement leaves into ONE root, padding to the next
+/// power of two with identity leaves. The root's surfaced digest equals
+/// `aegis_engine::settlement_digest::withdrawals_root` over the same entries —
+/// the value the settlement guest recomputes and checks.
+pub fn aggregate_settlement(
+    params: &AggParams,
+    mut leaves: Vec<RecursionOutput<PlainAggConfig>>,
+) -> (RecursionOutput<PlainAggConfig>, TablePacking, u32) {
+    assert!(!leaves.is_empty(), "need at least one settlement leaf");
+    let padded = leaves.len().next_power_of_two();
+    while leaves.len() < padded {
+        leaves.push(identity_leaf(params));
+    }
+    aggregate_tree_digest(params, leaves)
 }
