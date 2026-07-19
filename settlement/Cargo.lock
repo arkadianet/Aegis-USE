@@ -132,7 +132,7 @@ dependencies = [
  "ergo-validation",
  "hex",
  "num-bigint 0.4.8",
- "p3-field 0.6.0",
+ "p3-field 0.6.1",
  "postcard",
  "rand 0.8.7",
  "reqwest",
