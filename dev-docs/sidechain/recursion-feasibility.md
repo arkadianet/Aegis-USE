@@ -1,0 +1,412 @@
+# Recursive aggregation of client spend proofs — feasibility verdict
+
+> **Status: RESEARCH VERDICT (2026-07-19).** Answers the pivotal question: can
+> settlement proving be made batch-independent (constant in N withdrawals) and
+> cheap enough to also carry epoch-validity? Measured prototype + source audit.
+> No production code changed.
+
+## Verdict: **FEASIBLE-SOON** — with one honest reframing and one config change
+
+**Native Plonky3 recursive aggregation of our spend proofs is real, measured,
+and cheap.** The official `Plonky3/Plonky3-recursion` library (out-of-tree,
+same team) provides exactly the missing piece: a recursive verifier for
+`p3-uni-stark` proofs — including **hiding (ZK) proofs**, **preprocessed
+columns**, **BabyBear with the D=4 extension we already use**, and
+**2-to-1 binary-tree aggregation of N independent proofs into one root proof**.
+I built and ran its examples on this machine (Ryzen 7 7800X3D, CPU only):
+
+- recursively verifying a **1.0 MB wide-AIR uni-STARK** (Keccak AIR, 2633 cols
+  — a near-perfect proxy for our 2756-col monolith): **1.74 s** (1.82 s with
+  ZK mode on) per proof, first layer;
+- each **2-to-1 aggregation node: 0.26–0.74 s**, embarrassingly parallel;
+- root proof converges to a fixed **~450–475 KB** batch-STARK regardless of N.
+
+Today the same verification costs **~0.30 B RISC0 cycles ≈ ~7 min GPU per
+proof** (`batch-settlement-design.md:173,320,350`). Measured gap:
+**~200–400× wall-clock per proof, on cheaper hardware.**
+
+**The honest reframing:** no scheme makes *total* work sublinear in N — every
+client proof must be verified at least once by someone. What recursion delivers
+is (a) the per-proof cost collapses from ~7 min GPU to ~2–4 s CPU,
+parallelizable and pipelineable off the critical path, and (b) the expensive
+RISC0 GPU wrap becomes **exactly one** in-guest verification of the fixed-size
+root proof — **constant in N**. That is the batch-independence that matters:
+settlement critical-path cost stops scaling with withdrawals.
+
+**The config change:** the recursive verifier hashes in-circuit with
+**Poseidon2 only** — there is no SHA-256 gadget anywhere in the library
+(verified by grep over `recursion/src`, `circuit/src`). Our client hiding
+config is SHA-256 MMCS + SHA-256 byte challenger (`engine/src/config.rs:66-77`),
+chosen for the RISC0 SHA accelerator (`config.rs:11`). Under recursion the
+zkVM never verifies client proofs, so that motivation disappears: the client
+config must switch to Poseidon2 MMCS + duplex challenger. Chain-id-breaking on
+the hn chain → folds into the already-free testnet re-cut.
+
+---
+
+## 1. What exists where (Q1) — cited
+
+### Plonky3 at our rev 4aed8fe: NO in-tree recursion
+
+Checkout: `~/.cargo/git/checkouts/plonky3-7d8a3b21a665a86f/4aed8fe`
+(= workspace version **0.6.0**; rev includes PR #1951).
+
+- No recursion crate. The only aggregation-adjacent crate is `p3-batch-stark`
+  ("Batched STARK wrapper atop p3-uni-stark that reuses FRI openings across
+  instances", `batch-stark/Cargo.toml`) — that is a **joint prover**: it needs
+  all witnesses in one place, so it cannot aggregate independently-produced
+  client proofs. Not applicable.
+- What IS in-tree: recursion-*friendly* affordances the recursion library
+  consumes — uniform extension-field challenger notes
+  (`challenger/src/lib.rs:128-139`), "Small visibility changes for recursion
+  (#1046)" (`uni-stark/CHANGELOG.md:112`), "Small changes for recursive
+  lookups (#1229)" (`batch-stark/CHANGELOG.md:113`).
+
+### Plonky3-recursion (github.com/Plonky3/Plonky3-recursion): the missing piece
+
+Audited at commit `b363397` (clone in scratchpad). Explicitly **unaudited /
+"do not recommend production use"** (README) — same maturity gate as the rest
+of our value-path crypto (external review already mandatory before real use).
+
+- **Recursive uni-stark verifier as a circuit**: `recursion/src/verifier/stark.rs`
+  (full FRI verification in-circuit: `recursion/src/pcs/fri/verifier.rs`,
+  MMCS paths: `recursion/src/pcs/mmcs.rs`).
+- **Preprocessed columns supported**: `verifier/stark.rs:78`
+  (`preprocessed_commit: &Option<Comm>`) — our `SpendAir` uses a preprocessed
+  schedule (`engine/src/spend/monolith.rs:459-461`), so
+  `verify_with_preprocessed` semantics carry over.
+- **Hiding proofs supported**: `pcs/mmcs.rs:313-318` — "Optional per-matrix
+  salt coefficients for a hiding MMCS … matching the native
+  `MerkleTreeHidingMmcs`, which commits `[row | salt]`"; `HidingFriPcs` (ZK
+  mode) named in `recursion/src/recursion.rs:293,338`. This is literally our
+  PCS type (`engine/src/config.rs:180-186`, `SALT_ELEMS = 4`).
+- **Fields**: BabyBear "Fully supported", challenge extension **fixed at D=4**
+  (`book/src/user_guide/configuration.md`) — identical to our
+  `EF = BinomialExtensionField<BabyBear, 4>` (`engine/src/config.rs:56`).
+- **2-to-1 aggregation**: `build_and_prove_aggregation_layer`, binary tree,
+  per-level embarrassingly parallel, children may be different AIRs entirely
+  (`book/src/user_guide/aggregation.md`). Inner publics propagate to the outer
+  circuit (`recursion/src/public_inputs.rs`).
+- **Version target**: crates.io **p3 0.6.1** (`Cargo.lock`). Our engine pins
+  git 4aed8fe (0.6.0 line + later commits). Same 0.6.x family — an alignment
+  bump, not a rewrite (integration item I1 below).
+- **In-circuit hash: Poseidon2 only** (`Poseidon2Config::BabyBearD4Width16`
+  etc.); no SHA-256 gadget exists.
+
+## 2. Measured cost of native recursion (Q2) — prototype data
+
+Prototype: built the library's examples in an isolated
+`CARGO_TARGET_DIR` (scratchpad), ran on the 7800X3D (16 threads, CPU only).
+Logs: scratchpad `keccak_bb.log`, `keccak_bb_zk.log`, `agg_bb_4.log`,
+`agg_bb_8.log`. Example params: BabyBear, log_blowup 3, query_pow 16,
+124-bit conjectured target (→ 36 queries), Poseidon2 in-circuit hash.
+
+| Step | Measured | Notes |
+|---|---|---|
+| Base Keccak uni-STARK (2633 cols, 24576 rows) prove | 1.52 s | proxy for our monolith (2756 cols) |
+| Base proof size | 1,001,470 B | vs our 1.1–1.6 MB spend proof |
+| Native (out-of-circuit) verify | 20.5 ms | |
+| **Layer-1 recursion prove (verifies the 1.0 MB proof in-circuit)** | **1.74 s** | 1.82 s with `--zk` (hiding) — works |
+| Layer-1 circuit build (one-time, cacheable) | 369 ms | |
+| Layer-2 / layer-3 recursion prove | 377 / 418 ms | ~475 KB fixed point |
+| **2-to-1 aggregation node prove** (two ~466 KB proofs in one circuit) | **257–740 ms** | 7 nodes for 8 leaves; parallel per level |
+| Root proof size (any N) | ~450–475 KB | constant |
+
+Scaling to our config: our hiding FRI is lb3 / **Q=67** / pow16
+(`engine/src/config.rs:151-155`) vs the example's Q=36; in-circuit work is
+roughly linear in queries → estimate **~2.5–4 s per spend-proof layer-1**
+(reasoned, not measured). Trace shape (128 rows × 2756 cols,
+`monolith.rs:133`) is *smaller* in rows than the proxy.
+
+Per-proof comparison (the order-of-magnitude answer):
+
+- Today, in-zkVM: ~0.30 B cycles ≈ **~7 min GPU** at the measured 32–45
+  Mcyc/min (`batch-settlement-design.md:311-320,350`).
+- Native recursion: **~2–4 s CPU**, no GPU, no zkVM emulation.
+- Gap: **~2 orders of magnitude wall-clock**, ~3+ orders in energy/hardware
+  cost. The recursion cost is per-proof (leaves) + per-node (tree), i.e.
+  total O(N) with a tiny constant, and each level is parallel.
+
+Cost curve (reasoned from measured points, sequential single-CPU worst case):
+
+| N withdrawals | native aggregation (leaves + tree) | today's in-guest verify |
+|---|---|---|
+| 1 | ~3 s | ~7 min GPU |
+| 4 | ~14 s | ~28 min GPU |
+| 16 | ~55 s | ~112 min GPU |
+| 64 | ~3.7 min (CPU; ~parallelizable to <1 min) | ~7.5 h GPU |
+
+## 3. The RISC0 wrap is constant in N (Q3)
+
+After aggregation, the settlement guest verifies **one ~450–475 KB
+batch-STARK root proof** instead of N × 1.1–1.6 MB uni-STARK proofs. The
+wrap's guest work:
+
+- one in-field `p3_batch_stark` verification of the fixed-size root
+  (structure fixed by the aggregation circuit, independent of N);
+- the burn-binding checks — each client proof's 44 publics
+  (`monolith.rs:124`) propagate through the tree via the library's
+  public-input mechanism, so the guest re-derives `burn_cm_expected` per
+  withdrawal exactly as today (`guest-settlement/src/main.rs:89-100`) —
+  O(N) but micro-scale (a few Poseidon2 calls each);
+- the frontier transition, unchanged: ~1.1 M cycles/block, per-epoch not
+  per-withdrawal (`batch-settlement-design.md:175`).
+
+So settlement cycles ≈ `root_verify + epoch_transition + N·ε` — the N-scaling
+term collapses from 0.30 B to ~10^4-cycle scale. **Batch-independence holds.**
+
+The one open cost item: the root proof's MMCS/challenger are Poseidon2, and
+RISC0's SHA accelerator no longer applies. Reasoned estimate of software
+Poseidon2-BabyBear in-guest for a ~475 KB proof at Q≈36: order 0.2–0.6 B
+cycles — i.e. the wrap costs about **one** of today's spend_verifies, once,
+regardless of N (**reasoned, not measured — measure first in M1**). Two
+mitigations if it comes in high:
+- prove the *final* layer under a SHA-256-MMCS `StarkConfig` (the circuit
+  tables are ordinary AIRs; `p3-batch-stark::prove` is config-generic — the
+  in-circuit hashing stays Poseidon2, but the final proof's own commitments
+  ride the guest SHA accelerator, `sys_sha_buffer`). Custom final-prove step
+  outside the convenience API.
+- RISC0's own accelerated `sys_poseidon2` ecall exists in our platform
+  (risc0-zkvm-platform 2.2.2, `src/syscall.rs:474`), but implements RISC0's
+  Poseidon2-BabyBear parameterization — matching p3's permutation constants
+  is an open compatibility question (do not assume; verify constants before
+  counting on it).
+
+## 4. The killer risks, adversarially (Q4)
+
+**(a) "Does recursion exist at our rev?"** Not in-tree — it lives in the
+separate official `Plonky3-recursion` repo, which targets crates.io p3
+**0.6.1** while we pin git 4aed8fe (0.6.0+). Risk: proof/transcript format
+drift between the two 0.6.x points. Mitigation: align both sides on one rev
+(engine bump or recursion patch-pin); the engine's oracle-parity and baked-vk
+tests will catch transcript drift loudly. Residual risk: LOW, but it is a
+*coordination* dependency on an evolving, **unaudited** library — pin a
+commit, vendor it, and put it inside the existing external-review gate.
+
+**(b) "Is the recursion circuit so big it beats the savings for realistic N?"**
+No — measured. Layer-1 over a 1.0 MB wide-AIR proof is 1.74 s; an aggregation
+node is <0.75 s; break-even vs ~7 min GPU per proof is immediate at N=1.
+The fixed point (~475 KB, ~0.4 s/layer) proves the overhead does not compound.
+
+**(c) "Does hiding survive recursion?"** Two independent reasons it does:
+(i) the library supports verifying hiding proofs in-circuit (salts appended to
+leaf preimages, `pcs/mmcs.rs:313-318`) and ZK mode ran clean in the prototype
+(`keccak_bb_zk.log`); (ii) even without ZK-mode outer layers, the outer
+witness is only the inner *proof bytes and publics* — our spend proofs are
+zero-knowledge, so their bytes are simulatable and reveal nothing beyond the
+publics the settlement operator already receives today. No privacy regression
+in either direction. (Caveat flagged: `recursion.rs:293` requires the same
+config *including PCS seed* on both sides for hiding proofs — a wiring detail
+to test in M1.)
+
+**(d) "Does the aggregate stay RISC0-verifiable?"** Yes — the root is an
+ordinary `p3-batch-stark` proof over BabyBear; the guest links the same p3
+crates it links today (it already runs `p3_uni_stark::verify_with_preprocessed`
+in-guest, `guest-settlement/src/main.rs:84`). The verify call changes, the
+pattern does not. The vk-pinning story carries over: bake the aggregation
+circuit's verifying data into the ELF exactly like `baked_spend_vk`
+(`main.rs:69-77`) so the image id pins the whole recursion tower.
+
+**(e) "Field/config mismatches?"** Field and extension match exactly
+(BabyBear, D=4 — the stack's fixed parameter). The mismatch is the **hash
+config**: SHA-256 MMCS/challenger cannot be recursed (no in-circuit SHA
+gadget; building one would be months and ~10-100× more in-circuit rows —
+this is precisely why every recursion stack uses Poseidon2). Client config
+must switch to Poseidon2 hiding MMCS + duplex challenger. Consequences:
+  - phone/client prove time changes (SHA-256-with-HW-ext → software
+    Poseidon2): current client prove is ~251–754 ms desktop
+    (`hash-native-spend-circuit.md:78,208`); Poseidon2-BabyBear commit
+    hashing is well within the "seconds" kill-criterion — **measure, expect
+    <2× regression** (reasoned, not measured);
+  - hn-chain spend verification (aegis-node verifies client proofs natively)
+    switches config too — native Poseidon2 verify stays ms-scale;
+  - chain-id-breaking → testnet re-cut (already free per project policy);
+  - proof bytes stay ~MB-scale (digests shrink 32B→8 field elems; salts grow
+    rows slightly) — re-measure `MAX_PROOF_BYTES` headroom.
+
+**(f) "Sequencing/latency trap":** aggregation is pipelined — leaf recursion
+(~2–4 s) can run the moment each withdrawal's spend proof arrives, mid-epoch;
+only the top ~log2(N) tree levels (~seconds) plus the single wrap sit on the
+settlement critical path. No new latency cliff.
+
+## 5. Effort + the concrete path (Q5)
+
+**FEASIBLE-SOON: ~4–8 focused weeks to a testnet-working batch-independent
+settlement**, all integration, no new cryptography to invent:
+
+- **I1 (days):** rev alignment — move engine to the p3 release
+  Plonky3-recursion pins (or patch-pin recursion to our rev); vendor + pin
+  Plonky3-recursion; re-run engine oracle/parity suites.
+- **I2 (days):** client config switch SHA-256 → Poseidon2
+  (`Poseidon2Config::BabyBearD4Width16` MMCS + duplex challenger, hiding
+  variant); re-bake vk; **measure client prove** on desktop + phone-class
+  hardware; re-cut testnet.
+- **M1 (week 1, the go/no-go measurement):** feed one REAL spend proof
+  through `RecursionInput::UniStark` (with `preprocessed_commit`) → layer-1
+  proof; measure layer-1 time at Q=67 and **in-guest verify cycles of a root
+  proof** (the one materially unmeasured number). Kill-criterion: wrap
+  ≤ ~1 B cycles.
+- **I3 (1–2 wks):** aggregation service — binary tree over the epoch's spend
+  proofs (rayon; embarrassingly parallel per level), publics propagation of
+  N×44 values to the root.
+- **I4 (1–2 wks):** new settlement guest (root batch-stark verify + N burn
+  bindings + frontier transition + N-withdrawal journal) — merges with the
+  already-designed batch journal work (`batch-settlement-design.md` §6, whose
+  batching rule is needed for *correctness* anyway, §0.1); PegVault batch
+  predicate; new image id.
+- **I5 (1 wk):** params/soundness review (intermediate-layer relaxation per
+  the book's guidance; final layer full-strength), red review, and folding
+  the unaudited-library exposure into the existing external crypto-review
+  gate.
+
+**Epoch-validity affordability (the trustlessness carry):** with the N-term
+gone, the settlement budget is `wrap (~constant) + epoch transition
+(1.1 M cyc/block)`. Full epoch-validity then has two viable carriers, both
+compatible with this architecture: (i) native AIRs for hn tx/pot validity
+aggregated into the same tree (more build, cheapest at scale), or (ii) RISC0
+receipt composition — `env::verify` of a per-block validity receipt chained
+IVC-style, resolved by the accelerated recursion circuit (weeks-scale,
+linear-in-epoch GPU but fully pipelined block-by-block off the critical
+path). Decision deferred; the point is the budget now exists.
+
+**Fallback if Plonky3-recursion stalls upstream (not needed on the evidence,
+but the honest hedge):** RISC0 proof composition alone — prove each
+withdrawal's spend_verify as its own receipt continuously as withdrawals
+arrive (0.3 B cycles each, off critical path, parallel), settlement guest
+`env::verify`s the N receipts (cheap, accelerated resolve). Total GPU work
+stays linear in N (~7 min/withdrawal, priced into the 1% peg fee), but
+settlement *latency* becomes ~constant. Weeks of work, zero new deps.
+(Reasoned from RISC0 3.x composition docs; not measured here.)
+
+## 6. Measured vs reasoned — the honesty ledger
+
+**Measured (this machine, logs in scratchpad):** everything in the §2 table;
+ZK-mode recursion working; root-size fixed point; aggregation-node times;
+build times.
+**Measured previously (repo docs):** 0.30–0.42 B cycles/spend_verify, GPU
+Mcyc/min, client prove times, proof sizes, epoch transition cost.
+**Reasoned, NOT measured (ranked by risk):**
+1. in-guest verify cost of the Poseidon2-config root proof (~0.2–0.6 B est.)
+   — *the* M1 measurement; mitigations exist either way (§3);
+2. layer-1 recursion at Q=67 on the real monolith (+preprocessed, hiding
+   salts) vs the Q=36 Keccak proxy (~2.5–4 s est.);
+3. client prove-time regression under Poseidon2 MMCS (<2× est., phone
+   unmeasured);
+4. 0.6.x rev-alignment friction;
+5. `env::verify` fallback-path costs (risc0 docs, not exercised).
+
+**Bottom line:** the structural trump card is real. Batch-independent,
+trustlessness-carrying settlement is achievable with our exact proof system
+and field, at the price of one hash-config migration and an integration
+against an official-but-unaudited library — not months of research, and not
+a different proof system. The phone client keeps its STARK; nothing about
+this decision forces a client rewrite.
+
+---
+*Sources: Plonky3 checkout `~/.cargo/git/checkouts/plonky3-7d8a3b21a665a86f/4aed8fe`;
+Plonky3-recursion @ b363397 (github.com/Plonky3/Plonky3-recursion, book at
+plonky3.github.io/Plonky3-recursion); Aegis-USE `engine/src/config.rs`,
+`engine/src/spend/monolith.rs`, `settlement/methods/guest-settlement/src/main.rs`,
+`dev-docs/sidechain/batch-settlement-design.md`,
+`dev-docs/sidechain/hash-native-spend-circuit.md`;
+risc0-zkvm-platform-2.2.2 `src/syscall.rs`. Measurement logs:
+scratchpad `keccak_bb{,_zk}.log`, `agg_bb_{4,8}.log` (Ryzen 7 7800X3D).*
+
+---
+
+## 7. M1 RESULT (2026-07-19): the RISC0 wrap is MEASURED — verdict GO
+
+> **Status: MEASURED (this machine, Ryzen 7 7800X3D, risc0 3.0.5/r0vm 3.0.5,
+> RISC0 executor `execute` — no prove).** This section closes the one
+> materially unmeasured number from §6: the in-guest verify cost of the
+> Poseidon2-config aggregate root proof. Harness: scratchpad `m1-wrap/`
+> (guest+host) + two examples added to the Plonky3-recursion checkout
+> (`m1_root_export.rs`, `m1_sha_final.rs`), b363397, crates.io p3 0.6.1.
+
+### The number
+
+Aggregation trees (BabyBear, Poseidon2 W16 MMCS + duplex challenger, spike
+params lb3 / Q=36 / query-pow 16 / final-poly 64, non-ZK) built over N dummy
+base proofs per the §2 prototype; each ROOT `BatchStarkProof` exported
+(postcard), round-tripped into a minimal RISC0 guest that reconstructs the
+config and runs `BatchStarkProver::verify_all_tables` in-field:
+
+| N aggregated | root proof bytes | **in-guest root_verify cycles** | guest total¹ |
+|---|---|---|---|
+| 2 | 305,647 | **220,152,278** | 258.2 M |
+| 4 | 324,290 | **227,058,758** | 267.4 M |
+| 8 | 324,241 | **227,100,152** | 267.5 M |
+
+¹ total = env::read (33–37 M, serde word-stream of the proof bytes) +
+postcard deserialize (3.5–3.7 M) + verify. Segments (po2 20): 261–271.
+
+- **~0.227 B cycles, constant in N.** N=4→N=8 grows by 0.018% — batch
+  independence HOLDS (N=2 differs only via its level-1 table packing 2/2 vs
+  1/3). This lands at the *bottom* of the §3 reasoned range (0.2–0.6 B) and
+  well under the ≤1 B kill-criterion.
+- The wrap costs **0.75× of ONE of today's spend_verifies** (0.30 B,
+  `batch-settlement-design.md`), once, regardless of N. Today's N=4 in-guest
+  cost ≈ 1.2 B; recursion root ≈ 0.227 B (5.3×), N=64 ≈ 19.2 B vs 0.227 B (85×).
+- Round-trip risk (§4 serialization/no_std/riscv32) is DEAD: the whole
+  `p3-circuit-prover` + p3 0.6.1 stack cross-compiled to riscv32im-risc0 on
+  the first attempt (only `env::read_frame` being unstable needed a switch to
+  `env::read`), and the host-side deserialize+verify of the exported bytes
+  passed before every guest run.
+
+### Where the cycles go (measured, RISC0 pprof on the N=4 run)
+
+Software Poseidon2 IS the dominant term, as §3 suspected: Poseidon2
+permutation ≈ **187.7 M cycles cumulative (~82% of verify)** — MerkleTreeMmcs
+`verify_batch` 180 M + duplex challenger 13.6 M; next largest: 64-bit
+div/rem (`__umoddi3` family, FRI index math) ~29 M (10.7%), FRI folding
+arithmetic and batch-verifier logic the small remainder.
+
+### SHA-accelerator mitigation: MEASURED, works, 4.7×
+
+The §3 mitigation (prove the FINAL layer under a SHA-256-MMCS config so the
+guest hashes on `sys_sha_buffer`) was built and measured, not just reasoned.
+`prove_aggregation_layer_cross` can't be used directly — its `OutSC` bound
+requires `FriRecursionConfig` (recursion targets; none exist for SHA) — but
+the underlying pieces are config-generic, so the final prove is ~60 lines
+against public `p3-circuit-prover` API (`m1_sha_final.rs`): build the last
+2-to-1 verifier circuit under the Poseidon2 config, run its traces, then
+`get_airs_and_degrees_with_prep::<ShaConfig>` + `ProverData` +
+`prove_all_tables` under `StarkConfig<TwoAdicFriPcs<BabyBear, SHA-256 MMCS>,
+D4, SerializingChallenger32>` (the engine's own non-hiding config shape).
+In-circuit hashing stays Poseidon2; only the root proof's own commitments/
+transcript ride SHA.
+
+| final-layer config | root bytes | **in-guest root_verify** | guest total | notes |
+|---|---|---|---|---|
+| Poseidon2 (native) | 324,290 | **227.1 M** | 267.4 M | 0 accelerator calls |
+| SHA-256 final layer | 290,325 | **48.1 M** | 83.6 M | 5,934 Sha2 ecalls (0.5 M cyc); **4.72×** |
+
+Trade: host-side final prove slows 0.7 s → 4.4 s (software SHA hashing in the
+prover; once per epoch, off critical path) — irrelevant. With the SHA final
+layer the whole wrap (verify + read + deser) is **~84 M cycles ≈ 0.28× of one
+spend_verify** — under 2 minutes GPU at measured 45 Mcyc/min, per epoch, for
+ANY N.
+
+### Verdict: **GO**
+
+Both §6 risk-ranked unknowns #1 (root verify cost) and the §4(d) round-trip
+risk are now measured and green; the recursion integration (I1–I5) is
+committed on its merits: settlement critical path becomes
+`~0.05–0.23 B cycles + epoch transition + N·ε`, independent of withdrawals.
+Residual caveats (unchanged): layer-1 cost at Q=67 on the real monolith
+(§6 #2, measure in I2/M1-follow-up), client Poseidon2 prove regression
+(§6 #3), 0.6.x rev alignment (I1), unaudited-library exposure (external
+review gate). The SHA final layer is now a measured, cheap option for I4 —
+recommend adopting it (it also shrinks the proof and keeps the settlement
+guest's existing sha2-accelerator patch relevant).
+
+*M1 harness: scratchpad `m1-wrap/` (verify-core + guest + guest-sha + host),
+`Plonky3-recursion/recursion/examples/m1_root_export.rs` + `m1_sha_final.rs`
+(+ `p3-sha256 = "=0.6.1"` dev-dep), logs `m1-exec-n{2,4,8}.log`,
+`m1-exec-n4-sha.log`, profile `m1-n4-profile.pb`. Guest verify =
+`BatchStarkProver::verify_all_tables::<BinomialExtensionField<BabyBear,4>>`
+with `register_poseidon2_table::<4>(BABY_BEAR_D4_W16)` +
+`register_recompose_table::<4>(false)`; config reconstructed in-guest from
+constants (no trusted prover-supplied params beyond the proof's own
+`table_packing`; production must bake these + the circuit fingerprint into
+the ELF, vk-pinning per §4(d)).*
