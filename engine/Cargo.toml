@@ -11,6 +11,9 @@
 # CARGO_TARGET_DIR.
 [workspace]
 members = ["wallet"]
+# `recursion` is its own nested workspace (it path-depends on the unaudited
+# Plonky3-recursion library); excluded so the engine gate never builds it.
+exclude = ["recursion"]
 
 [package]
 name        = "aegis-engine"
