@@ -7,3 +7,6 @@
 
 # Stage-T isolated build artifacts (never committed)
 /.stageT-target/
+
+# Isolated vault-predicate build artifacts (never committed)
+/.epoch-vault-target/
