@@ -49,8 +49,6 @@ dependencies = [
  "p3-field",
  "p3-uni-stark",
  "postcard",
- "rand 0.10.2",
- "rand_chacha 0.10.0",
  "risc0-zkvm",
  "serde",
 ]

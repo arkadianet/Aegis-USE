@@ -23,9 +23,10 @@ use aegis_engine::address::{Address, WalletKeys, HRP_TEST};
 
 /// The hn testnet chain id / network magic. Distinct from the Curve-Trees
 /// profiles so the two networks can never confuse blocks or peers.
-/// v3: the trustless-bridge cut (peg-in mints, peg-out burns in the block
-/// format) — chain-id-breaking vs the v2 spec-economics testnet.
-pub const HN_TESTNET_CHAIN_ID: u32 = 0x484E_0004; // "HN" ‖ v4 (incremental-settlement cut)
+/// v5: the fast-settlement cut — SHA-256 FRI-Merkle MMCS client proofs
+/// (T2.1) + baked settlement vk (T1.1) + rebalanced FRI params (T1.2); the
+/// proof format and the settlement image id change, so the chain id breaks.
+pub const HN_TESTNET_CHAIN_ID: u32 = 0x484E_0005; // "HN" ‖ v5 (SHA-MMCS fast-settlement cut)
 
 /// Base-unit scale: 1 USE = 100 base units ("cents"). All amounts in the
 /// engine, wallet, and chain are integer cents.
