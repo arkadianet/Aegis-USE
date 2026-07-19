@@ -34,6 +34,9 @@
 //! `RUSTFLAGS="-Ctarget-cpu=native"` + the `parallel` feature (default). Without
 //! both, the recursion prover is ~27x slower (I1). See `README.md`.
 
+pub mod digest;
+pub mod digest_agg;
+
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -248,9 +251,15 @@ where
         op_ids: &[NonPrimitiveOpId],
         opening_proof: &Self::RawOpeningProof,
     ) -> Result<(), &'static str> {
-        set_fri_mmcs_private_data::<F, Challenge, PlainChallengeMmcs, PlainMmcs, Hash, Compress, DIGEST_ELEMS>(
-            runner, op_ids, opening_proof, P2,
-        )
+        set_fri_mmcs_private_data::<
+            F,
+            Challenge,
+            PlainChallengeMmcs,
+            PlainMmcs,
+            Hash,
+            Compress,
+            DIGEST_ELEMS,
+        >(runner, op_ids, opening_proof, P2)
     }
 }
 
@@ -273,7 +282,8 @@ pub fn plain_agg_config(p: &AggParams) -> PlainAggConfig {
 // Describes how to verify the client's Poseidon2 SALTED HIDING batch-stark spend
 // proof in-circuit (layer-1 input). Mirrors i1_monolith's `SaltedZkConfig`.
 
-type RecInputMmcs = RecValHidingMmcs<F, DIGEST_ELEMS, SALT_ELEMS, Hash, Compress, rand_chacha::ChaCha20Rng>;
+type RecInputMmcs =
+    RecValHidingMmcs<F, DIGEST_ELEMS, SALT_ELEMS, Hash, Compress, rand_chacha::ChaCha20Rng>;
 type SaltedInputProof = InputProofTargets<F, Challenge, RecInputMmcs>;
 type SaltedInnerFri = HidingFriProofTargets<
     F,
@@ -483,13 +493,16 @@ pub fn layer1(
     // --- witness run + outer prove ---
     let mut runner = verification_circuit.runner();
     runner.set_public_inputs(&public_inputs).expect("publics");
-    runner.set_private_inputs(&private_inputs).expect("privates");
-    set_hiding_salted_fri_mmcs_private_data::<F, Challenge, SaltedChallengeMmcs, SaltedValMmcs, DIGEST_ELEMS>(
-        &mut runner,
-        &mmcs_op_ids,
-        &input.proof.opening_proof,
-        P2,
-    )
+    runner
+        .set_private_inputs(&private_inputs)
+        .expect("privates");
+    set_hiding_salted_fri_mmcs_private_data::<
+        F,
+        Challenge,
+        SaltedChallengeMmcs,
+        SaltedValMmcs,
+        DIGEST_ELEMS,
+    >(&mut runner, &mmcs_op_ids, &input.proof.opening_proof, P2)
     .expect("MMCS private data");
     let traces = runner.run().expect("witness run");
     let proof = prover
@@ -590,7 +603,14 @@ pub fn aggregate_spends(inputs: &[SpendProofInput<'_>], params: &AggParams) -> A
     let outer_cfg = plain_agg_config(params);
     let padded = inputs.len().next_power_of_two();
     let leaves: Vec<RecursionOutput<PlainAggConfig>> = (0..padded)
-        .map(|i| layer1(&salted_cfg, &outer_cfg, params, &inputs[i.min(inputs.len() - 1)]))
+        .map(|i| {
+            layer1(
+                &salted_cfg,
+                &outer_cfg,
+                params,
+                &inputs[i.min(inputs.len() - 1)],
+            )
+        })
         .collect();
     aggregate_tree(params, leaves)
 }

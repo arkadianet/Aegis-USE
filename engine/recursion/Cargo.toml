@@ -45,6 +45,7 @@ p3-circuit-prover        = { git = "https://github.com/Plonky3/Plonky3-recursion
 p3-poseidon2-circuit-air = { git = "https://github.com/Plonky3/Plonky3-recursion", rev = "b36339709a7a67ee9760fb578b3d4339fd983709" }
 
 # --- crates.io p3 0.6.1 (unifies with aegis-engine and the recursion library) ---
+p3-air         = "=0.6.1"
 p3-batch-stark = "=0.6.1"
 p3-baby-bear   = "=0.6.1"
 p3-field       = "=0.6.1"
@@ -57,6 +58,7 @@ p3-matrix      = "=0.6.1"
 p3-uni-stark   = "=0.6.1"
 p3-dft         = "=0.6.1"
 p3-lookup      = "=0.6.1"
+p3-util        = "=0.6.1"
 
 rand        = { version = "0.10", default-features = false, features = ["std", "std_rng", "sys_rng", "thread_rng"] }
 rand_chacha = { version = "0.10", default-features = false }

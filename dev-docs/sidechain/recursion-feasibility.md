@@ -838,3 +838,120 @@ audit: `circuit-prover/src/batch_stark_prover.rs:1284,1737-1815`,
 `recursion/src/recursion.rs:128-138,597-646`,
 `recursion/src/public_inputs.rs:361-385`,
 `book/src/user_guide/public_inputs.md` (Plonky3-recursion @ b363397).*
+
+---
+
+## 11. OPTION-A SPIKE RESULT (2026-07-19): the digest-binding channel is BUILDABLE — **FEASIBLE, measured**
+
+> **Status: FEASIBLE — the §10.4(A) accumulating-digest carry works end-to-end,
+> proven on a minimal but real prototype (this machine, isolated
+> `CARGO_TARGET_DIR`, `RUSTFLAGS=-Ctarget-cpu=native` + `parallel`).** A custom
+> non-primitive "digest-expose" table (`aegis/digest`) carries an
+> in-circuit-folded digest through the aggregation layers so it surfaces at the
+> ROOT as plaintext, verifier-checked `public_values`, cryptographically bound
+> to the leaves' public inputs. **No library fork was needed** — the whole
+> prototype lives in `aegis-recursion` (`src/digest.rs`, `src/digest_agg.rs`)
+> against the b363397 library's public plugin APIs.
+
+### 11.1 The mechanism that works (and why §10's "one level" was the right read)
+
+§10.2(3) said non-primitive `public_values` propagate exactly one level. That
+is correct — and it is ENOUGH, because the level they propagate to re-exposes
+them as **circuit public-input Targets** that the parent can compute on:
+
+1. **Leaf (layer-1)**: the digest `d = Poseidon2-sponge(pis)` is computed
+   in-circuit over the SAME `air_public_targets` the recursive verifier checks
+   against the client proof (44 publics for a real spend). `d` is fed to the
+   `aegis/digest` table, whose entry exposes `d`'s 8 BabyBear limbs as
+   `public_values`.
+2. **Every aggregation layer**: `verify_p3_batch_proof_circuit` allocates the
+   child's digest `public_values` as parent circuit publics
+   (`air_public_counts[digest] = 8`, `verifier/batch_stark.rs:315-321`) and
+   folds the child digest AIR's constraints against them — so the targets are
+   BOUND to the child's committed digest table. The parent hashes
+   `d_parent = H(d_left ‖ d_right)` over those targets and re-seeds `d_parent`
+   onto its OWN `aegis/digest` entry. The channel chains by re-injection,
+   exactly as §10.4(A) prescribed.
+3. **Root**: `verify_all_tables` (the §7 guest call) passes every non-primitive
+   entry's `public_values` into `p3_batch_stark::verify_batch` as that AIR's
+   publics (`batch_stark_prover.rs:1794`) — the digest AIR constrains
+   `main[j] == public_values[j]` on its real row, and the trace cells are
+   WitnessChecks-bus receives (mult −1 reader) against the in-circuit fold's
+   witness. Plaintext, checked, bound.
+
+The digest table itself is ~15 committed cells per proof (8 main + 5
+preprocessed, 1 row): three soundness links — publics == trace (AIR
+constraint), trace == circuit witness (LogUp bus), witness == H(children)
+(the fold circuit).
+
+### 11.2 Measured (all 6 prototype tests green, `tests/digest_channel.rs`)
+
+| check | result |
+|---|---|
+| 2 toy leaves → root: root digest == H(d_L ‖ d_R), root verifies | **PASS** (leaves ~12 ms each, layer 1.3–1.5 s) |
+| 4 toy leaves → 2 levels: root digest == H(H(d1‖d2) ‖ H(d3‖d4)) | **PASS** — the CHAINING crux (4.4 s total) |
+| **2 REAL spends → layer-1(+digest) → root: digest == H(H(pis_a) ‖ H(pis_b)) over the 44 client publics** | **PASS** (~3.1 s/leaf incl. client-proof verify, 2.1 s layer — within the I1 ~2 s/layer envelope; digest adds ~5–10%) |
+| changed leaf seed changes root digest | **PASS** (bound, not decorative) |
+| tampered ROOT digest publics | **verification FAILS** (AIR pv-constraint enforced natively) |
+| tampered LEAF digest publics | **aggregation layer cannot even prove** — `WitnessConflict` at the parent's witness run (the in-circuit check catches the lie before a proof exists) |
+
+Expected digests recomputed natively (independent witness-only circuit run of
+the same sponge — the §1-journal recomputation the guest will do; per §7 the
+in-guest hashing cost is already measured).
+
+### 11.3 What made it work WITHOUT forking the library
+
+Everything needed is public API at b363397:
+- `CircuitBuilder::register_npo` (custom circuit op + executor + trace
+  generator), `push_non_primitive_op_with_outputs`, `add_hash_slice`;
+- `BatchStarkProver::register_table_prover` (custom `TableProver` returning
+  `BatchTableInstance { public_values, .. }`), `NpoPreprocessor`,
+  `NpoAirBuilder`, `get_airs_and_degrees_with_prep`;
+- `verify_p3_batch_proof_circuit` takes a caller-supplied prover list, so the
+  aggregation layer was hand-rolled in `aegis-recursion` (mirroring
+  `prove_aggregation_layer`) with the digest plugin included; `RecursionInput::
+  BatchStark.table_public_inputs` accepts the child entries' publics (the stock
+  `into_recursion_input` hard-zeroes them — we construct the input manually).
+
+Caveats found (minor): `impl_table_prover_batch_instances_from_base!` is
+unusable outside the crate (`transmute_traces` is `pub(crate)`) — implement the
+`batch_instance_d*` methods via a small generic helper instead;
+`FriRecursionBackend`'s plugin lists are hard-coded, so the layer driver is
+re-implemented rather than reused (~150 lines, all public calls).
+
+### 11.4 Full-build estimate (the real I4, on top of this prototype)
+
+The channel is proven; what remains for the production settlement statement:
+1. **Digest schema**: replace the spike's `H(all 44 pis)` leaf seed with the §1
+   entry digest `d_leaf = H(amount ‖ recipient_prop_hash ‖ nf0 ‖ cm0)`
+   (selected pis), plus the epoch/anchor binding fields — design work in
+   batch-settlement-design.md, ~days.
+2. **Identity leaves for padding** (§10's non-power-of-two note): pad with a
+   fixed identity digest, guest treats it as "no withdrawal" — small.
+3. **Guest integration**: port the §7 M1 harness to verify the root AND check
+   `root_digest == H-fold(journal entries)` in-guest — mechanical per §10.5,
+   ~days (the digest table verifies inside the existing `verify_all_tables`
+   call; zero extra wrap cost beyond hashing the entry list, which §7 already
+   measured).
+4. **Hardening the spike code**: multi-op digest rows, packing/lane audit,
+   negative tests at every level, plus review of the WitnessChecks mult
+   accounting (the −1-reader convention mirrors the stock recompose/coeff
+   tables). ~1–2 weeks.
+5. **Value-gate review surface**: the custom table (~650 lines,
+   `digest.rs` + `digest_agg.rs`) + the three-link soundness argument in 11.1.
+   This is NEW consensus-critical circuit code inside the same unaudited-library
+   review gate — it must be in scope of the external crypto review, but it does
+   NOT enlarge the library-fork surface (no upstream patches).
+
+Total: **~2–4 weeks** to a journal-emitting, digest-bound settlement guest,
+vs. the §10 alternative readings (B: library-core verify change, C: O(N)
+per-leaf receipts). **(A) is confirmed as the right choice and is now
+de-risked.**
+
+*Spike harness: `engine/recursion/src/digest.rs` (the `aegis/digest` table:
+executor/trace/plugin + AIR/TableProver/preprocessor/air-builder),
+`engine/recursion/src/digest_agg.rs` (toy leaf, `layer1_digest` over real
+spends, digest-folding aggregation layer, native sponge oracle),
+`engine/recursion/tests/digest_channel.rs` (6 tests incl. tamper checks). Run:
+`RUSTFLAGS="-Ctarget-cpu=native" cargo test --release --test digest_channel`
+in an isolated `CARGO_TARGET_DIR`.*

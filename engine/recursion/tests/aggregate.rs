@@ -12,7 +12,9 @@ use aegis_engine::commit::{note_commitment, owner_key};
 use aegis_engine::config::recursion::make_recursion_hiding_config;
 use aegis_engine::merkle::NoteTree;
 use aegis_engine::poseidon::{Digest, F};
-use aegis_engine::spend::batch::{prove_spend_batch, verify_spend_batch, SpendBatchProof, SpendCommonData};
+use aegis_engine::spend::batch::{
+    prove_spend_batch, verify_spend_batch, SpendBatchProof, SpendCommonData,
+};
 use aegis_engine::spend::monolith::build_spend_trace;
 use aegis_engine::spend::monolith::{InputNote, OutputNote};
 use aegis_recursion::{aggregate_spends, proof_bytes, verify_root, AggParams, SpendProofInput};
@@ -28,8 +30,20 @@ fn digest(base: u32) -> Digest {
 /// proofs, so the aggregation optimizer cannot collapse the leaves).
 fn distinct_spend(s: u32) -> (SpendBatchProof, SpendCommonData, Vec<F>) {
     let o = s * 1000;
-    let in0 = InputNote { value: 1_000, nk: digest(1 + o), rho: digest(50 + o), r: digest(90 + o), index: 0 };
-    let in1 = InputNote { value: 500, nk: digest(200 + o), rho: digest(250 + o), r: digest(290 + o), index: 0 };
+    let in0 = InputNote {
+        value: 1_000,
+        nk: digest(1 + o),
+        rho: digest(50 + o),
+        r: digest(90 + o),
+        index: 0,
+    };
+    let in1 = InputNote {
+        value: 500,
+        nk: digest(200 + o),
+        rho: digest(250 + o),
+        r: digest(290 + o),
+        index: 0,
+    };
     let mut tree = NoteTree::new();
     let cm0 = note_commitment(in0.value, &owner_key(&in0.nk), &in0.rho, &in0.r);
     let cm1 = note_commitment(in1.value, &owner_key(&in1.nk), &in1.rho, &in1.r);
@@ -37,8 +51,18 @@ fn distinct_spend(s: u32) -> (SpendBatchProof, SpendCommonData, Vec<F>) {
     let i1 = tree.append(cm1);
     let in0 = InputNote { index: i0, ..in0 };
     let in1 = InputNote { index: i1, ..in1 };
-    let out0 = OutputNote { value: 900, owner: digest(400 + o), rho: digest(450 + o), r: digest(490 + o) };
-    let out1 = OutputNote { value: 590, owner: digest(600 + o), rho: digest(650 + o), r: digest(690 + o) };
+    let out0 = OutputNote {
+        value: 900,
+        owner: digest(400 + o),
+        rho: digest(450 + o),
+        r: digest(490 + o),
+    };
+    let out1 = OutputNote {
+        value: 590,
+        owner: digest(600 + o),
+        rho: digest(650 + o),
+        r: digest(690 + o),
+    };
     let (trace, pis) = build_spend_trace(&[in0, in1], &tree, &[out0, out1], 10);
 
     // A fresh client config per proof (fresh masks/salts): distinct hiding proofs.
@@ -57,7 +81,11 @@ fn run_and_check(n: usize) -> (usize, u32, std::time::Duration) {
     let spends: Vec<_> = (0..n).map(|i| distinct_spend(i as u32)).collect();
     let inputs: Vec<SpendProofInput> = spends
         .iter()
-        .map(|(p, c, pis)| SpendProofInput { proof: p, common: c, pis })
+        .map(|(p, c, pis)| SpendProofInput {
+            proof: p,
+            common: c,
+            pis,
+        })
         .collect();
 
     let t = Instant::now();

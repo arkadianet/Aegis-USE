@@ -47,6 +47,7 @@ name = "aegis-recursion"
 version = "0.0.1"
 dependencies = [
  "aegis-engine",
+ "p3-air",
  "p3-baby-bear",
  "p3-batch-stark",
  "p3-challenger",
@@ -63,6 +64,7 @@ dependencies = [
  "p3-recursion",
  "p3-symmetric",
  "p3-uni-stark",
+ "p3-util",
  "postcard",
  "rand",
  "rand_chacha",
