@@ -29,4 +29,5 @@ pub mod merkle;
 pub mod note_encryption;
 pub mod nullifier;
 pub mod poseidon;
+pub mod settlement_digest;
 pub mod spend;

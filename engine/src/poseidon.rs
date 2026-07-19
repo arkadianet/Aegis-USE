@@ -33,7 +33,6 @@ use p3_baby_bear::{
     BABYBEAR_POSEIDON2_RC_16_INTERNAL,
 };
 use p3_field::PrimeCharacteristicRing;
-use p3_poseidon2::ExternalLayerConstants;
 use p3_poseidon2_air::RoundConstants;
 use p3_symmetric::Permutation;
 
@@ -97,12 +96,14 @@ pub fn permute(state: &mut [F; WIDTH]) {
 pub fn air_round_constants() -> &'static AegisRoundConstants {
     static RC: OnceLock<AegisRoundConstants> = OnceLock::new();
     RC.get_or_init(|| {
-        let external = ExternalLayerConstants::<F, WIDTH>::new(
-            BABYBEAR_POSEIDON2_RC_16_EXTERNAL_INITIAL.to_vec(),
-            BABYBEAR_POSEIDON2_RC_16_EXTERNAL_FINAL.to_vec(),
-        );
-        RoundConstants::try_from_layers(&external, &BABYBEAR_POSEIDON2_RC_16_INTERNAL)
-            .expect("canonical BabyBear-16 constants match the t16/R_F8/R_P13 AIR shape")
+        // p3 0.6.1: `RoundConstants::try_from_layers` is a post-0.6.1 addition
+        // on the 4aed8fe line; 0.6.1 exposes the plain fixed-shape constructor
+        // over the same canonical (initial, internal, final) tables.
+        RoundConstants::new(
+            BABYBEAR_POSEIDON2_RC_16_EXTERNAL_INITIAL,
+            BABYBEAR_POSEIDON2_RC_16_INTERNAL,
+            BABYBEAR_POSEIDON2_RC_16_EXTERNAL_FINAL,
+        )
     })
 }
 
@@ -135,6 +136,13 @@ pub fn digest_to_bytes(d: &Digest) -> [u8; 32] {
         chunk.copy_from_slice(&limb.as_canonical_u32().to_le_bytes());
     }
     out
+}
+
+/// A digest as 8 canonical `u32` limbs (the wire form the RISC0 guest reads;
+/// inverse of `|l| core::array::from_fn(|i| F::from_u32(l[i]))`).
+pub fn digest_to_limbs(d: &Digest) -> [u32; DIGEST_ELEMS] {
+    use p3_field::PrimeField32;
+    core::array::from_fn(|i| d[i].as_canonical_u32())
 }
 
 /// Parse a digest from 32 bytes; `None` if any limb is non-canonical (≥ p).

@@ -1,0 +1,17 @@
+# I4 settlement-guest EXECUTE measurement harness. Reads the artifact set dumped
+# by aegis-recursion/tests/dump_artifacts.rs (root proof + guest inputs) and runs
+# the batch settlement guest through the RISC0 executor (no prove) to report the
+# in-guest cycle breakdown (root_verify / bind / tree_transition) and totals —
+# confirming the wrap is constant in N (recursion-feasibility.md §7, item 4).
+[package]
+name = "exec-i4"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+methods = { path = "../methods" }
+risc0-zkvm = { version = "^3.0.5" }
+postcard = { version = "1", features = ["alloc"] }
+serde = { version = "1", features = ["derive"] }
+clap = { version = "4", features = ["derive"] }
+hex = "0.4"

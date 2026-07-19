@@ -1,0 +1,79 @@
+# aegis-recursion — the recursion aggregation pipeline foundation (I3).
+#
+# Takes N real monolith spend proofs (aegis-engine's recursion-compatible
+# single-instance batch-stark client proofs, Poseidon2 salted hiding config) and
+# aggregates them, via the Plonky3-recursion 2-to-1 binary tree, into ONE
+# fixed-size root batch-stark proof that verifies natively. This is the layer the
+# settlement statement (I4) and epoch-validity wiring (I5) build on.
+#
+# SEPARATE nested workspace (excluded from the engine workspace, like the engine
+# is from the Aegis-USE root) because it path-depends on the unaudited
+# Plonky3-recursion library. Build with an ISOLATED CARGO_TARGET_DIR.
+#
+# BUILD FLAGS (mandatory — I1 measured a 27x slowdown without them):
+#   RUSTFLAGS="-Ctarget-cpu=native" cargo test --release --features parallel
+# The `parallel` feature (default) turns on p3-circuit-prover/parallel (rayon);
+# -Ctarget-cpu=native gives the packed-Poseidon2 AVX-512 path the recursion
+# prover leans on. See README.md.
+[workspace]
+
+[package]
+name        = "aegis-recursion"
+version     = "0.0.1"
+edition     = "2021"
+license     = "MIT OR Apache-2.0"
+description = "Recursive aggregation pipeline (layer-1 + 2-to-1 tree) for Aegis settlement"
+publish     = false
+
+[features]
+default  = ["parallel"]
+# Rayon parallelism in the recursion prover — REQUIRED for the measured envelope
+# (I1: 9.5 s -> ~2 s layer-1 with it; 27x spread without both this and native ISA).
+parallel = ["p3-circuit-prover/parallel"]
+
+[dependencies]
+aegis-engine = { path = ".." }
+
+# --- Plonky3-recursion: the recursive-aggregation library, pinned to the exact
+#     rev the feasibility spike measured (upstream main == this rev). UNAUDITED /
+#     "do not recommend production use" per its README — inside the same external
+#     crypto-review gate as the rest of the value path; vendoring is an I1-tail/I5
+#     policy item (recursion-feasibility.md §4(a)). ---
+p3-recursion             = { git = "https://github.com/Plonky3/Plonky3-recursion", rev = "b36339709a7a67ee9760fb578b3d4339fd983709" }
+p3-circuit               = { git = "https://github.com/Plonky3/Plonky3-recursion", rev = "b36339709a7a67ee9760fb578b3d4339fd983709" }
+p3-circuit-prover        = { git = "https://github.com/Plonky3/Plonky3-recursion", rev = "b36339709a7a67ee9760fb578b3d4339fd983709" }
+p3-poseidon2-circuit-air = { git = "https://github.com/Plonky3/Plonky3-recursion", rev = "b36339709a7a67ee9760fb578b3d4339fd983709" }
+
+# --- crates.io p3 0.6.1 (unifies with aegis-engine and the recursion library) ---
+p3-air         = "=0.6.1"
+p3-batch-stark = "=0.6.1"
+p3-baby-bear   = "=0.6.1"
+p3-field       = "=0.6.1"
+p3-fri         = "=0.6.1"
+p3-commit      = "=0.6.1"
+p3-challenger  = "=0.6.1"
+p3-merkle-tree = "=0.6.1"
+p3-sha256      = "=0.6.1"
+p3-symmetric   = "=0.6.1"
+p3-matrix      = "=0.6.1"
+p3-uni-stark   = "=0.6.1"
+p3-dft         = "=0.6.1"
+p3-lookup      = "=0.6.1"
+p3-util        = "=0.6.1"
+
+rand        = { version = "0.10", default-features = false, features = ["std", "std_rng", "sys_rng", "thread_rng"] }
+rand_chacha = { version = "0.10", default-features = false }
+# Root-proof size metric + wire form (the aggregate root is a serializable proof).
+postcard    = { version = "1", features = ["alloc"] }
+
+[dev-dependencies]
+# Artifact-dump test (tests/dump_artifacts.rs) serializes guest inputs for the
+# RISC0 EXECUTE measurement.
+serde = { version = "1", features = ["derive"] }
+
+# The FRI/recursion stack is unusably slow at opt-level 0; keep it optimized even
+# in dev/test (mirrors the engine workspace's profile pins).
+[profile.dev]
+opt-level = 3
+[profile.test]
+opt-level = 3

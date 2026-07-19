@@ -15,6 +15,7 @@
 //! in [`monolith`] and `dev-docs/sidechain/hash-native-spend-circuit.md`.
 
 pub mod baked_vk;
+pub mod batch;
 pub mod balance_air;
 pub mod merkle_air;
 pub mod monolith;
