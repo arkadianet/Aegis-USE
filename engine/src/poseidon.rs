@@ -138,6 +138,13 @@ pub fn digest_to_bytes(d: &Digest) -> [u8; 32] {
     out
 }
 
+/// A digest as 8 canonical `u32` limbs (the wire form the RISC0 guest reads;
+/// inverse of `|l| core::array::from_fn(|i| F::from_u32(l[i]))`).
+pub fn digest_to_limbs(d: &Digest) -> [u32; DIGEST_ELEMS] {
+    use p3_field::PrimeField32;
+    core::array::from_fn(|i| d[i].as_canonical_u32())
+}
+
 /// Parse a digest from 32 bytes; `None` if any limb is non-canonical (≥ p).
 /// Strictness matters: a non-canonical encoding of the same digest would be a
 /// second wire form (malleability), so only the canonical one is accepted.

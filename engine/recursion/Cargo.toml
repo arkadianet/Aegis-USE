@@ -65,6 +65,11 @@ rand_chacha = { version = "0.10", default-features = false }
 # Root-proof size metric + wire form (the aggregate root is a serializable proof).
 postcard    = { version = "1", features = ["alloc"] }
 
+[dev-dependencies]
+# Artifact-dump test (tests/dump_artifacts.rs) serializes guest inputs for the
+# RISC0 EXECUTE measurement.
+serde = { version = "1", features = ["derive"] }
+
 # The FRI/recursion stack is unusably slow at opt-level 0; keep it optimized even
 # in dev/test (mirrors the engine workspace's profile pins).
 [profile.dev]

@@ -1,10 +1,12 @@
-# Statement-1 settlement guest: verify the peg-out spend proof in-field
-# (BabyBear / Plonky3 uni-STARK, HIDING config), bind the burn note to the
-# public withdrawal, recompute the tree transition, and journal the exact
-# bytes the PegVault contract reconstructs from the release transaction.
-# The verifying key is BAKED into the ELF as constants
-# (aegis_engine::spend::baked_vk, oracle-parity-tested engine-side), so the vk
-# is part of the image id — a prover cannot substitute one.
+# Batch Statement-1 settlement guest (I4): verify the ONE aggregation ROOT
+# proof in-field (constant in N), check the surfaced withdrawals digest equals
+# the digest recomputed from the §1 journal entries (the bind), bind each
+# withdrawal's burn note, recompute the tree transition, and journal the exact
+# AEGISPB1 bytes the PegVault reconstructs. The root verify links
+# p3-circuit-prover's verify path + the aegis/digest table (via aegis-recursion,
+# default-features off → the verify path needs no rayon / p3-recursion / rand).
+# The verifying data is pinned by the image id (baked engine vk + the recursion
+# tower's circuit fingerprint — the latter an I5 vk-pinning item).
 [package]
 name = "aegis_settlement_guest"
 version = "0.0.0"
@@ -15,23 +17,11 @@ edition = "2021"
 [dependencies]
 risc0-zkvm = { version = "^3.0.5", default-features = false, features = ["std", "getrandom"] }
 aegis-engine = { path = "../../../engine" }
-p3-uni-stark = { git = "https://github.com/Plonky3/Plonky3", rev = "4aed8fe4195d40305175d55e58690f46171258d9" }
-p3-field = { git = "https://github.com/Plonky3/Plonky3", rev = "4aed8fe4195d40305175d55e58690f46171258d9" }
+aegis-recursion = { path = "../../../engine/recursion", default-features = false }
+p3-field = "=0.6.1"
 postcard = { version = "1", default-features = false, features = ["alloc"] }
 serde = { version = "1", default-features = false, features = ["alloc", "derive"] }
 
 [profile.release]
 opt-level = 3
 lto = true
-
-# T2.1: route `sha2` to RISC0's SHA-256 ACCELERATOR in-guest. The
-# engine's SHA-256 FRI-Merkle MMCS (engine/src/config.rs) calls
-# `sha2::block_api::compress256`; without this patch it would run as *software*
-# SHA in the guest and the whole speedup would be lost. `p3-sha256` (v0.6.0
-# at this Plonky3 rev) depends on sha2 **0.11.0**, so the accelerated fork tag is
-# `sha2-v0.11.0-risczero.0`. GUEST-ONLY: the host/client build (settlement
-# workspace) keeps the stock crates.io sha2, since the risc0 fork only compiles
-# for the zkVM target. (The engine's *note-encryption* sha2 0.10.x is not on the
-# guest hot path, so it stays stock — the patch applies to the 0.11 line only.)
-[patch.crates-io]
-sha2 = { git = "https://github.com/risc0/RustCrypto-hashes", tag = "sha2-v0.11.0-risczero.0" }
