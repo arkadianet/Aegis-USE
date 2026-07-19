@@ -30,6 +30,7 @@ use serde::{Deserialize, Serialize};
 
 use super::mint::{coinbase_cm_expected, pegmint_cm_expected};
 use super::params::HnChainParams;
+use crate::daa::next_nbits;
 use aegis_engine::burn::burn_cm_expected;
 
 const DOMAIN_BLOCK_ID: u32 = 0x0B10;
@@ -41,18 +42,18 @@ pub fn block_id(height: u64, prev_root: &Digest) -> [u8; 32] {
 }
 
 /// The merge-mining anchor: the STARK-devnet Ergo header this hn block is mined
-/// against. Merge-mining binds hn liveness to the devnet's Autolykos PoW chain —
-/// each hn block references a real, advancing devnet header.
+/// against — a LIVENESS reference (monotone devnet height + the header id),
+/// paced by the devnet's Autolykos PoW chain.
 ///
-/// ⚠ CONSENSUS SURFACE (documented, partially implemented). This pass carries
-/// the anchor and enforces MONOTONICITY (the devnet height a block anchors to
-/// never goes backwards) + non-empty id, and the deployment's miner only
-/// anchors to a header it fetched from the live devnet. The FULL aux-PoW binding
-/// — the devnet block's extension Merkle-commits to the hn `state_root`, so one
-/// solved Autolykos PoW is bound to exactly one hn block (reusing
-/// `crate::auxpow::extension_root` + a `BatchMerkleProof`, verified with
-/// `ergo_crypto::autolykos::v2::check_pow_v2`) — is the remaining step. Until it
-/// lands, the anchor is a devnet-paced liveness scaffold, not yet PoW-binding.
+/// The aux-PoW **binding** (E0) lives elsewhere: [`HnBlock::aux_pow`] carries a
+/// [`super::auxpow::HnAuxPow`] whose Autolykos v2 solution commits this block's
+/// [`hn_header_id`](super::header::hn_header_id) and clears its `sc_nbits`
+/// target — one solved PoW bound to exactly one hn block. In Strict mode
+/// (`params.require_aux_pow`) `apply_block` enforces it and fork choice weighs
+/// the real work; in DevStub the anchor's monotone height is the only devnet
+/// check (liveness-only, `epoch-validity-design.md` §6.5). The anchor and the
+/// binding are complementary: the anchor says *which* devnet header, the
+/// `aux_pow` witness proves that header's work commits this block.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuxAnchor {
     pub devnet_header_id: [u8; 32],
@@ -132,7 +133,22 @@ pub fn limbs_to_digest(l: &[u32; DIGEST_ELEMS]) -> Digest {
 pub struct HnBlock {
     pub height: u64,
     pub prev_root: [u32; DIGEST_ELEMS],
+    /// The parent block's [`hn_header_id`](super::header::hn_header_id) — the
+    /// hash-linkage the fork-choice tree follows (E0; the all-zero sentinel at
+    /// height 0). Committed by the header id, so a suffix's `prev_header_id`
+    /// chain is what epoch-validity (E1) walks. `prev_root` (the parent's
+    /// state root) still binds the STATE transition; the two together weld the
+    /// header chain to the value-tree chain.
+    #[serde(default)]
+    pub prev_header_id: [u8; 32],
     pub state_root: [u32; DIGEST_ELEMS],
+    /// Wall-clock stamp (ms) — the LWMA difficulty adjustment's solve-time
+    /// input, and part of the header id.
+    pub timestamp_ms: u64,
+    /// The aux-PoW difficulty (compact nbits) this block was mined at.
+    /// Consensus-checked against the LWMA expectation; its decoded value is the
+    /// block's real-work weight in fork choice (E0).
+    pub sc_nbits: u32,
     pub txs: Vec<aegis_hn_wallet::Tx>,
     /// Peg-out spends (each also a full spend proof; leaf order after `txs`).
     pub pegouts: Vec<PegOutTx>,
@@ -159,6 +175,13 @@ pub struct HnBlock {
     pub pot_after: u64,
     /// The merge-mining devnet anchor (monotone across blocks).
     pub anchor: AuxAnchor,
+    /// The aux-PoW witness ([`super::auxpow::HnAuxPow`] bytes) binding this
+    /// block's [`hn_header_id`](super::header::hn_header_id) to real Autolykos
+    /// work (E0). `None` in DevStub (the API-anchored devnet); REQUIRED for
+    /// reward blocks when `params.require_aux_pow` (Strict). Excluded from the
+    /// header id — the aux-PoW attests the id, it does not extend it.
+    #[serde(default)]
+    pub aux_pow: Option<Vec<u8>>,
 }
 
 /// Captured prior state for an exact rollback.
@@ -175,6 +198,9 @@ pub struct HnBlockUndo {
     /// A root evicted from the front of the window when this block's tip root
     /// was pushed (restored on rollback so the window is exact).
     evicted_root: Option<Digest>,
+    /// A `(timestamp, nbits)` pair evicted from the front of the DAA view when
+    /// this block's pair was pushed (restored on rollback so the view is exact).
+    evicted_daa: Option<(u64, u32)>,
 }
 
 /// Why a block (or a single tx, at admission) was rejected.
@@ -196,6 +222,10 @@ pub enum HnError {
     PrevRootMismatch,
     #[error("merge-mining anchor regressed (devnet height went backwards)")]
     AnchorRegressed,
+    #[error("block sc_nbits does not equal the LWMA difficulty expectation")]
+    NbitsMismatch,
+    #[error("aux-PoW share is missing or does not bind this block's header id")]
+    AuxPowInvalid,
     #[error("block state_root does not match the applied tip")]
     StateRootMismatch,
     #[error("coinbase amount does not equal min(pot_parent, base + per_tx × txs)")]
@@ -228,6 +258,11 @@ pub struct HnState {
     height: u64,
     /// The devnet height the last block anchored to (monotone).
     anchor_height: u64,
+    /// `(timestamp_ms, sc_nbits)` of the recent chain, oldest first — the LWMA
+    /// solve-time view. Capped at `daa_window + 1` entries (all `next_nbits`
+    /// ever consults); the same view the share verifier's `sc_nbits` equality
+    /// consumes.
+    daa_view: VecDeque<(u64, u32)>,
     /// The emission pot (public security budget) — starts at
     /// `params.genesis_pot`, credits fees, funds coinbases.
     pot: u64,
@@ -256,6 +291,7 @@ impl HnState {
             outputs: Vec::new(),
             height: 0,
             anchor_height: 0,
+            daa_view: VecDeque::new(),
             pot: params.genesis_pot,
             shielded_total: 0,
             used_pegins: HashSet::new(),
@@ -276,6 +312,21 @@ impl HnState {
 
     pub fn height(&self) -> u64 {
         self.height
+    }
+
+    /// The LWMA difficulty (compact nbits) the NEXT block must declare — the
+    /// single spelling shared by production, validation, and the aux-PoW share
+    /// verifier (E0). Below `daa_window + 1` blocks this is the floor
+    /// (`min_difficulty_nbits`).
+    pub fn expected_nbits(&self) -> u32 {
+        let view: Vec<(u64, u32)> = self.daa_view.iter().copied().collect();
+        next_nbits(&self.params.daa(), &view)
+    }
+
+    /// The current DAA solve-time view (oldest first) — what a share verifier
+    /// checking a child of this tip needs for the `sc_nbits` equality.
+    pub fn daa_view(&self) -> Vec<(u64, u32)> {
+        self.daa_view.iter().copied().collect()
     }
 
     /// The emission pot's current balance (public).
@@ -384,6 +435,26 @@ impl HnState {
         // Merge-mining anchor must never regress (devnet height monotone).
         if block.anchor.devnet_height < self.anchor_height {
             return Err(HnError::AnchorRegressed);
+        }
+        // The aux-PoW difficulty is consensus: a miner cannot self-declare an
+        // easy (or an inflated-weight) `sc_nbits` — it must equal the LWMA
+        // expectation for this chain position (E0; the same defense as the
+        // Curve-Trees share verifier's §3 equality).
+        if block.sc_nbits != self.expected_nbits() {
+            return Err(HnError::NbitsMismatch);
+        }
+        // Strict aux-PoW binding (E0): a reward (mined) block must carry a
+        // witness proving its `hn_header_id` was committed by an Ergo
+        // candidate whose Autolykos v2 hit clears `sc_nbits`. Genesis
+        // allocations (non-reward, pre-PoW prefix) are exempt. In DevStub
+        // (`require_aux_pow == false`) the check is skipped — the API-anchored
+        // devnet does not merge-mine yet (liveness-only, §6.5).
+        if self.params.require_aux_pow && block.coinbase_is_reward {
+            let bytes = block.aux_pow.as_ref().ok_or(HnError::AuxPowInvalid)?;
+            let aux =
+                super::auxpow::HnAuxPow::from_bytes(bytes).map_err(|_| HnError::AuxPowInvalid)?;
+            aux.verify(self.params.chain_id, block)
+                .map_err(|_| HnError::AuxPowInvalid)?;
         }
         if block.coinbase_ct.len() != NOTE_CT_BYTES {
             return Err(HnError::BadCiphertext);
@@ -558,6 +629,7 @@ impl HnState {
             added_pegin_box_ids: block.pegins.iter().map(|p| p.box_id).collect(),
             prev_withdrawal_count: self.pending_withdrawals.len(),
             evicted_root: None,
+            evicted_daa: None,
         };
         for tx in block.txs.iter().chain(block.pegouts.iter().map(|p| &p.tx)) {
             let cm0 = digest_at(&tx.public_values, aegis_engine::spend::monolith::PUB_CMO0);
@@ -592,6 +664,13 @@ impl HnState {
             undo.evicted_root = self.recent_roots.pop_front();
         }
         self.recent_roots.push_back(self.tree.root());
+        // Advance the LWMA solve-time view (cap at window + 1, the most
+        // next_nbits ever consults).
+        self.daa_view
+            .push_back((block.timestamp_ms, block.sc_nbits));
+        if self.daa_view.len() > self.params.daa_window + 1 {
+            undo.evicted_daa = self.daa_view.pop_front();
+        }
         self.height += 1;
         self.anchor_height = block.anchor.devnet_height;
         self.pot = pot_next;
@@ -604,6 +683,10 @@ impl HnState {
         self.recent_roots.pop_back();
         if let Some(front) = undo.evicted_root {
             self.recent_roots.push_front(front);
+        }
+        self.daa_view.pop_back();
+        if let Some(front) = undo.evicted_daa {
+            self.daa_view.push_front(front);
         }
         for k in &undo.added_nullifiers {
             self.nullifiers.remove(k);
@@ -696,7 +779,10 @@ mod tests {
         HnBlock {
             height: st.height(),
             prev_root: st.tip_root_limbs(),
+            prev_header_id: [0u8; 32],
             state_root: st.simulate_state_root(&[mint.cm]),
+            timestamp_ms: 1_760_000_000_000 + st.height() * 15_000,
+            sc_nbits: st.expected_nbits(),
             txs: vec![],
             pegouts: vec![],
             pegins: vec![],
@@ -707,6 +793,7 @@ mod tests {
             coinbase_is_reward: true,
             pot_after: st.pot() - amount,
             anchor: AuxAnchor::genesis(),
+            aux_pow: None,
         }
     }
 
@@ -799,7 +886,10 @@ mod tests {
         let bad = HnBlock {
             height: st.height(),
             prev_root: st.tip_root_limbs(),
+            prev_header_id: [0u8; 32],
             state_root: st.simulate_state_root(&[mint.cm]),
+            timestamp_ms: 1_760_000_000_000 + st.height() * 15_000,
+            sc_nbits: st.expected_nbits(),
             txs: vec![],
             pegouts: vec![],
             pegins: vec![],
@@ -810,6 +900,7 @@ mod tests {
             coinbase_is_reward: true,
             pot_after: st.pot() - amount,
             anchor: AuxAnchor::genesis(),
+            aux_pow: None,
         };
         assert!(matches!(
             st.apply_block(&bad, &circuit),
@@ -829,7 +920,10 @@ mod tests {
         let bad = HnBlock {
             height: st.height(),
             prev_root: st.tip_root_limbs(),
+            prev_header_id: [0u8; 32],
             state_root: st.simulate_state_root(&[mint.cm]),
+            timestamp_ms: 1_760_000_000_000 + st.height() * 15_000,
+            sc_nbits: st.expected_nbits(),
             txs: vec![],
             pegouts: vec![],
             pegins: vec![],
@@ -840,6 +934,7 @@ mod tests {
             coinbase_is_reward: true,
             pot_after: 0,
             anchor: AuxAnchor::genesis(),
+            aux_pow: None,
         };
         assert!(matches!(
             st.apply_block(&bad, &circuit),
@@ -857,7 +952,10 @@ mod tests {
         let bad = HnBlock {
             height: st.height(),
             prev_root: st.tip_root_limbs(),
+            prev_header_id: [0u8; 32],
             state_root: st.simulate_state_root(&[mint.cm]),
+            timestamp_ms: 1_760_000_000_000 + st.height() * 15_000,
+            sc_nbits: st.expected_nbits(),
             txs: vec![],
             pegouts: vec![],
             pegins: vec![],
@@ -868,6 +966,7 @@ mod tests {
             coinbase_is_reward: true,
             pot_after: st.pot(),
             anchor: AuxAnchor::genesis(),
+            aux_pow: None,
         };
         assert!(matches!(
             st.apply_block(&bad, &circuit),
@@ -891,6 +990,109 @@ mod tests {
         assert!(matches!(
             st.apply_block(&bad, &circuit),
             Err(HnError::CoinbaseCmMismatch)
+        ));
+    }
+
+    // ----- aux-PoW binding (E0, Strict mode) -----
+
+    fn strict_params(pot: u64) -> HnChainParams {
+        HnChainParams::testnet()
+            .with_genesis(vec![], pot)
+            .with_strict_aux_pow()
+    }
+
+    #[test]
+    fn strict_reward_block_without_aux_pow_is_rejected() {
+        let circuit = SpendCircuit::new();
+        let miner = addr(b"miner");
+        let mut st = HnState::new(strict_params(1_000));
+        let block = reward_block(&st, &miner); // aux_pow: None
+        assert!(matches!(
+            st.apply_block(&block, &circuit),
+            Err(HnError::AuxPowInvalid)
+        ));
+    }
+
+    #[test]
+    fn strict_reward_block_with_valid_aux_pow_applies() {
+        let circuit = SpendCircuit::new();
+        let miner = addr(b"miner");
+        let mut st = HnState::new(strict_params(1_000));
+        let mut block = reward_block(&st, &miner);
+        // Merge-mine the witness binding this exact block's header id.
+        let aux = crate::hn::auxpow::mine_hn_aux_pow(st.params().chain_id, &block);
+        block.aux_pow = Some(aux.to_bytes().expect("witness serializes"));
+        st.apply_block(&block, &circuit)
+            .expect("a block backed by real aux-PoW work applies");
+        assert_eq!(st.height(), 1);
+    }
+
+    #[test]
+    fn strict_reward_block_with_aux_pow_for_a_different_block_is_rejected() {
+        let circuit = SpendCircuit::new();
+        let miner = addr(b"miner");
+        let mut st = HnState::new(strict_params(1_000));
+        let block = reward_block(&st, &miner);
+        // A witness mined for a DIFFERENT block (tampered state_root): the id
+        // it commits will not equal this block's header id.
+        let mut other = block.clone();
+        other.state_root[0] ^= 1;
+        let aux = crate::hn::auxpow::mine_hn_aux_pow(st.params().chain_id, &other);
+        let mut bad = block;
+        bad.aux_pow = Some(aux.to_bytes().expect("witness serializes"));
+        assert!(matches!(
+            st.apply_block(&bad, &circuit),
+            Err(HnError::AuxPowInvalid)
+        ));
+    }
+
+    #[test]
+    fn strict_genesis_allocation_is_exempt_from_aux_pow() {
+        // Genesis (non-reward) blocks are the pre-PoW pinned prefix — Strict
+        // mode does not require a witness for them.
+        let circuit = SpendCircuit::new();
+        let faucet = addr(b"faucet");
+        let params = HnChainParams::testnet()
+            .with_genesis(vec![(faucet, 100)], 50)
+            .with_strict_aux_pow();
+        let mut st = HnState::new(params);
+        let id = block_id(0, &st.current_root());
+        let m = coinbase_note(&faucet, 100, &id);
+        let genesis = HnBlock {
+            height: 0,
+            prev_root: st.tip_root_limbs(),
+            prev_header_id: [0u8; 32],
+            state_root: st.simulate_state_root(&[m.cm]),
+            timestamp_ms: 1_760_000_000_000,
+            sc_nbits: st.expected_nbits(),
+            txs: vec![],
+            pegouts: vec![],
+            pegins: vec![],
+            miner_owner: digest_to_limbs(&faucet.owner),
+            coinbase_amount: 100,
+            coinbase_cm: digest_to_limbs(&m.cm),
+            coinbase_ct: m.ciphertext,
+            coinbase_is_reward: false,
+            pot_after: 50,
+            anchor: AuxAnchor::genesis(),
+            aux_pow: None,
+        };
+        st.apply_block(&genesis, &circuit)
+            .expect("genesis allocation applies without aux-PoW");
+    }
+
+    #[test]
+    fn wrong_sc_nbits_is_rejected() {
+        // The aux-PoW difficulty is consensus: a self-declared nbits that does
+        // not equal the LWMA expectation is invalid (E0).
+        let circuit = SpendCircuit::new();
+        let miner = addr(b"m");
+        let mut st = HnState::new(params_pot(1_000));
+        let mut bad = reward_block(&st, &miner);
+        bad.sc_nbits = st.expected_nbits().wrapping_add(1);
+        assert!(matches!(
+            st.apply_block(&bad, &circuit),
+            Err(HnError::NbitsMismatch)
         ));
     }
 
@@ -936,7 +1138,10 @@ mod tests {
         let redirect = HnBlock {
             height: 0,
             prev_root: st.tip_root_limbs(),
+            prev_header_id: [0u8; 32],
             state_root: st.simulate_state_root(&[m1.cm]),
+            timestamp_ms: 1_760_000_000_000 + st.height() * 15_000,
+            sc_nbits: st.expected_nbits(),
             txs: vec![],
             pegouts: vec![],
             pegins: vec![],
@@ -947,6 +1152,7 @@ mod tests {
             coinbase_is_reward: false,
             pot_after: 50,
             anchor: AuxAnchor::genesis(),
+            aux_pow: None,
         };
         assert!(matches!(
             st.apply_block(&redirect, &circuit),
@@ -958,7 +1164,10 @@ mod tests {
         let inflated = HnBlock {
             height: 0,
             prev_root: st.tip_root_limbs(),
+            prev_header_id: [0u8; 32],
             state_root: st.simulate_state_root(&[m2.cm]),
+            timestamp_ms: 1_760_000_000_000 + st.height() * 15_000,
+            sc_nbits: st.expected_nbits(),
             txs: vec![],
             pegouts: vec![],
             pegins: vec![],
@@ -969,6 +1178,7 @@ mod tests {
             coinbase_is_reward: false,
             pot_after: 50,
             anchor: AuxAnchor::genesis(),
+            aux_pow: None,
         };
         assert!(matches!(
             st.apply_block(&inflated, &circuit),
@@ -980,7 +1190,10 @@ mod tests {
         let good = HnBlock {
             height: 0,
             prev_root: st.tip_root_limbs(),
+            prev_header_id: [0u8; 32],
             state_root: st.simulate_state_root(&[m3.cm]),
+            timestamp_ms: 1_760_000_000_000 + st.height() * 15_000,
+            sc_nbits: st.expected_nbits(),
             txs: vec![],
             pegouts: vec![],
             pegins: vec![],
@@ -991,6 +1204,7 @@ mod tests {
             coinbase_is_reward: false,
             pot_after: 50,
             anchor: AuxAnchor::genesis(),
+            aux_pow: None,
         };
         st.apply_block(&good, &circuit).unwrap();
         assert_eq!(st.pot(), 50, "genesis issuance does not touch the pot");
