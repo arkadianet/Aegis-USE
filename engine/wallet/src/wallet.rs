@@ -60,8 +60,14 @@ impl ViewingKey {
 /// Errors from the pay flow.
 #[derive(Debug, PartialEq, Eq)]
 pub enum PayError {
-    /// Fewer than two spendable notes, or the two largest do not cover
-    /// `amount + fee` (the 2-in shape caps a single spend to two notes).
+    /// The fixed 2-in shape needs two spendable notes and the wallet holds
+    /// fewer. Distinct from [`PayError::InsufficientFunds`] so a single-note
+    /// wallet with ample balance gets an actionable error: it needs a second
+    /// on-chain note — a received note or a self-owned zero-value dummy
+    /// (note-protocol §6 / S3) — before it can spend at all.
+    NotEnoughNotes { have: usize },
+    /// The two selected notes do not cover `amount + fee` (the 2-in shape
+    /// caps a single spend to the sum of the two largest notes).
     InsufficientFunds,
     /// A selected note has no membership path at the current root (stale store).
     MissingPath,
@@ -181,12 +187,18 @@ impl Wallet {
             .sum()
     }
 
-    /// Deterministic 2-note selection: the two highest-value unspent notes,
-    /// ordered `(value desc, leaf_index asc)`. The fixed 2-in shape means a
-    /// single spend consumes exactly two notes, so it can spend at most the sum
-    /// of the two largest; multi-note consolidation (fold N notes → 1 over
-    /// several txs) and a circuit dummy-input flag (spend a single note) are the
-    /// documented follow-ups.
+    /// Deterministic 2-note selection, ordered `(value desc, leaf_index asc)`:
+    ///
+    /// - If the LARGEST note alone covers `need`, pad the second slot with the
+    ///   SMALLEST spendable note — the self-owned zero-value dummy of
+    ///   note-protocol §6 / S3 when the wallet holds one (zero/dust change
+    ///   notes fill this role organically). Padding instead of burning the
+    ///   second-largest note preserves the wallet's funded notes, so a single
+    ///   real note stays spendable as long as any dummy exists.
+    /// - Otherwise the two largest; the fixed 2-in shape caps one spend at
+    ///   their sum. Multi-note consolidation and an in-circuit dummy-input
+    ///   flag (spend with NO second on-chain note) are the documented
+    ///   follow-ups.
     fn select(&self, need: u64, tip_height: u64) -> Result<[OwnedNote; 2], PayError> {
         let mut unspent: Vec<&OwnedNote> = self
             .notes
@@ -195,6 +207,10 @@ impl Wallet {
             .collect();
         unspent.sort_by(|a, b| b.value.cmp(&a.value).then(a.leaf_index.cmp(&b.leaf_index)));
         match unspent.as_slice() {
+            [] | [_] => Err(PayError::NotEnoughNotes {
+                have: unspent.len(),
+            }),
+            [a, .., z] if a.value >= need => Ok([(*a).clone(), (*z).clone()]),
             [a, b, ..] if a.value + b.value >= need => Ok([(*a).clone(), (*b).clone()]),
             _ => Err(PayError::InsufficientFunds),
         }
@@ -423,13 +439,11 @@ mod tests {
         assert_eq!(w.balance(), 100);
     }
 
-    #[test]
-    fn select_needs_two_notes_and_picks_largest() {
+    fn wallet_with_notes(values: &[u64]) -> Wallet {
         let mut w = Wallet::from_seed(b"w");
-        assert!(matches!(w.select(10, 0), Err(PayError::InsufficientFunds)));
-        for (i, v) in [30u64, 100, 70].into_iter().enumerate() {
+        for (i, v) in values.iter().enumerate() {
             w.notes.push(OwnedNote {
-                value: v,
+                value: *v,
                 rho: [F::ZERO; DIGEST_ELEMS],
                 r: [F::ZERO; DIGEST_ELEMS],
                 memo: [0; MEMO_BYTES],
@@ -440,8 +454,50 @@ mod tests {
                 is_coinbase: false,
             });
         }
+        w
+    }
+
+    #[test]
+    fn select_needs_two_notes_and_picks_largest() {
+        let w = wallet_with_notes(&[30, 100, 70]);
         let sel = w.select(150, 0).unwrap();
         assert_eq!([sel[0].value, sel[1].value], [100, 70]); // two largest
         assert!(matches!(w.select(171, 0), Err(PayError::InsufficientFunds))); // 100+70 < 171
+    }
+
+    #[test]
+    fn select_zero_or_one_note_reports_not_enough_notes() {
+        // The campaign UX bug: a single note with ample balance surfaced as
+        // "InsufficientFunds". It must be the actionable NotEnoughNotes.
+        let w = wallet_with_notes(&[]);
+        assert!(matches!(
+            w.select(10, 0),
+            Err(PayError::NotEnoughNotes { have: 0 })
+        ));
+        let w = wallet_with_notes(&[5_000]);
+        assert!(matches!(
+            w.select(10, 0),
+            Err(PayError::NotEnoughNotes { have: 1 })
+        ));
+    }
+
+    #[test]
+    fn select_covering_largest_pads_with_smallest_dummy() {
+        // S3 dummy mechanics: the largest note covers the spend, so the second
+        // slot is padded with the SMALLEST note (the zero-value dummy),
+        // preserving the funded 70-note.
+        let w = wallet_with_notes(&[70, 100, 0]);
+        let sel = w.select(90, 0).unwrap();
+        assert_eq!([sel[0].value, sel[1].value], [100, 0]);
+    }
+
+    #[test]
+    fn select_single_funded_note_plus_zero_dummy_spends() {
+        // A wallet holding ONE funded note + a zero-value dummy can spend the
+        // funded note — the single-real-note case the fixed 2-in shape
+        // otherwise blocks.
+        let w = wallet_with_notes(&[5_000, 0]);
+        let sel = w.select(3_000, 0).unwrap();
+        assert_eq!([sel[0].value, sel[1].value], [5_000, 0]);
     }
 }
