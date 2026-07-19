@@ -681,3 +681,160 @@ in isolated `CARGO_TARGET_DIR`s — `p3rec-target` (scalar/default),
 `p3rec-target-v3` (`-Ctarget-cpu=x86-64-v3`, AVX2), `p3rec-target-native`
 (`-Ctarget-cpu=native`, AVX-512); run at `RAYON_NUM_THREADS=1` and `=4`,
 `I1_ITERS=5`, min-of-5 reported.*
+
+---
+
+## 10. I4 RESULT (2026-07-19): the settlement statement is BLOCKED — the root does NOT surface per-leaf publics
+
+> **Status: BLOCKED — precise STOP, empirically confirmed (this machine, warm
+> I3 `CARGO_TARGET_DIR`, `RUSTFLAGS=-Ctarget-cpu=native` + `parallel`).** I4
+> was "turn the I3 aggregation root into an on-chain-verifiable settlement
+> proof": surface each withdrawal's `(amount, recipient_prop, nf0)` /
+> `(nf0, cm0)` into the root's committed journal so the batch-settlement
+> statement (batch-settlement-design.md §1) binds to exactly the aggregated
+> withdrawals. **The crux (I4 item 1 — the one §5/task flagged as the possible
+> research problem) does not hold with the b363397 library as-is: the aggregate
+> root exposes no per-leaf publics, and the proof format offers no external
+> public-input check to bind them.** Items 2–4 (SHA-final wrap, RISC0-guest-
+> over-root, constant-in-N cost) are UNBLOCKED and already measured GREEN in §7
+> — only the *binding* is blocked. Building a guest that emits the §1 journal
+> without the binding would be an **unsound** settlement statement (security
+> theater), so per the task's explicit instruction I stopped rather than force
+> it.
+
+### 10.1 What the settlement statement requires (and why v5 has it, recursion doesn't)
+
+v5's single-withdrawal guest binds the withdrawal to the spend proof by
+verifying it **in-field against externally-supplied `pis`**:
+`verify_with_preprocessed(config, air, proof, pis, vk)`
+(`guest-settlement/src/main.rs:84`) — `pis` is passed in and CHECKED, so
+`nf0 = pis[PUB_NF0..]`, `cm0 = pis[PUB_CMO0..]` (`main.rs:94-95`) are provably
+the ones this proof attested. The burn binding and journal then read from that
+bound `pis`. Recursion's whole point is to replace the N in-field verifies
+with ONE root verify — so the root must surface those N×(nf0,cm0,amount,
+recipient) in a form the guest can **read** and the verifier **checks**.
+It does neither.
+
+### 10.2 The mechanism, cited — three independent walls, one conclusion
+
+1. **`verify_all_tables` takes no external publics.** Signature is
+   `verify_all_tables<EF>(&self, proof: &BatchStarkProof<SC>)` — no public-
+   value argument (`circuit-prover/src/batch_stark_prover.rs:1284`). The
+   internal `verify` (`:1737`) builds `pvs` as `vec![Vec::new(); NUM_PRIMITIVE_
+   TABLES]` and only `push`es `entry.public_values` for **non-primitive**
+   tables (`:1778-1794`), then calls `p3_batch_stark::verify_batch(config,
+   airs, proof, &pvs, common)` (`:1813`). So the primitive `Const/Public/Alu`
+   tables are verified with **empty** external public values — nothing to bind
+   against. The M1 guest confirms this operationally: it verifies the root with
+   `verify_root(&proof)` supplying no publics at all (§7).
+2. **Circuit `public_input()` values live in the primitive `Public` table's
+   committed trace — not as AIR public values.** The `Public` table is
+   `WitnessSendAir`: "The AIR has no constraints" and exposes **no** AIR public
+   values (`circuit-prover/src/air/public_air.rs:16,173-196`); the public-input
+   VALUES are committed in the main trace and bound only via an internal
+   `"WitnessChecks"` bus lookup (`:202-229`). They are never plaintext in the
+   proof and never externally checked.
+3. **The only propagating/plaintext channel is non-primitive `public_values`,
+   and it does not reach the root.** In the aggregation verifier, the child's
+   re-exposed air-public counts are `vec![0; NUM_PRIMITIVE_TABLES]` then, per
+   non-primitive entry, `entry.public_values.len()`
+   (`recursion/src/verifier/batch_stark.rs:313-316`) — i.e. **only** non-
+   primitive table `public_values` propagate to the parent, and they land as
+   the parent's *primitive* `public_input()`s (count 0 upstream) → they die
+   after exactly one level. The 44 client publics enter at layer-1 as the
+   verified client instance's air publics → the layer-1 circuit's **primitive**
+   `Public` values (`engine/recursion/src/lib.rs:432-436`, `air_public_counts
+   = [44]`) → they never propagate even one level. `RecursionOutput::
+   into_recursion_input::<BatchOnly>()` hard-codes `table_public_inputs:
+   vec![vec![]; num_tables]` (`recursion/src/recursion.rs:132-137`),
+   consistent with (2)/(3). The library book agrees: recursion public inputs
+   are "the previous proof's commitments, opened values, and challenges"
+   (`book/src/user_guide/public_inputs.md:3`) — **not** an inner AIR's
+   statement values; there is no surfacing facility (grep of `recursion/`,
+   `circuit-prover/` for expose/carry/forward/propagate-public: none).
+
+### 10.3 Empirical confirmation (the incontrovertible nail)
+
+`engine/recursion/tests/surface_publics.rs` (new, committed) aggregates **two
+REAL distinct spends** to a root and inspects every plaintext public surface:
+
+```
+[I4-PROBE] root 754108 bytes | 2 non-primitive tables | 0 total EXPOSED public values
+[I4-PROBE]   non_primitive[0] op=poseidon2_perm/baby_bear_d4_w16 public_values.len()=0
+[I4-PROBE]   non_primitive[1] op=recompose                        public_values.len()=0
+[I4-PROBE] leaf nf0/cm0 octets recoverable from root exposed publics: 0 / 4
+test root_does_not_expose_per_withdrawal_publics ... ok   (9.91s)
+```
+
+**The root exposes ZERO plaintext public values.** No `nf0`, no `cm0`, no
+`amount` — nothing the §1 journal or the burn binding needs is readable from
+or checkable against the root. The withdrawal publics are cryptographically
+*bound inside* layer-1's `Public`-table commitment (the tower attests each
+client proof is valid) but are **not surfaced**, so a settlement guest cannot
+tie the `(amount_i, recipient_i, nf0_i, cm0_i)` it journals to the proofs the
+root verified. Recursion-without-surfacing is therefore **strictly weaker than
+v5** (it loses even the spend→withdrawal link v5 gets for free), not merely
+subject to the already-documented honest-scope caveats (§4 epoch-canonicality,
+§7 H1 recipient-binding). This is a **core soundness gap, not a deferrable
+stub.**
+
+### 10.4 Options to unblock (ranked — for the orchestrator to choose; each is real work, none is "structure the guest to slot it in")
+
+- **(A) Accumulating-digest carry via a non-primitive `public_values` channel
+  (recommended, biggest lift).** Make each aggregation layer compute in-circuit
+  a Poseidon2 fold `d_parent = H(d_left ‖ d_right)` of its children's
+  withdrawal digests, and route `d_parent` onto a *non-primitive* table's
+  `public_values` (the one channel that both propagates one level AND is
+  plaintext+observed at the root). At layer-1, seed the leaf digest from the
+  44 client publics. The root's non-primitive `public_values` then carry the
+  epoch's Merkle-root-of-withdrawals; the guest recomputes it from the
+  §1 entry list and checks equality. Requires: (i) a small custom NPO/AIR that
+  exposes `public_values` and is threaded through `prove_aggregation_layer`
+  at every level (the library today zeroes primitive publics and only carries
+  NPO publics one level — this needs the digest to *re-seed* the NPO channel
+  each level), and (ii) in-circuit Poseidon2 folding wired into the aggregation
+  circuit builder. Substantial work inside the **unaudited** library; weeks-
+  scale; must go through the value-gate review.
+- **(B) External public-input check in the final verify (smaller, but library
+  core).** Add a `verify_all_tables_with_publics(proof, expected_public_inputs)`
+  that passes the primitive `Public` table's expected values through to
+  `p3_batch_stark::verify_batch`'s `pvs` (today hard-zeroed at
+  `batch_stark_prover.rs:1780`) and binds them. Then a dedicated final
+  "settlement-wrap" layer exposes the withdrawal digest as its `public_input()`
+  and the guest supplies+checks it. Smaller diff, but it modifies the
+  circuit-prover's verification core and its soundness (the `WitnessChecks`
+  bus semantics for externally-pinned publics) must be reviewed — again inside
+  the unaudited library.
+- **(C) Abandon in-guest surfacing; bind via a second RISC0 receipt per leaf
+  (the §5 fallback, no recursion-lib change).** Keep the root verify for
+  batch-independence of *validity*, but bind each withdrawal's publics with a
+  cheap per-leaf statement (e.g. the client proof's `pis` committed by a
+  tiny per-leaf receipt composed via `env::verify`). Loses part of the
+  batch-independence win (O(N) small receipts) but needs zero unaudited-lib
+  surgery. Weakest structurally, safest to ship.
+
+### 10.5 What IS green and ready (so I4 is blocked, not worthless)
+
+- The RISC0 wrap over the root is measured and constant in N: **0.227 B cyc
+  (Poseidon2) / 48 M cyc (SHA-256 final layer, 4.72×)**, N=2→8 flat (§7). The
+  SHA-final integration (item 2) and the guest-over-root (item 3) are proven
+  out in the M1 harness (`scratchpad/m1-wrap`, `m1_sha_final.rs`); porting them
+  into `settlement/` is mechanical **once the binding channel from 10.4
+  exists** — without it they would only reproduce §7.
+- The I3 pipeline (`aggregate_spends`/`verify_root`) is unaffected and green;
+  the new probe test runs alongside `tests/aggregate.rs`.
+
+**Recommendation: adopt (A) as the I4 design, scoped as its own milestone
+inside the value-gate review, before any guest/journal code.** Do not ship a
+journal-emitting guest until one of (A)/(B)/(C) binds the per-withdrawal
+publics — an unbound §1 journal is not a settlement proof.
+
+*I4 harness: `engine/recursion/tests/surface_publics.rs` (aggregates 2 real
+spends, inspects `root.non_primitives[*].public_values`), run in the warm I3
+`CARGO_TARGET_DIR` (`scratchpad/i3-target`) with the mandated flags. Source
+audit: `circuit-prover/src/batch_stark_prover.rs:1284,1737-1815`,
+`circuit-prover/src/air/public_air.rs`,
+`recursion/src/verifier/batch_stark.rs:313-321`,
+`recursion/src/recursion.rs:128-138,597-646`,
+`recursion/src/public_inputs.rs:361-385`,
+`book/src/user_guide/public_inputs.md` (Plonky3-recursion @ b363397).*
