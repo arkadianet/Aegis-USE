@@ -136,7 +136,7 @@ pub fn identity_preimage() -> Vec<F> {
         .iter()
         .map(|&b| F::from_u32(b as u32))
         .collect();
-    while p.len() % 8 != 0 {
+    while !p.len().is_multiple_of(8) {
         p.push(F::ZERO);
     }
     p
