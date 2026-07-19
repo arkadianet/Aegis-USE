@@ -31,6 +31,13 @@ use risc0_zkvm::{default_executor, default_prover, ExecutorEnv, ProverOpts};
 #[derive(Parser)]
 #[command(name = "settle", about = "Aegis hn settlement prover (Statement 1)")]
 struct Cli {
+    /// RISC0 segment size limit as log2 cycles. A PROVING-side knob only: it
+    /// changes segment count / VRAM / wall-clock, never the guest ELF, so the
+    /// image id is unchanged. Set programmatically because the
+    /// `RISC0_SEGMENT_PO2` env var is INERT in risc0 3.0.5 (never read by the
+    /// executor, so env-var-only runs silently used the default po2 20).
+    #[arg(long, global = true, default_value_t = 21)]
+    segment_po2: u32,
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -178,9 +185,12 @@ fn frontier_bytes(pre: &[Digest]) -> Vec<u8> {
 }
 
 /// Build the guest `ExecutorEnv` for a settlement input (shared by prove and
-/// the measurement `execute` path).
-fn build_env(input: &ProveInput) -> ExecutorEnv<'static> {
+/// the measurement `execute` path). `segment_po2` is applied HERE, in code:
+/// risc0 3.0.5 does not read `RISC0_SEGMENT_PO2` from the environment, so the
+/// builder call is the only effective control of segment size.
+fn build_env(input: &ProveInput, segment_po2: u32) -> ExecutorEnv<'static> {
     ExecutorEnv::builder()
+        .segment_limit_po2(segment_po2)
         .write(&input.tx.proof_bytes)
         .unwrap()
         .write(&input.tx.public_values)
@@ -199,14 +209,15 @@ fn build_env(input: &ProveInput) -> ExecutorEnv<'static> {
         .unwrap()
 }
 
-fn prove_and_write(input: &ProveInput, out_dir: &PathBuf) {
+fn prove_and_write(input: &ProveInput, out_dir: &PathBuf, segment_po2: u32) {
     assert!(
         std::env::var("RISC0_DEV_MODE").map_or(true, |v| v.is_empty() || v == "0"),
         "dev-mode is banned: unset RISC0_DEV_MODE"
     );
     std::fs::create_dir_all(out_dir).expect("out dir");
 
-    let env = build_env(input);
+    println!("segment_po2={segment_po2} (programmatic; env var is inert in risc0 3.0.5)");
+    let env = build_env(input, segment_po2);
 
     let t0 = Instant::now();
     let prove_info = default_prover()
@@ -326,7 +337,9 @@ fn smoke_input() -> (ProveInput, Digest, Digest) {
 }
 
 fn main() {
-    match Cli::parse().cmd {
+    let cli = Cli::parse();
+    let segment_po2 = cli.segment_po2;
+    match cli.cmd {
         Cmd::ImageId => println!("{}", hex::encode(image_id_bytes())),
         Cmd::Verify { dir } => {
             // Local sanity: reconstruct a Receipt from inner + journal.
@@ -346,7 +359,7 @@ fn main() {
             // env::log lines (CYCLES vk_setup / spend_verify / tree_transition)
             // print during execution; SessionInfo gives the total user cycles.
             let (input, _prev, _new) = smoke_input();
-            let env = build_env(&input);
+            let env = build_env(&input, segment_po2);
             let t0 = Instant::now();
             let session = default_executor()
                 .execute(env, AEGIS_SETTLEMENT_GUEST_ELF)
@@ -362,7 +375,7 @@ fn main() {
             let t0 = Instant::now();
             let (input, prev_root, new_root) = smoke_input();
             println!("smoke chain built in {:?}", t0.elapsed());
-            prove_and_write(&input, &out_dir);
+            prove_and_write(&input, &out_dir, segment_po2);
 
             // The journal must be exactly what the vault reconstructs.
             let journal = std::fs::read(out_dir.join("journal.bin")).unwrap();
@@ -454,7 +467,7 @@ fn main() {
                 recipient_prop: recipient,
                 counter_next,
             };
-            prove_and_write(&input, &out_dir);
+            prove_and_write(&input, &out_dir, segment_po2);
         }
     }
 }
