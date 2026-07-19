@@ -71,11 +71,10 @@ pub fn pegout(
     let (mut wallet, chain) = scan_wallet(node, seed);
     let before = wallet.balance();
     let circuit = SpendCircuit::new();
-    let burn_value = amount
-        .checked_add(peg_fee)
-        .ok_or_else(|| anyhow!("amount overflow"))?;
+    // The burn bakes in (recipient_prop, amount) — D1: only this recipient's
+    // settlement can ever claim it.
     let tx = wallet
-        .burn_spend(&chain, &circuit, burn_value, flat_fee)
+        .burn_spend(&chain, &circuit, amount, peg_fee, &recipient_prop, flat_fee)
         .map_err(|e| anyhow!("burn_spend failed: {e:?}"))?;
     let po = PegOutTx {
         tx,

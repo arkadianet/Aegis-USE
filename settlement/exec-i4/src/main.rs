@@ -82,7 +82,10 @@ fn main() {
 
 fn id_bytes() -> [u8; 32] {
     let mut out = [0u8; 32];
-    for (chunk, w) in out.chunks_exact_mut(4).zip(AEGIS_SETTLEMENT_GUEST_ID.iter()) {
+    for (chunk, w) in out
+        .chunks_exact_mut(4)
+        .zip(AEGIS_SETTLEMENT_GUEST_ID.iter())
+    {
         chunk.copy_from_slice(&w.to_le_bytes());
     }
     out

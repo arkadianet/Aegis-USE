@@ -309,21 +309,31 @@ impl Wallet {
 
 impl Wallet {
     /// Build a peg-out BURN spend: out0 is the deterministic burn note of
-    /// `burn_value` (= withdrawal + peg fee; owner/nonces per
-    /// [`aegis_engine::burn`], derived from this spend's first nullifier),
+    /// `withdrawal_amount + peg_fee` (owner/nonces per [`aegis_engine::burn`],
+    /// derived from this spend's first nullifier AND bound to
+    /// `(recipient_prop, withdrawal_amount)` — the D1 recipient binding),
     /// out1 is change to self. The caller wraps the returned `Tx` with the
-    /// public withdrawal record; the chain validates the burn commitment
-    /// against it. Marks the inputs spent locally on success.
+    /// public withdrawal record for the SAME `(amount, recipient_prop)`; the
+    /// chain validates the burn commitment against it, so a mismatched record
+    /// (or a settler proving a different recipient) is rejected. Marks the
+    /// inputs spent locally on success.
     pub fn burn_spend(
         &mut self,
         chain: &impl ChainView,
         circuit: &SpendCircuit,
-        burn_value: u64,
+        withdrawal_amount: u64,
+        peg_fee: u64,
+        recipient_prop: &[u8],
         fee: u64,
     ) -> Result<Tx, PayError> {
         use aegis_engine::burn::{burn_nonces, burn_owner};
 
-        let need = burn_value + fee;
+        let burn_value = withdrawal_amount
+            .checked_add(peg_fee)
+            .ok_or(PayError::InsufficientFunds)?;
+        let need = burn_value
+            .checked_add(fee)
+            .ok_or(PayError::InsufficientFunds)?;
         let sel = self.select(need, chain.tip_height())?;
         let root = chain.current_root();
         let paths: [MerklePath; 2] = [
@@ -342,9 +352,10 @@ impl Wallet {
             index: sel[i].leaf_index,
         });
         // The burn nonces derive from nf0 = nullifier(nk, rho of input 0) —
-        // known before proving, unique forever.
+        // known before proving, unique forever — bound to the intended
+        // (recipient, amount) so no other recipient can claim this burn (D1).
         let nf0 = nullifier(&self.keys.nk, &sel[0].rho);
-        let (rho_burn, r_burn) = burn_nonces(&nf0);
+        let (rho_burn, r_burn) = burn_nonces(&nf0, recipient_prop, withdrawal_amount);
         let owner_burn = burn_owner();
 
         let change = sel[0].value + sel[1].value - need;

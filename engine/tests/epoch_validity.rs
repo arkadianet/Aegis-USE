@@ -86,7 +86,7 @@ impl Builder {
     fn pegout(&mut self, prev_root: Digest, amount: u64, recipient: Vec<u8>) -> PegOut {
         let nf0 = digest(self.fresh());
         let fee = peg_fee(amount);
-        let cm0 = burn_cm_expected(amount + fee, &nf0);
+        let cm0 = burn_cm_expected(amount + fee, &nf0, &recipient, amount);
         PegOut {
             spend: SpendPublics {
                 root: prev_root,
@@ -383,6 +383,29 @@ fn tampered_state_root_dies() {
         verify_epoch(&w),
         Err(EpochError::StateRootMismatch { i: 0 }),
         "state_root must equal the frontier root over the re-derived leaves"
+    );
+}
+
+// ----- D1 recipient binding -----
+
+#[test]
+fn redirected_recipient_dies_at_the_burn_binding() {
+    // THE D1 theft vector at the settlement layer: a permissionless settler
+    // takes the victim's real matured burn (real spend, real cm0, built for the
+    // honest recipient) and re-labels the recorded withdrawal to pay THEIR OWN
+    // address. Because the burn nonces bind (recipient_prop, amount) (D1), the
+    // guest's recomputed burn commitment no longer reproduces the spend's out0,
+    // so the redirect dies at the burn binding — before it can ever be journaled
+    // and paid. Block 0's peg-out burn binding is checked ahead of the following
+    // block's header link, so this is the check that fires.
+    let b = honest_builder();
+    let mut w = b.finish(1);
+    // cm0 stays the honestly-built burn note; only the recorded recipient moves.
+    w.blocks[0].pegouts[0].recipient_prop = b"\x00\x08\xcd attacker".to_vec();
+    assert_eq!(
+        verify_epoch(&w),
+        Err(EpochError::BadBurnBinding { i: 0, j: 0 }),
+        "a burn note is only reproducible with the recipient it was built for (D1)"
     );
 }
 

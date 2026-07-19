@@ -10,3 +10,6 @@
 
 # Isolated vault-predicate build artifacts (never committed)
 /.epoch-vault-target/
+
+# v6-converged isolated build artifacts (external target dir; never committed)
+/.v6conv-target/

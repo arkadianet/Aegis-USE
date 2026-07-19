@@ -126,13 +126,19 @@ fn peg_in_and_peg_out_consensus_end_to_end() {
 
     let withdrawal = 990u64;
     let peg_fee_out = params.peg_fee(withdrawal); // 9
-    let burn_value = withdrawal + peg_fee_out;
     let recipient_prop = vec![0xAA; 36]; // stand-in Ergo ErgoTree bytes
     let pot_before = chain.pot();
     let sys_before = chain.pot() + chain.shielded_total();
 
     let burn_tx = bob
-        .burn_spend(&chain, chain.circuit(), burn_value, fee)
+        .burn_spend(
+            &chain,
+            chain.circuit(),
+            withdrawal,
+            peg_fee_out,
+            &recipient_prop,
+            fee,
+        )
         .unwrap();
 
     // ---- adversarial FIRST: tampered withdrawal amount / recipient ----
@@ -152,6 +158,22 @@ fn peg_in_and_peg_out_consensus_end_to_end() {
         recipient_prop: recipient_prop.clone(),
     };
     assert_eq!(chain.submit_pegout(zero), Err(HnError::BadPegOut));
+    // D1 redirect: the SAME real burn (victim's pending withdrawal) claimed
+    // with the ATTACKER's recipient — everything else identical. Pre-D1 the
+    // burn did not bind the recipient and this was ACCEPTED (the theft
+    // vector); the recipient-bound derivation must reject it.
+    let attacker_prop = vec![0xEE; 36];
+    assert_ne!(attacker_prop, recipient_prop);
+    let redirect = PegOutTx {
+        tx: burn_tx.clone(),
+        amount: withdrawal,
+        recipient_prop: attacker_prop,
+    };
+    assert_eq!(
+        chain.submit_pegout(redirect),
+        Err(HnError::BadPegOut),
+        "D1: a withdrawal redirected to a different recipient is rejected"
+    );
 
     // The honest peg-out is admitted and mined.
     let po = PegOutTx {
@@ -221,4 +243,45 @@ fn peg_in_and_peg_out_consensus_end_to_end() {
         "pot identical across nodes after peg flows"
     );
     assert_eq!(follower.withdrawals(), chain.withdrawals());
+
+    // ---- D1 at BLOCK validation: a peer relays the pegout block with its
+    // withdrawal record redirected to the attacker's recipient. The burn note
+    // in the (unchanged, validly-proven) spend binds the victim's recipient,
+    // so recomputing the burn commitment mismatches and the block is rejected
+    // — a redirected withdrawal can never be RECORDED by any honest node. ----
+    let dir_c = tempfile::tempdir().unwrap();
+    let mut node_c = HnChain::create(dir_c.path(), SpendCircuit::new(), params.clone()).unwrap();
+    let on_c = Arc::new(AtomicBool::new(true));
+    node_c.set_pegin_check(Box::new(MockVault {
+        on: Arc::clone(&on_c),
+    }));
+    let blocks = chain.blocks_since(0);
+    let pegout_height = blocks
+        .iter()
+        .find(|b| !b.pegouts.is_empty())
+        .expect("pegout block")
+        .height;
+    for b in blocks.iter().filter(|b| b.height < pegout_height) {
+        node_c
+            .ingest_block(b.clone())
+            .expect("honest prefix applies");
+    }
+    let honest_block = blocks
+        .iter()
+        .find(|b| b.height == pegout_height)
+        .unwrap()
+        .clone();
+    let mut tampered = honest_block.clone();
+    tampered.pegouts[0].recipient_prop = vec![0xEE; 36];
+    assert_eq!(
+        node_c.ingest_block(tampered),
+        Err(HnError::BadPegOut),
+        "D1: a block whose withdrawal record redirects the recipient is rejected"
+    );
+    // The untampered block still applies — the rejection was the redirect.
+    node_c
+        .ingest_block(honest_block)
+        .expect("honest pegout block applies");
+    assert_eq!(node_c.withdrawals().len(), 1);
+    assert_eq!(node_c.withdrawals()[0].recipient_prop, recipient_prop);
 }

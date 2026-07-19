@@ -12,8 +12,10 @@
 //      EQUALS the root's surfaced digest — the BIND: the journal the vault
 //      reconstructs is exactly what the aggregated proofs attested;
 //   3. each withdrawal's out0 commitment is the deterministic BURN note for
-//      `amount + peg_fee` with nonces from its nullifier (value provably left
-//      the pool), its cm0 is an epoch leaf, and all nf0 are pairwise distinct
+//      `amount + peg_fee` with nonces from its nullifier AND the JOURNALED
+//      `(recipient_prop, amount)` (the D1 recipient binding — a settler
+//      journaling any other recipient reproduces a different commitment and the
+//      proof fails), its cm0 is an epoch leaf, and all nf0 are pairwise distinct
 //      (no burn backs two entries);
 //   4. advancing the committed PRE-EPOCH FRONTIER over the epoch's leaves takes
 //      prev_root → new_root — O(epoch), once per batch.
@@ -105,10 +107,13 @@ fn main() {
         // fee mirror of HnChainParams::peg_fee (hn/params.rs); keep in lockstep.
         let peg_fee = (e.amount / 100).max(1);
         let burn_value = e.amount.checked_add(peg_fee).expect("burn value overflow");
+        // D1: the burn nonces bind the JOURNALED (recipient_prop, amount) too, so
+        // a settler journaling any other recipient reproduces a different burn
+        // commitment and this equality fails.
         assert_eq!(
-            burn_cm_expected(burn_value, &e.nf0),
+            burn_cm_expected(burn_value, &e.nf0, &e.recipient_prop, e.amount),
             e.cm0,
-            "out0 must be the deterministic burn note for this withdrawal"
+            "out0 must be the deterministic burn note for this withdrawal + recipient"
         );
         assert!(
             epoch.iter().any(|d| *d == e.cm0),

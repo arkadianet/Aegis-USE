@@ -195,7 +195,8 @@ impl HnChain {
 
     /// Admit a peg-out to the mempool: the inner spend is fully validated
     /// (proof, flat fee, anchor, nullifiers) and the burn commitment must
-    /// match the public withdrawal exactly.
+    /// match the public withdrawal exactly — including the recipient it binds
+    /// (D1), so a redirected withdrawal record is rejected here too.
     pub fn submit_pegout(&mut self, po: PegOutTx) -> Result<(), HnError> {
         let nfs = self
             .state
@@ -206,7 +207,9 @@ impl HnChain {
             return Err(HnError::BadPegOut);
         }
         let cm0 = digest_at_pub(&po.tx, aegis_engine::spend::monolith::PUB_CMO0);
-        if aegis_engine::burn::burn_cm_expected(burn_value, &nfs[0]) != cm0 {
+        if aegis_engine::burn::burn_cm_expected(burn_value, &nfs[0], &po.recipient_prop, po.amount)
+            != cm0
+        {
             return Err(HnError::BadPegOut);
         }
         for nf in &nfs {

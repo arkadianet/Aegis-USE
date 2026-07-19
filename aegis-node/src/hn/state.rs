@@ -483,13 +483,15 @@ impl HnState {
                 return Err(HnError::BadPegOut);
             }
             // out0 MUST be the deterministic burn note for exactly this
-            // withdrawal (value amount+fee, unspendable owner, nf0-derived
-            // nonces) — the shielded value provably left for this recipient.
+            // withdrawal (value amount+fee, unspendable owner, nonces bound to
+            // nf0 AND the declared (recipient, amount) — D1). The recorded
+            // withdrawal is therefore always bound into its burn: a peg-out
+            // whose burn does not bind its claimed recipient never records.
             let cm0 = digest_at(
                 &po.tx.public_values,
                 aegis_engine::spend::monolith::PUB_CMO0,
             );
-            if burn_cm_expected(burn_value, &nfs[0]) != cm0 {
+            if burn_cm_expected(burn_value, &nfs[0], &po.recipient_prop, po.amount) != cm0 {
                 return Err(HnError::BadPegOut);
             }
             for nf in &nfs {

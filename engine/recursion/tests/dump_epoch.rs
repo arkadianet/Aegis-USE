@@ -107,7 +107,10 @@ fn prove_burn(tree: &NoteTree, s: u32, in0: InputNote, in1: InputNote, amount: u
     let nf0 = nullifier(&in0.nk, &in0.rho);
     let pf = peg_fee(amount);
     let burn_value = amount + pf;
-    let (brho, br) = burn_nonces(&nf0);
+    // D1: the burn nonces bind the withdrawal's (recipient_prop, amount); this
+    // suffix peg-out's recipient must match the one the block records below.
+    let recipient = vec![0xA0 + s as u8; 33];
+    let (brho, br) = burn_nonces(&nf0, &recipient, amount);
     let out0 = OutputNote {
         value: burn_value,
         owner: burn_owner(),
@@ -125,7 +128,7 @@ fn prove_burn(tree: &NoteTree, s: u32, in0: InputNote, in1: InputNote, amount: u
     let cm0 = digest_at(&pis, PUB_CMO0);
     assert_eq!(
         cm0,
-        burn_cm_expected(burn_value, &nf0),
+        burn_cm_expected(burn_value, &nf0, &recipient, amount),
         "out0 is the burn note"
     );
     let config = make_recursion_hiding_config(
@@ -138,7 +141,7 @@ fn prove_burn(tree: &NoteTree, s: u32, in0: InputNote, in1: InputNote, amount: u
         common,
         pis,
         amount,
-        recipient: vec![0xA0 + s as u8; 33],
+        recipient,
     }
 }
 

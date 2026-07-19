@@ -55,11 +55,15 @@ fn burn_valid_spend(s: u32, amount: u64) -> (SpendBatchProof, SpendCommonData, V
     let in0 = InputNote { index: i0, ..in0 };
     let in1 = InputNote { index: i1, ..in1 };
 
-    // out0 = the deterministic burn note for (amount + peg_fee) under nf0.
+    // out0 = the deterministic burn note for (amount + peg_fee) under nf0, bound
+    // to the withdrawal's (recipient_prop, amount) — D1. The recipient MUST match
+    // the entry `recipient_prop` the caller derives (`0xA0 + (s-1)`), or the
+    // guest's burn recomputation from the journaled recipient would mismatch.
     let nf0 = nullifier(&in0.nk, &in0.rho);
     let peg_fee = (amount / 100).max(1);
     let burn_value = amount + peg_fee;
-    let (brho, br) = burn_nonces(&nf0);
+    let recipient = vec![0xA0 + (s - 1) as u8; 33];
+    let (brho, br) = burn_nonces(&nf0, &recipient, amount);
     let out0 = OutputNote {
         value: burn_value,
         owner: burn_owner(),
@@ -78,7 +82,7 @@ fn burn_valid_spend(s: u32, amount: u64) -> (SpendBatchProof, SpendCommonData, V
     let cm0: Digest = core::array::from_fn(|i| pis[PUB_CMO0 + i]);
     assert_eq!(
         cm0,
-        burn_cm_expected(burn_value, &nf0),
+        burn_cm_expected(burn_value, &nf0, &recipient, amount),
         "out0 must be the burn note"
     );
 

@@ -228,7 +228,13 @@ pub fn verify_epoch(w: &EpochWitness) -> Result<EpochResult, EpochError> {
                 .amount
                 .checked_add(fee)
                 .ok_or(EpochError::Overflow { i })?;
-            if burn_cm_expected(burn_value, &po.spend.nf0) != po.spend.cm0 {
+            // D1: the burn nonces bind the declared (recipient_prop, amount), so
+            // a suffix peg-out whose burn does not reproduce from its recorded
+            // recipient fails here — the recipient is welded to the burn note at
+            // the settlement layer, independent of the E2 aux-PoW body binding.
+            if burn_cm_expected(burn_value, &po.spend.nf0, &po.recipient_prop, po.amount)
+                != po.spend.cm0
+            {
                 return Err(EpochError::BadBurnBinding { i, j });
             }
             pegout_outflow = pegout_outflow
