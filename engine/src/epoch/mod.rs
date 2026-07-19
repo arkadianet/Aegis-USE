@@ -26,6 +26,7 @@ pub mod header_id;
 pub mod share;
 pub mod types;
 pub mod verify;
+pub mod wire;
 
 pub use types::{PegIn, PegOut, SpendPublics, SuffixBlock};
 pub use verify::{verify_epoch, EpochError, EpochResult, EpochWitness, Withdrawal};
