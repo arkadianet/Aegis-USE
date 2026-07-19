@@ -21,7 +21,7 @@ use std::rc::Rc;
 use p3_baby_bear::default_babybear_poseidon2_16;
 use p3_batch_stark::StarkGenericConfig;
 use p3_circuit::ops::{generate_poseidon2_trace, generate_recompose_trace, NpoTypeId};
-use p3_circuit::{Circuit, CircuitBuilder, ExprId};
+use p3_circuit::{Circuit, CircuitBuilder, ExprId, NonPrimitiveOpId};
 use p3_circuit_prover::batch_stark_prover::TableProver;
 use p3_circuit_prover::batch_stark_prover::{
     poseidon2_air_builders, recompose_air_builders, BatchStarkProof, NUM_PRIMITIVE_TABLES,
@@ -52,8 +52,9 @@ use crate::digest::{
     DigestCircuitPlugin, DigestPreprocessor, DigestProver, DigestTrace, DIGEST_LIMBS,
 };
 use crate::{
-    plain_agg_config, salted_zk_config, AggParams, PlainAggConfig, PlainChallengeMmcs,
-    PlainInnerFri, PlainMmcs, SaltedInnerFri, SpendProofInput, D, P2,
+    plain_agg_config, salted_zk_config, sha_final_config, AggParams, PlainAggConfig,
+    PlainChallengeMmcs, PlainInnerFri, PlainMmcs, SaltedInnerFri, ShaFinalConfig, SpendProofInput,
+    D, P2,
 };
 
 // ============================================================================
@@ -194,6 +195,74 @@ fn prove_digest_circuit(
 }
 
 // ============================================================================
+// SHA-256 final-layer proving (I5a) — same digest circuit, SHA-256 output config
+// ============================================================================
+//
+// The final (root) aggregation layer is proved under [`ShaFinalConfig`] so the
+// guest verifies it on the RISC0 SHA accelerator. The digest table is
+// config-generic (`DigestProver`/`DigestAirBuilder`/`BatchAir` over any `SC`), so
+// the `aegis/digest` channel folds and surfaces exactly as under Poseidon2 — only
+// the root proof's own commitments/challenger ride SHA. These mirror
+// `npo_air_builders`/`digest_batch_prover`/`prove_digest_circuit` at
+// `SC = ShaFinalConfig`, and return the bare `BatchStarkProof` (a SHA root is
+// never recursed further, so it needs no `CircuitProverData`).
+
+fn npo_air_builders_sha() -> Vec<Box<dyn NpoAirBuilder<ShaFinalConfig, D>>> {
+    let mut builders = poseidon2_air_builders::<_, D>();
+    builders.extend(recompose_air_builders(1, false));
+    builders.push(Box::new(DigestAirBuilder::<D>));
+    builders
+}
+
+fn digest_batch_prover_sha(
+    cfg: ShaFinalConfig,
+    packing: TablePacking,
+) -> BatchStarkProver<ShaFinalConfig> {
+    let mut prover = BatchStarkProver::new(cfg).with_table_packing(packing);
+    prover.register_poseidon2_table::<D>(P2);
+    prover.register_recompose_table::<D>(false);
+    prover.register_table_prover(Box::new(DigestProver::<D>));
+    prover
+}
+
+fn prove_digest_circuit_sha(
+    outer_cfg: &ShaFinalConfig,
+    circuit: &Circuit<Challenge>,
+    packing: TablePacking,
+    public_inputs: &[Challenge],
+    private_inputs: &[Challenge],
+    set_priv: impl FnOnce(&mut p3_circuit::CircuitRunner<'_, Challenge>),
+) -> BatchStarkProof<ShaFinalConfig> {
+    let npo_prep = npo_preprocessors();
+    let air_builders = npo_air_builders_sha();
+    let (airs_degrees, primitive_columns, non_primitive_columns) =
+        get_airs_and_degrees_with_prep::<ShaFinalConfig, _, D>(
+            circuit,
+            &packing,
+            &npo_prep,
+            &air_builders,
+            ConstraintProfile::Standard,
+        )
+        .expect("airs/degrees prep (sha final)");
+    let (airs, degrees): (Vec<_>, Vec<usize>) = airs_degrees.into_iter().unzip();
+    let ext_degrees: Vec<usize> = degrees.iter().map(|&d| d + outer_cfg.is_zk()).collect();
+    let outer_prover_data =
+        p3_batch_stark::ProverData::from_airs_and_degrees(outer_cfg, &airs, &ext_degrees);
+    let circuit_prover_data =
+        CircuitProverData::new(outer_prover_data, primitive_columns, non_primitive_columns);
+    let prover = digest_batch_prover_sha(outer_cfg.clone(), packing);
+
+    let mut runner = circuit.runner();
+    runner.set_public_inputs(public_inputs).expect("publics");
+    runner.set_private_inputs(private_inputs).expect("privates");
+    set_priv(&mut runner);
+    let traces = runner.run().expect("witness run");
+    prover
+        .prove_all_tables(&traces, &circuit_prover_data)
+        .expect("prove digest circuit (sha final)")
+}
+
+// ============================================================================
 // toy leaf
 // ============================================================================
 
@@ -303,6 +372,88 @@ pub fn agg_pair_digest(
     left: &RecursionOutput<PlainAggConfig>,
     right: &RecursionOutput<PlainAggConfig>,
 ) -> RecursionOutput<PlainAggConfig> {
+    let b = build_agg_pair(params, level, left, right);
+    let agg_config = plain_agg_config(params);
+    prove_digest_circuit(
+        &agg_config,
+        &b.circuit,
+        b.packing,
+        &b.publics,
+        &b.privates,
+        |runner| {
+            set_child_mmcs(runner, &b.left_ops, left);
+            set_child_mmcs(runner, &b.right_ops, right);
+        },
+    )
+}
+
+/// The FINAL (root) aggregation layer, proved under [`ShaFinalConfig`] (I5a):
+/// the SAME digest-folding circuit as [`agg_pair_digest`] (children verified
+/// in-circuit under Poseidon2, digests folded and re-exposed), but the root
+/// proof's own commitments/challenger are SHA-256 — so the settlement guest
+/// verifies it on the RISC0 SHA accelerator (~4.7x cheaper, feasibility §7).
+/// Returns the bare root proof (a SHA root is never recursed further).
+pub fn agg_pair_settlement_sha(
+    params: &AggParams,
+    level: u32,
+    left: &RecursionOutput<PlainAggConfig>,
+    right: &RecursionOutput<PlainAggConfig>,
+) -> BatchStarkProof<ShaFinalConfig> {
+    let b = build_agg_pair(params, level, left, right);
+    let sha_config = sha_final_config(params);
+    prove_digest_circuit_sha(
+        &sha_config,
+        &b.circuit,
+        b.packing,
+        &b.publics,
+        &b.privates,
+        |runner| {
+            set_child_mmcs(runner, &b.left_ops, left);
+            set_child_mmcs(runner, &b.right_ops, right);
+        },
+    )
+}
+
+/// A built 2-to-1 digest-folding aggregation circuit, ready to prove under
+/// either output config. The circuit — verify both children in-circuit under
+/// [`PlainAggConfig`], fold `d = H(d_left ‖ d_right)`, re-expose `d` — is
+/// identical regardless of the output config; only the outer `prove_*` differs
+/// (Poseidon2 for interior layers, SHA-256 for the final root layer).
+struct AggPairCircuit {
+    circuit: Circuit<Challenge>,
+    publics: Vec<Challenge>,
+    privates: Vec<Challenge>,
+    left_ops: Vec<NonPrimitiveOpId>,
+    right_ops: Vec<NonPrimitiveOpId>,
+    packing: TablePacking,
+}
+
+/// Install a child proof's Poseidon2 FRI-MMCS openings for the aggregation
+/// circuit's in-circuit verify of that child. Identical for interior (Poseidon2)
+/// and final (SHA) layers — the child is always a `PlainAggConfig` proof.
+fn set_child_mmcs(
+    runner: &mut p3_circuit::CircuitRunner<'_, Challenge>,
+    op_ids: &[NonPrimitiveOpId],
+    child: &RecursionOutput<PlainAggConfig>,
+) {
+    set_fri_mmcs_private_data::<
+        F,
+        Challenge,
+        PlainChallengeMmcs,
+        PlainMmcs,
+        Hash,
+        Compress,
+        DIGEST_ELEMS,
+    >(runner, op_ids, &child.0.proof.opening_proof, P2)
+    .expect("child MMCS private data");
+}
+
+fn build_agg_pair(
+    params: &AggParams,
+    level: u32,
+    left: &RecursionOutput<PlainAggConfig>,
+    right: &RecursionOutput<PlainAggConfig>,
+) -> AggPairCircuit {
     let agg_config = plain_agg_config(params);
     let lookup_gadget = LogUpGadget::new();
 
@@ -389,35 +540,14 @@ pub fn agg_pair_digest(
     }
     .with_fri_params(params.log_final_poly_len, params.log_blowup);
 
-    prove_digest_circuit(
-        &agg_config,
-        &circuit,
+    AggPairCircuit {
+        circuit,
+        publics,
+        privates,
+        left_ops,
+        right_ops,
         packing,
-        &publics,
-        &privates,
-        |runner| {
-            set_fri_mmcs_private_data::<
-                F,
-                Challenge,
-                PlainChallengeMmcs,
-                PlainMmcs,
-                Hash,
-                Compress,
-                DIGEST_ELEMS,
-            >(runner, &left_ops, &left.0.proof.opening_proof, P2)
-            .expect("left MMCS private data");
-            set_fri_mmcs_private_data::<
-                F,
-                Challenge,
-                PlainChallengeMmcs,
-                PlainMmcs,
-                Hash,
-                Compress,
-                DIGEST_ELEMS,
-            >(runner, &right_ops, &right.0.proof.opening_proof, P2)
-            .expect("right MMCS private data");
-        },
-    )
+    }
 }
 
 /// Aggregate a power-of-two set of digest-carrying proofs into one root.
@@ -495,6 +625,53 @@ pub fn verify_root_bytes(params: &AggParams, bytes: &[u8]) -> Result<Vec<F>, Str
 /// counterpart to [`verify_root_bytes`].
 pub fn serialize_root(root: &RecursionOutput<PlainAggConfig>) -> Vec<u8> {
     postcard::to_allocvec(&root.0).expect("serialize root proof")
+}
+
+// ---- SHA-256 final-layer verification (I5a) — the settlement-guest path ----
+
+/// Extract the `aegis/digest` entry's plaintext public values from a SHA-final
+/// root proof (the surfaced withdrawals digest limbs).
+pub fn digest_publics_sha(proof: &BatchStarkProof<ShaFinalConfig>) -> Vec<F> {
+    proof
+        .non_primitives
+        .iter()
+        .find(|e| e.op_type == digest_op_type())
+        .expect("proof carries no aegis/digest entry")
+        .public_values
+        .clone()
+}
+
+/// Verify a SHA-final root proof and return the surfaced withdrawals digest.
+///
+/// Reconstructs the SHA verifier — poseidon2 + recompose + the `aegis/digest`
+/// table, [`sha_final_config`] with the packing carried inside the proof — and
+/// runs `verify_all_tables` in-field. This is the exact op the settlement guest
+/// runs in-zkVM, where the SHA-256 MMCS/challenger ride the RISC0 SHA
+/// accelerator. Constant work in N (one root verify).
+pub fn verify_root_proof_sha(
+    params: &AggParams,
+    proof: &BatchStarkProof<ShaFinalConfig>,
+) -> Result<Vec<F>, String> {
+    let sha_config = sha_final_config(params);
+    let verifier = digest_batch_prover_sha(sha_config, proof.table_packing.clone());
+    verifier
+        .verify_all_tables::<Challenge>(proof)
+        .map_err(|e| format!("{e:?}"))?;
+    Ok(digest_publics_sha(proof))
+}
+
+/// Deserialize a postcard-encoded SHA-final root proof and verify it — the exact
+/// call the RISC0 settlement guest makes (I5a). Returns the surfaced digest.
+pub fn verify_root_bytes_sha(params: &AggParams, bytes: &[u8]) -> Result<Vec<F>, String> {
+    let proof: BatchStarkProof<ShaFinalConfig> =
+        postcard::from_bytes(bytes).map_err(|e| format!("sha root proof decode: {e}"))?;
+    verify_root_proof_sha(params, &proof)
+}
+
+/// Serialize a SHA-final root proof for the guest/wire (postcard) — the
+/// settlement host's counterpart to [`verify_root_bytes_sha`].
+pub fn serialize_root_sha(root: &BatchStarkProof<ShaFinalConfig>) -> Vec<u8> {
+    postcard::to_allocvec(root).expect("serialize sha root proof")
 }
 
 // ============================================================================
@@ -653,4 +830,47 @@ pub fn aggregate_settlement(
         leaves.push(identity_leaf(params));
     }
     aggregate_tree_digest(params, leaves)
+}
+
+/// Aggregate `N >= 2` real settlement leaves into ONE **SHA-final** root (I5a),
+/// padding to the next power of two with identity leaves. Interior layers are
+/// Poseidon2 ([`agg_pair_digest`]); the FINAL (root) layer is proved under
+/// [`ShaFinalConfig`] ([`agg_pair_settlement_sha`]) so the settlement guest
+/// verifies it on the RISC0 SHA accelerator. The digest fold is byte-identical
+/// to the Poseidon2 path, so the root's surfaced digest still equals
+/// `aegis_engine::settlement_digest::withdrawals_root` over the same entries —
+/// the value the guest recomputes and checks. Returns the root proof and the
+/// tree height.
+///
+/// Requires the padded tree to have `>= 2` leaves (one aggregation node): the
+/// SHA-final layer is a 2-to-1 node, so a single-withdrawal epoch (no
+/// aggregation node) is out of scope for the SHA-final path.
+pub fn aggregate_settlement_sha(
+    params: &AggParams,
+    mut leaves: Vec<RecursionOutput<PlainAggConfig>>,
+) -> (BatchStarkProof<ShaFinalConfig>, u32) {
+    assert!(!leaves.is_empty(), "need at least one settlement leaf");
+    let padded = leaves.len().next_power_of_two();
+    while leaves.len() < padded {
+        leaves.push(identity_leaf(params));
+    }
+    assert!(
+        leaves.len() >= 2,
+        "SHA-final settlement needs >= 2 leaves (one aggregation node)"
+    );
+
+    // Interior Poseidon2 layers until exactly two proofs (the root's children)
+    // remain; then the final SHA-256 layer over that pair.
+    let mut level = 0u32;
+    while leaves.len() > 2 {
+        level += 1;
+        let mut next = Vec::with_capacity(leaves.len() / 2);
+        for pair in leaves.chunks(2) {
+            next.push(agg_pair_digest(params, level, &pair[0], &pair[1]));
+        }
+        leaves = next;
+    }
+    level += 1;
+    let root = agg_pair_settlement_sha(params, level, &leaves[0], &leaves[1]);
+    (root, level)
 }

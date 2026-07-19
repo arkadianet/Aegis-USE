@@ -16,7 +16,9 @@ use aegis_engine::poseidon::{digest_to_limbs, Digest, F};
 use aegis_engine::settlement_digest::{withdrawals_root, WithdrawalEntry};
 use aegis_engine::spend::batch::{prove_spend_batch, SpendBatchProof, SpendCommonData};
 use aegis_engine::spend::monolith::{build_spend_trace, InputNote, OutputNote, PUB_CMO0, PUB_NF0};
-use aegis_recursion::digest_agg::{aggregate_settlement, layer1_settlement, serialize_root};
+use aegis_recursion::digest_agg::{
+    aggregate_settlement_sha, layer1_settlement, serialize_root_sha,
+};
 use aegis_recursion::{AggParams, SpendProofInput};
 use p3_field::PrimeCharacteristicRing;
 use rand::SeedableRng;
@@ -142,8 +144,8 @@ fn dump() {
             )
         })
         .collect();
-    let (root, _packing, _levels) = aggregate_settlement(&params, leaves);
-    let root_bytes = serialize_root(&root);
+    let (root, _levels) = aggregate_settlement_sha(&params, leaves);
+    let root_bytes = serialize_root_sha(&root);
 
     // Guest inputs, in env::read order.
     let amounts: Vec<u64> = entries.iter().map(|e| e.amount).collect();
@@ -166,7 +168,7 @@ fn dump() {
 
     // Cross-check the bind holds natively before we ever run the guest.
     assert_eq!(
-        aegis_recursion::digest_agg::verify_root_bytes(&params, &root_bytes)
+        aegis_recursion::digest_agg::verify_root_bytes_sha(&params, &root_bytes)
             .expect("root verifies")
             .as_slice(),
         withdrawals_root(&entries).as_slice(),

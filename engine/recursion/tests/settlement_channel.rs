@@ -14,7 +14,8 @@ use aegis_engine::settlement_digest::{
 use aegis_engine::spend::batch::{prove_spend_batch, SpendBatchProof, SpendCommonData};
 use aegis_engine::spend::monolith::{build_spend_trace, InputNote, OutputNote, PUB_CMO0, PUB_NF0};
 use aegis_recursion::digest_agg::{
-    aggregate_settlement, digest_publics, identity_leaf, layer1_settlement, verify_root_digest,
+    aggregate_settlement_sha, digest_publics, identity_leaf, layer1_settlement,
+    verify_root_proof_sha,
 };
 use aegis_recursion::{AggParams, SpendProofInput};
 use p3_field::PrimeCharacteristicRing;
@@ -134,11 +135,11 @@ fn root_digest_equals_withdrawals_root_n2() {
     );
 
     let t1 = std::time::Instant::now();
-    let (root, packing, levels) = aggregate_settlement(&params, vec![la, lb]);
+    let (root, levels) = aggregate_settlement_sha(&params, vec![la, lb]);
     println!("[I4] N=2 aggregate ({levels} levels) in {:?}", t1.elapsed());
     assert_eq!(levels, 1);
 
-    let got = verify_root_digest(&params, &root, packing).expect("root verifies");
+    let got = verify_root_proof_sha(&params, &root).expect("root verifies");
     let want = withdrawals_root(&[e0.clone(), e1.clone()]);
     assert_eq!(got.as_slice(), want.as_slice(), "root == withdrawals_root");
 
@@ -214,14 +215,14 @@ fn root_digest_equals_withdrawals_root_n3_padded() {
     println!("[I4] 3 settlement leaves in {:?}", t0.elapsed());
 
     let t1 = std::time::Instant::now();
-    let (root, packing, levels) = aggregate_settlement(&params, leaves);
+    let (root, levels) = aggregate_settlement_sha(&params, leaves);
     println!(
         "[I4] N=3(→4) aggregate ({levels} levels) in {:?}",
         t1.elapsed()
     );
     assert_eq!(levels, 2);
 
-    let got = verify_root_digest(&params, &root, packing).expect("padded root verifies");
+    let got = verify_root_proof_sha(&params, &root).expect("padded root verifies");
     let want = withdrawals_root(&entries);
     assert_eq!(
         got.as_slice(),

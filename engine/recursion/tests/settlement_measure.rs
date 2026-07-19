@@ -16,7 +16,7 @@ use aegis_engine::settlement_digest::{withdrawals_root, WithdrawalEntry};
 use aegis_engine::spend::batch::{prove_spend_batch, SpendBatchProof, SpendCommonData};
 use aegis_engine::spend::monolith::{build_spend_trace, InputNote, OutputNote, PUB_CMO0, PUB_NF0};
 use aegis_recursion::digest_agg::{
-    aggregate_settlement, layer1_settlement, serialize_root, verify_root_bytes,
+    aggregate_settlement_sha, layer1_settlement, serialize_root_sha, verify_root_bytes_sha,
 };
 use aegis_recursion::{AggParams, SpendProofInput};
 use p3_field::PrimeCharacteristicRing;
@@ -110,13 +110,13 @@ fn run(n: u32) {
     let leaves_wall = t_leaves.elapsed();
 
     let t_agg = Instant::now();
-    let (root, _packing, levels) = aggregate_settlement(&params, leaves);
+    let (root, levels) = aggregate_settlement_sha(&params, leaves);
     let agg_wall = t_agg.elapsed();
 
-    let bytes = serialize_root(&root);
+    let bytes = serialize_root_sha(&root);
 
     let t_verify = Instant::now();
-    let got = verify_root_bytes(&params, &bytes).expect("root verifies from bytes");
+    let got = verify_root_bytes_sha(&params, &bytes).expect("root verifies from bytes");
     let verify_wall = t_verify.elapsed();
 
     let want = withdrawals_root(&entries);

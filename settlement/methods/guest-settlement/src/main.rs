@@ -38,7 +38,7 @@ use aegis_engine::burn::burn_cm_expected;
 use aegis_engine::merkle::{settle_tree_transition, Frontier};
 use aegis_engine::poseidon::{digest_to_bytes, Digest, DIGEST_ELEMS, F};
 use aegis_engine::settlement_digest::{batch_journal, withdrawals_root, WithdrawalEntry};
-use aegis_recursion::digest_agg::verify_root_bytes;
+use aegis_recursion::digest_agg::verify_root_bytes_sha;
 use aegis_recursion::AggParams;
 use p3_field::PrimeCharacteristicRing;
 use risc0_zkvm::guest::env;
@@ -71,11 +71,15 @@ fn main() {
     let c0 = env::cycle_count();
 
     // ---- 1. verify the aggregation ROOT (ONE verify, constant in N) ----
-    // Reconstructs the poseidon2 + recompose + aegis/digest verifier from the
-    // packing carried inside the proof and runs verify_all_tables in-field. The
-    // returned limbs are the root's surfaced withdrawals digest.
+    // The root's FINAL layer is committed under the SHA-256 config (I5a), so this
+    // verify's MMCS/challenger hashing rides the RISC0 SHA accelerator
+    // (sys_sha_buffer) — ~4.7x cheaper than software Poseidon2. Reconstructs the
+    // poseidon2 + recompose + aegis/digest verifier from the packing carried
+    // inside the proof and runs verify_all_tables in-field. The returned limbs are
+    // the root's surfaced withdrawals digest (unchanged by the config swap).
     let params = AggParams::default();
-    let root_digest = verify_root_bytes(&params, &root_bytes).expect("aggregate root must verify");
+    let root_digest =
+        verify_root_bytes_sha(&params, &root_bytes).expect("aggregate root must verify");
     let c_verify = env::cycle_count();
     env::log(&alloc::format!("CYCLES root_verify={}", c_verify - c0));
 

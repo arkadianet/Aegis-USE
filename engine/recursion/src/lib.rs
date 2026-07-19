@@ -41,6 +41,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use p3_baby_bear::default_babybear_poseidon2_16;
+use p3_challenger::{HashChallenger, SerializingChallenger32};
 use p3_circuit::ops::{generate_poseidon2_trace, generate_recompose_trace, NpoTypeId};
 use p3_circuit::{CircuitBuilder, CircuitRunner, NonPrimitiveOpId};
 use p3_circuit_prover::batch_stark_prover::{poseidon2_air_builders, recompose_air_builders};
@@ -69,6 +70,8 @@ use p3_recursion::{
     FriRecursionConfig, FriVerifierParams, Poseidon2Config, ProveNextLayerParams, RecursionInput,
     RecursionOutput,
 };
+use p3_sha256::{Sha256, Sha256Compress};
+use p3_symmetric::SerializingHasher;
 use p3_uni_stark::{StarkConfig, StarkGenericConfig, Val};
 
 use aegis_engine::config::recursion::{
@@ -275,6 +278,43 @@ pub fn plain_agg_config(p: &AggParams) -> PlainAggConfig {
         config: Arc::new(PlainInner::new(pcs, RecursionChallenger::new(perm))),
         fri_verifier_params: p.verifier_params(),
     }
+}
+
+// ==================== the SHA-256 final-layer config (I5a) ====================
+//
+// The FINAL aggregation layer (the one the RISC0 settlement guest verifies)
+// commits under a SHA-256 MMCS + a byte-serializing Fiat-Shamir challenger —
+// the SAME config *shape* as the engine's own `EngineConfig` (`config.rs`,
+// `TwoAdicFriPcs<BabyBear, SHA-256 MMCS> + SerializingChallenger32`). The guest
+// then verifies the root on the RISC0 SHA accelerator (`sys_sha_buffer`) instead
+// of software Poseidon2 (~4.7x cheaper in-guest, recursion-feasibility.md §7).
+//
+// Only the ROOT proof's own commitments/transcript switch to SHA. The in-circuit
+// hashing the final layer VERIFIES stays Poseidon2 (its two children are
+// `PlainAggConfig` proofs and the recursive verifier is Poseidon2-wired) — so the
+// `aegis/digest` channel is folded and surfaced identically to the Poseidon2
+// path. This is NOT a `FriRecursionConfig`: the root is never recursed further,
+// only verified in-guest, so a plain `StarkConfig` suffices.
+
+type ShaByteHash = Sha256;
+type ShaFieldHash = SerializingHasher<ShaByteHash>;
+type ShaValMmcs = MerkleTreeMmcs<F, u8, ShaFieldHash, Sha256Compress, 2, 32>;
+type ShaChallengeMmcs = ExtensionMmcs<F, Challenge, ShaValMmcs>;
+type ShaChallenger = SerializingChallenger32<F, HashChallenger<u8, ShaByteHash, 32>>;
+type ShaPcs = p3_fri::TwoAdicFriPcs<F, Dft, ShaValMmcs, ShaChallengeMmcs>;
+
+/// The SHA-256 output config for the FINAL aggregation layer (I5a). Same FRI
+/// numbers as the Poseidon2 layers (via [`AggParams`]), so the root keeps full
+/// engine security; only its own commitment hash + challenger are SHA-256.
+pub type ShaFinalConfig = StarkConfig<ShaPcs, Challenge, ShaChallenger>;
+
+/// Build the SHA-256 final-layer config at the given [`AggParams`].
+pub fn sha_final_config(p: &AggParams) -> ShaFinalConfig {
+    let field_hash = ShaFieldHash::new(Sha256);
+    let val_mmcs = ShaValMmcs::new(field_hash, Sha256Compress, p.cap_height);
+    let challenge_mmcs = ShaChallengeMmcs::new(val_mmcs);
+    let pcs = ShaPcs::new(Dft::default(), val_mmcs, p.fri(challenge_mmcs));
+    ShaFinalConfig::new(pcs, ShaChallenger::from_hasher(vec![], ShaByteHash {}))
 }
 
 // ======================= the salted hiding (client) config ===================

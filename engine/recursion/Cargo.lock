@@ -62,6 +62,7 @@ dependencies = [
  "p3-merkle-tree",
  "p3-poseidon2-circuit-air",
  "p3-recursion",
+ "p3-sha256",
  "p3-symmetric",
  "p3-uni-stark",
  "p3-util",

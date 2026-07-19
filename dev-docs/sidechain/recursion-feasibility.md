@@ -1050,3 +1050,113 @@ until I5. Chain-id-breaking; NOT cut/deployed.
 `settlement_measure` / `dump_artifacts`; `settlement/methods/guest-settlement`
 (the guest) + `settlement/exec-i4` (RISC0-executor measurement). Run the guest:
 `cargo build -p methods` then `exec-i4 --dir <dumped artifacts>`.*
+
+---
+
+## 13. I5a BUILT (2026-07-20): SHA-256 final layer — the guest verifies on the accelerator, ~5.4x cheaper
+
+> **Status: BUILT + MEASURED (this machine; recursion crate under
+> `RUSTFLAGS=-Ctarget-cpu=native` + `parallel`, RISC0 executor for the guest).**
+> The §7 SHA-final mitigation is adopted into the real I4 settlement statement:
+> the FINAL aggregation layer is now committed under a SHA-256 config so the
+> settlement guest verifies the root on the RISC0 SHA accelerator instead of
+> software Poseidon2. The digest bind is UNCHANGED. Branch
+> `verify/recursion-settlement-i5a-sha-final` off §12's I4 build.
+
+### 13.1 What changed (config swap only; the bind is untouched)
+
+- **The SHA-256 final-layer config** (`engine/recursion/src/lib.rs`,
+  `ShaFinalConfig` / `sha_final_config`): `TwoAdicFriPcs<BabyBear, SHA-256 MMCS>
+  + SerializingChallenger32` — the SAME shape as the engine's own `EngineConfig`
+  (`config.rs`), at the SAME FRI numbers as the Poseidon2 layers (full engine
+  Q=67, via `AggParams`), so the root keeps full security. It is a plain
+  `StarkConfig`, NOT a `FriRecursionConfig`: the root is never recursed further,
+  only verified in-guest.
+- **Only the ROOT proof's own commitments/transcript switch to SHA.** ALL
+  interior aggregation layers stay Poseidon2 (`agg_pair_digest`), and the final
+  layer's *in-circuit* verify of its two children stays Poseidon2 (its children
+  are `PlainAggConfig` proofs). `aggregate_settlement_sha` runs Poseidon2 layers
+  until two proofs remain, then proves the top node under `ShaFinalConfig`
+  (`agg_pair_settlement_sha`). The digest circuit is byte-identical to the
+  Poseidon2 path — the `aegis/digest` table (`DigestProver`/`DigestAirBuilder`/
+  `BatchAir`) is config-generic, so the fold and the surfaced `public_values`
+  channel are produced identically. **The withdrawals-digest survives the SHA
+  final layer unchanged** — proven, not assumed: `settlement_channel`'s
+  `root_digest == withdrawals_root` bind and every tamper negative pass under the
+  SHA config (§13.3). This was the one flagged risk (the non-primitive public
+  channel behaving differently under SHA); it does not.
+- **The guest** (`settlement/methods/guest-settlement`) verifies via
+  `verify_root_bytes_sha` (reconstructs `ShaFinalConfig` + the same poseidon2 +
+  recompose + `aegis/digest` verifier). The digest-check, burn binding, epoch
+  membership, distinctness, frontier transition, and `AEGISPB1` journal are all
+  UNCHANGED. The guest's `sha2` is routed to RISC0's accelerated fork via
+  `[patch.crates-io] sha2 = risc0/RustCrypto-hashes@sha2-v0.11.0-risczero.0`.
+
+### 13.2 Measured guest cycles — root_verify 558M → ~102M, ~5.4x, still constant in N
+
+RISC0 executor (`exec-i4`) over burn-valid N-withdrawal SHA-final roots, same
+methodology as §12.1:
+
+| N | in-guest root_verify (SHA) | §12 Poseidon2 baseline | speedup | bind | tree_transition | total user cyc | root bytes | journal |
+|---|---|---|---|---|---|---|---|---|
+| 2 | **102.4 M** (102,357,166) | 558.5 M | **5.46x** | 1.73 M | 3.49 M | **183.3 M** (183,337,766) | 669,056 | 178 B |
+| 4 | **106.9 M** (106,930,484) | 541.1 M | **5.06x** | 3.38 M | 4.87 M | **188.5 M** (188,506,280) | 647,406 | 276 B |
+
+- **root_verify collapses to ~102–107 M — below the §7/task ~120 M prediction**
+  (§7's 4.72x was on the Q=36 proxy; at full Q=67 the MMCS-hashing fraction the
+  accelerator eats is larger, so the ratio lands at ~5.1–5.5x). Total guest cost
+  drops **650 M → 183 M (N=2)** / **632 M → 188 M (N=4)** — ~3.4–3.6x.
+- **Still constant in N.** root_verify N=2 vs N=4 differ by 4.5% (102.4 vs 106.9
+  M) — the same level-1 (2,2)-packing vs level-2 (1,3)-packing noise as §12's
+  Poseidon2 spread, NOT N-scaling. Batch-independence holds under the SHA config.
+- The SHA final layer also **shrinks the root**: 669 KB (N=2) / 647 KB (N=4) vs
+  §12's ~735–765 KB Poseidon2 — consistent with §7.
+- **SHA accelerator confirmed firing** (three independent signals): (i) the guest
+  `Cargo.lock` resolves `sha2 0.11.0` from
+  `git+github.com/risc0/RustCrypto-hashes?tag=sha2-v0.11.0-risczero.0`; (ii) the
+  guest ELF carries `risc0_zkp::core::hash::sha::guest::Impl` / `Sha256VarCore`
+  symbols (the `sys_sha` precompile path); (iii) a 5.46x drop is only physically
+  achievable with the hardware accelerator — software SHA would be *slower* than
+  software Poseidon2, not faster. (§7 measured 5,934 Sha2 ecalls on the analogous
+  Q=36 N=4 root; the mechanism, not a fresh discrete count, is what I re-confirmed
+  here.)
+
+### 13.3 Tests + parity (all GREEN under the SHA-final config)
+
+- **`settlement_channel`** (repointed to `aggregate_settlement_sha` +
+  `verify_root_proof_sha`): the N=2 production-shape bind
+  (`root_digest == withdrawals_root([e0,e1])`) and the N=3→4 padded bind pass;
+  every tamper negative (wrong amount / recipient / nf0 / reorder) still yields a
+  different root and rejects. **The digest bind rejects a lying journal under the
+  SHA final layer.**
+- **`settlement_measure`** (SHA): N=2/N=4 pipeline + native `verify_root_bytes_sha`
+  round-trip green; root 669/647 KB, native verify ~5–6 ms.
+- **`sponge_parity`, `surface_publics`, `aggregate`** unchanged and green.
+- **`digest_channel`** (the §11 Poseidon2 toy spike, whose `agg_pair_digest` was
+  refactored to share the circuit builder with the SHA path) — all 6 green,
+  including both tamper-negative checks: the refactor is behavior-preserving.
+
+### 13.4 Image id + scope
+
+New guest image id (SHA-final config, LE-per-word hex per host/`exec-i4`):
+`869406858e1a42a9718f5492c5403ccec56f9e61a6d10cd10a506cb545450fa4`
+(`[u32;8] = [2231800966, 2839681678, 2455015281, 3460055237, 1637773253,
+3507278246, 3043774474, 2752464197]`). Chain-id-breaking vs §12's Poseidon2 guest
+— **expected, NOT cut/deployed.** The tracked `settlement/IMAGE_ID.hex` is a v5-era
+pin and is intentionally left untouched (image-id / vk-pinning baking is the
+separate I5 item, §12.4 / §4(d)). `aggregate_settlement_sha` requires the padded
+tree to have ≥2 leaves (one aggregation node); a single-withdrawal epoch (no
+node) is out of scope for the SHA-final path.
+
+The remaining I5 pieces (§12.4) are unchanged: epoch-validity (`new_root`
+canonical), the settled-burn accumulator, the PegVault v6 batch predicate,
+vk-pinning, and the testnet re-cut.
+
+*I5a harness: `engine/recursion/src/lib.rs` (`ShaFinalConfig` / `sha_final_config`),
+`engine/recursion/src/digest_agg.rs` (`agg_pair_settlement_sha` /
+`aggregate_settlement_sha` / `verify_root_bytes_sha` / `serialize_root_sha` +
+shared `build_agg_pair`), tests `settlement_channel` / `settlement_measure` /
+`dump_artifacts` repointed to the SHA path; `settlement/methods/guest-settlement`
+(the `[patch] sha2` accelerator + `verify_root_bytes_sha`). Reproduce:
+`AEGIS_I4_DUMP_DIR=<dir> AEGIS_I4_N={2,4} cargo test --release --test dump_artifacts
+-- --ignored` then `exec-i4 --dir <dir>`.*
