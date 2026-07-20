@@ -52,9 +52,12 @@ struct Builder {
     all_spends: Vec<SpendPublics>,
     counter: u32,
     tip_id_prev: [u8; 32],
-    /// The authenticated seam tip (`T_prev`): a length-1, genesis-terminated seam
-    /// standing for a young chain whose sealed tip has the pre-suffix state root.
-    seam_tip: SeamHeader,
+    /// A real 2-header, genesis-terminated authenticated seam (newest first):
+    /// `seam[0]` = `T_prev` (state_root == the pre-suffix frontier root, the
+    /// weld), `seam[1]` = its parent, whose parent is the genesis sentinel. Two
+    /// headers so every honest test exercises the multi-hop hash-link walk (the
+    /// core of the F1 induction), not just the tip check.
+    seam: Vec<SeamHeader>,
 }
 
 /// A peg-out to add: (amount, recipient).
@@ -65,13 +68,31 @@ struct PegSpec {
 
 impl Builder {
     fn new(pot: u64, shielded: u64, start_height: u64) -> Self {
-        let frontier = Frontier::new();
-        // The sealed tip `T_prev`: state_root == the pre-suffix (empty) frontier
-        // root (the weld), parent == the genesis sentinel (a young chain), and
-        // pot/shielded == the pre-suffix totals the guest derives back.
+        // seam[1] = T_prev's parent: bottoms out at the genesis sentinel. Its
+        // fields below the tip are unconstrained by the guest (only seam[0]
+        // provides pot/shielded_before), but its id must hash-link from seam[0].
+        let seam_prev = SeamHeader {
+            height: start_height - 2,
+            prev_header_id: GENESIS_HEADER_ID,
+            prev_root: Frontier::new().root(),
+            state_root: digest(0x5EA1),
+            timestamp_ms: 1_760_000_000_000 + (start_height - 2) * 15_000,
+            sc_nbits: suffix_nbits(),
+            miner_owner: digest(7),
+            coinbase_amount: 0,
+            coinbase_cm: digest(0),
+            coinbase_is_reward: true,
+            pot_after: pot,
+            shielded_after: shielded,
+            body_cm: digest(0),
+        };
+        let seam_prev_id = header_id_from_fields(CHAIN_ID, &seam_prev);
+        // seam[0] = T_prev: state_root == the pre-suffix (empty) frontier root
+        // (the weld); parent == seam[1]'s id (the hash link); pot/shielded ==
+        // the pre-suffix totals the guest derives back.
         let seam_tip = SeamHeader {
             height: start_height - 1,
-            prev_header_id: GENESIS_HEADER_ID,
+            prev_header_id: seam_prev_id,
             prev_root: Frontier::new().root(),
             state_root: Frontier::new().root(),
             timestamp_ms: 1_760_000_000_000 + (start_height - 1) * 15_000,
@@ -87,7 +108,7 @@ impl Builder {
         let tip_id = header_id_from_fields(CHAIN_ID, &seam_tip);
         Self {
             chain_id: CHAIN_ID,
-            frontier,
+            frontier: Frontier::new(),
             pot,
             shielded,
             height: start_height,
@@ -97,7 +118,7 @@ impl Builder {
             all_spends: Vec::new(),
             counter: 1000,
             tip_id_prev: tip_id,
-            seam_tip,
+            seam: vec![seam_tip, seam_prev],
         }
     }
 
@@ -236,7 +257,7 @@ impl Builder {
             blocks: self.blocks.clone(),
             frontier_bytes: postcard::to_allocvec(&Frontier::new()).unwrap(),
             tip_id_prev: self.tip_id_prev,
-            seam: vec![self.seam_tip.clone()],
+            seam: self.seam.clone(),
             settled_root_in: empty_settled_root(),
             settled_paths: paths,
             spend_root_digest: epoch_spend_root(&self.all_spends),
@@ -402,6 +423,23 @@ fn private_seam_state_root_dies_at_the_seam_tip() {
         verify_epoch(&w),
         Err(EpochError::SeamTipMismatch),
         "a private-tree seam root cannot chain to the vault's sealed tip (R7)"
+    );
+}
+
+#[test]
+fn broken_seam_link_dies() {
+    // Tamper a DEEPER seam header (seam[1]): its id changes, so seam[0]'s
+    // prev_header_id no longer hash-links to it. seam[0]'s own id is untouched, so
+    // the tip check passes and the multi-hop walk is what catches the forgery —
+    // exercising the F1 induction beyond the first header.
+    let b = honest_builder();
+    let mut w = b.finish(1);
+    assert!(w.seam.len() >= 2, "honest seam walks at least one link");
+    w.seam[1].state_root[0] += F::ONE;
+    assert_eq!(
+        verify_epoch(&w),
+        Err(EpochError::SeamLinkBroken { i: 0 }),
+        "every seam header's id must hash-link from its successor, back to R7"
     );
 }
 
