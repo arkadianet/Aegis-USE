@@ -21,6 +21,19 @@ use p3_field::PrimeCharacteristicRing;
 
 const CHAIN_ID: u32 = 0x484E_0005;
 
+/// The `sc_nbits` honest suffix blocks (and the seam tip) declare. Under
+/// `aux-pow` F2 is live and — with a short (< window+1) authenticated seam — the
+/// DAA expectation is the min-difficulty floor, so honest blocks must carry
+/// exactly it; without the feature F2 is compiled out and any value is fine.
+#[cfg(feature = "aux-pow")]
+fn suffix_nbits() -> u32 {
+    aegis_engine::epoch::testgen::diff1_nbits()
+}
+#[cfg(not(feature = "aux-pow"))]
+fn suffix_nbits() -> u32 {
+    0x2000_0100
+}
+
 fn digest(base: u32) -> Digest {
     core::array::from_fn(|i| F::from_u32(base.wrapping_mul(131) + i as u32 + 1))
 }
@@ -62,7 +75,7 @@ impl Builder {
             prev_root: Frontier::new().root(),
             state_root: Frontier::new().root(),
             timestamp_ms: 1_760_000_000_000 + (start_height - 1) * 15_000,
-            sc_nbits: 0x2000_0100,
+            sc_nbits: suffix_nbits(),
             miner_owner: digest(7),
             coinbase_amount: 0,
             coinbase_cm: digest(0),
@@ -189,7 +202,7 @@ impl Builder {
             prev_root,
             state_root,
             timestamp_ms: 1_760_000_000_000 + self.height * 15_000,
-            sc_nbits: 0x2000_0100,
+            sc_nbits: suffix_nbits(),
             txs,
             pegouts: pos,
             pegins: pins,
@@ -533,4 +546,34 @@ fn re_settling_a_burn_dies_at_the_settled_set() {
         Err(EpochError::AlreadySettled { .. }) => {}
         other => panic!("expected AlreadySettled, got {other:?}"),
     }
+}
+
+// ----- F2: a difficulty-1 fake block at the wrong DAA target dies -----
+
+/// The honest suffix already declares exactly the DAA expectation (the
+/// min-difficulty floor for a young chain), so it settles under F2. A fabricator
+/// who "mines" a block at a self-chosen difficulty — here anything other than the
+/// authenticated DAA expectation — is rejected at NbitsMismatch, which is what
+/// forces real, un-discountable Autolykos work in every fake block.
+#[cfg(feature = "aux-pow")]
+#[test]
+fn self_declared_nbits_dies_at_nbits_mismatch() {
+    let b = honest_builder();
+    let honest = b.finish(1);
+    verify_epoch(&honest).expect("honest suffix declares the DAA expectation and settles");
+
+    // Re-declare block 0's difficulty away from the DAA floor, rebuilding the
+    // header chain so the header-id links still hold and F2 is what fires.
+    let mut w = b.finish(1);
+    w.blocks[0].sc_nbits = w.blocks[0].sc_nbits.wrapping_add(1);
+    let mut prev = w.tip_id_prev;
+    for blk in w.blocks.iter_mut() {
+        blk.prev_header_id = prev;
+        prev = header_id(CHAIN_ID, blk);
+    }
+    assert_eq!(
+        verify_epoch(&w),
+        Err(EpochError::NbitsMismatch { i: 0 }),
+        "a block's sc_nbits must equal the authenticated LWMA/DAA expectation"
+    );
 }
