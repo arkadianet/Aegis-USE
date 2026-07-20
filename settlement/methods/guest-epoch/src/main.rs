@@ -98,23 +98,23 @@ fn main() {
         use aegis_engine::epoch::anchor::{verify_anchor_linkage_min_depth, A_MIN};
         use aegis_engine::epoch::aux_wire::{AnchorWitnessWire, ShareWitnessWire};
         use aegis_engine::epoch::header_id::header_id;
-        use aegis_engine::epoch::share::verify_share;
 
         // Per suffix reward block: verify its aux-PoW share binds the block's
         // header id to real Autolykos work at its sc_nbits target. The wire form
         // carries each Ergo object as its canonical byte image (the typed Ergo
         // structs are not serde) — rebuild it here, in-guest.
         let share_wires: Vec<ShareWitnessWire> = env::read();
-        assert_eq!(
-            share_wires.len(),
-            witness.blocks.len(),
-            "one share per block"
-        );
-        for (block, share_wire) in witness.blocks.iter().zip(share_wires) {
-            let hid = header_id(witness.chain_id, block);
-            let share = share_wire.into_witness();
-            verify_share(&share, &hid, block.sc_nbits).expect("aux-PoW share must verify");
-        }
+        let shares: Vec<_> = share_wires.into_iter().map(|w| w.into_witness()).collect();
+        // F6b: verify_suffix_shares enforces one DISTINCT Autolykos solve per block
+        // (rejecting share amplification — a single solve replayed as k inclusion
+        // proofs), on top of the per-block share↔header-id↔sc_nbits work binding.
+        // Without this the k·D fabrication price collapses to D.
+        aegis_engine::epoch::share::verify_suffix_shares(
+            witness.chain_id,
+            &witness.blocks,
+            &shares,
+        )
+        .expect("aux-PoW shares must verify and be non-amplified (F6b)");
         let c_e2 = env::cycle_count();
         env::log(&alloc::format!("CYCLES aux_pow_e2={}", c_e2 - c_epoch));
 
