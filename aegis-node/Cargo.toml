@@ -52,6 +52,12 @@ serde_json     = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+# Enable the engine's `aux-pow` feature in TEST builds only, so the node↔guest
+# DAA-parity cut gate can compare `crate::daa::next_nbits` against the guest port
+# `aegis_engine::epoch::daa::next_nbits` (all its transitive deps — ergo-ser,
+# num-bigint, ergo-rest-json, serde_json — are already node dependencies, so this
+# adds no new external crates; production node builds stay lean).
+aegis-engine = { path = "../engine", features = ["aux-pow"] }
 # The shared wire-type fixture (`aegis_types::tx::testutil::sample_transfer`)
 # that state/chain/seed/store/mm-forkchoice tests build blocks from.
 aegis-types = { path = "../aegis-types", features = ["testutil"] }

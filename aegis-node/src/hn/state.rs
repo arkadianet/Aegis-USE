@@ -336,6 +336,12 @@ impl HnState {
         self.daa_view.iter().copied().collect()
     }
 
+    /// The current anchor-acceptance window (oldest first) — the node oracle for
+    /// the F1 seam's derived `recent_roots` (Q-F1 node↔guest parity cut gate).
+    pub fn recent_roots(&self) -> Vec<Digest> {
+        self.recent_roots.iter().copied().collect()
+    }
+
     /// The emission pot's current balance (public).
     pub fn pot(&self) -> u64 {
         self.pot
@@ -1129,6 +1135,41 @@ mod tests {
             st.apply_block(&bad, &circuit),
             Err(HnError::PotMismatch)
         ));
+    }
+
+    #[test]
+    fn node_recent_roots_match_engine_seam_window() {
+        // Q-F1 cut gate: the guest's `seam_anchor_window` (derived from the F1
+        // seam) equals the node's live `recent_roots` VecDeque in BOTH regimes —
+        // young (the pre-genesis empty-tree root is still a member) and mature (it
+        // has been evicted after ROOT_WINDOW blocks). The node is the oracle.
+        use aegis_engine::epoch::header_id::seam_header_of;
+        use aegis_engine::epoch::verify::seam_anchor_window;
+
+        for n_blocks in [5usize, 130] {
+            let miner = addr(b"parity-miner");
+            let mut st = HnState::new(params_pot(1_000_000));
+            let circuit = SpendCircuit::new();
+            let mut blocks: Vec<HnBlock> = Vec::new();
+            for _ in 0..n_blocks {
+                let block = reward_block(&st, &miner);
+                st.apply_block(&block, &circuit)
+                    .expect("empty reward applies");
+                blocks.push(block);
+            }
+            // Seam newest-first; its oldest link bottoms out at the genesis
+            // sentinel (reward_block sets prev_header_id = [0; 32]).
+            let seam: Vec<_> = blocks
+                .iter()
+                .rev()
+                .map(|b| seam_header_of(&crate::hn::header::to_engine_block(b)))
+                .collect();
+            assert_eq!(
+                seam_anchor_window(&seam),
+                st.recent_roots(),
+                "guest seam window must equal node recent_roots ({n_blocks} blocks)"
+            );
+        }
     }
 
     #[test]

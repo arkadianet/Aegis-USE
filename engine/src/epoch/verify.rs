@@ -165,6 +165,28 @@ pub enum EpochError {
     Overflow { i: usize },
 }
 
+/// Derive the anchor window (the last `ROOT_WINDOW` real state-roots) from an
+/// authenticated seam, mirroring the node's `recent_roots: VecDeque` EXACTLY
+/// (Q-F1, `hn/state.rs:284-285, 665-668`). The node seeds the pre-genesis
+/// empty-tree root at height 0 and evicts it once `ROOT_WINDOW` blocks exist, so
+/// it is a window member iff the seam reached genesis; then the window is capped
+/// to the last `ROOT_WINDOW`. Extracted so `verify_epoch` and the node↔guest
+/// parity test share one definition (no drift).
+pub fn seam_anchor_window(seam: &[SeamHeader]) -> Vec<Digest> {
+    let reached_genesis = seam
+        .last()
+        .map(|h| h.prev_header_id == GENESIS_HEADER_ID)
+        .unwrap_or(false);
+    let mut roots: Vec<Digest> = seam.iter().rev().map(|h| h.state_root).collect();
+    if reached_genesis {
+        roots.insert(0, Frontier::new().root());
+    }
+    if roots.len() > ROOT_WINDOW {
+        roots.drain(0..roots.len() - ROOT_WINDOW);
+    }
+    roots
+}
+
 /// Verify the suffix and produce the epoch-validity result + the settled set
 /// out-root. Pure over the witness — this is exactly what the guest runs.
 pub fn verify_epoch(w: &EpochWitness) -> Result<EpochResult, EpochError> {
@@ -209,18 +231,9 @@ pub fn verify_epoch(w: &EpochWitness) -> Result<EpochResult, EpochError> {
     let shielded_before = tip.shielded_after;
     let prev_height = tip.height;
 
-    // Anchor window = the seam's state-roots oldest→newest, mirroring the node's
-    // `recent_roots` VecDeque EXACTLY (Q-F1). The node seeds the pre-genesis
-    // empty-tree root at height 0 and evicts it once ROOT_WINDOW blocks exist, so
-    // it is a window member iff the seam reached genesis; prepend it there, then
-    // cap to the last ROOT_WINDOW. The window's newest entry is `tip.state_root`.
-    let mut recent_roots: Vec<Digest> = w.seam.iter().rev().map(|h| h.state_root).collect();
-    if reached_genesis {
-        recent_roots.insert(0, Frontier::new().root());
-    }
-    if recent_roots.len() > ROOT_WINDOW {
-        recent_roots.drain(0..recent_roots.len() - ROOT_WINDOW);
-    }
+    // Anchor window derived from the seam, byte-identical to the node's
+    // `recent_roots` VecDeque (Q-F1). The newest entry is `tip.state_root`.
+    let mut recent_roots = seam_anchor_window(&w.seam);
 
     // ---- frontier / prev_root binding + the seam↔frontier weld ----
     let frontier: Frontier =
