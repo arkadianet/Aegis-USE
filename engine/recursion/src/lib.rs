@@ -116,7 +116,7 @@ type PlainInnerFri = FriProofTargets<
 /// arity1 / cap3) — the conservative "prove every tree layer at full client-grade
 /// parameters" choice (I1 §8.1 measured this at ~2 s/layer, same as relaxed
 /// params; the relaxation is an I5 proof-size optimization, not a correctness need).
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AggParams {
     pub log_blowup: usize,
     pub log_final_poly_len: usize,
@@ -126,6 +126,25 @@ pub struct AggParams {
     pub query_pow_bits: usize,
     pub cap_height: usize,
 }
+
+/// The pinned recursion-aggregation circuit fingerprint (recursion-feasibility.md
+/// §4(d), §12.4). The epoch guest bakes `AggParams::default()` into its ELF and
+/// reconstructs the SHA-final root verifier from it (`digest_agg::sha_final_config`
+/// + the `aegis/digest` NPO table), so a swapped config/circuit both changes the
+/// guest image id AND trips this pin. This is the belt-and-suspenders companion
+/// to the baked image-id (`settlement/EPOCH_IMAGE_ID.hex`): the image-id is the
+/// load-bearing pin (it subsumes the whole recursion tower), and
+/// `agg_params_default_matches_pin` guards a silent drift of the FRI/cap
+/// parameters the tower is instantiated at.
+pub const PINNED_AGG_PARAMS: AggParams = AggParams {
+    log_blowup: 3,
+    log_final_poly_len: 0,
+    max_log_arity: 1,
+    num_queries: 67,
+    commit_pow_bits: 0,
+    query_pow_bits: 16,
+    cap_height: 3,
+};
 
 impl Default for AggParams {
     fn default() -> Self {

@@ -99,6 +99,24 @@ pub const VM_TYPE_RISC0: i32 = 3;
 /// verifyStark costParams `[queries, merkle_depth]` (devnet oracle values).
 pub const COST_PARAMS: [i32; 2] = [35, 16];
 
+/// The epoch-validity guest's pinned RISC0 image id, hex, container-reproduced
+/// (`settlement/EPOCH_IMAGE_ID.hex`, built under `~/apps/risc0-cuda` with
+/// `AEGIS_EPOCH_AUXPOW=1`). This is the load-bearing vk-pin: `verifyStark` only
+/// releases funds for a receipt of THIS program, whose ELF bakes the epoch
+/// statement AND `AggParams::default()` (the recursion aggregation tower,
+/// recursion-feasibility.md §4(d)) — so a swapped guest or a drifted aggregation
+/// config cannot produce an accepted receipt. The hex file is the single source
+/// of truth; a re-pin (config drift / guest change) is one edit there + a re-cut.
+pub const EPOCH_IMAGE_ID_HEX: &str = include_str!("../../settlement/EPOCH_IMAGE_ID.hex");
+
+/// Decode [`EPOCH_IMAGE_ID_HEX`] into the 32-byte image id the PegVault pins.
+pub fn pinned_epoch_image_id() -> [u8; 32] {
+    let mut out = [0u8; 32];
+    hex::decode_to_slice(EPOCH_IMAGE_ID_HEX.trim(), &mut out)
+        .expect("EPOCH_IMAGE_ID.hex must be exactly 32-byte hex");
+    out
+}
+
 /// Everything the vault tree is pinned to at build time.
 #[derive(Clone, Debug)]
 pub struct VaultSpec {

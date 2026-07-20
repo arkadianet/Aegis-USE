@@ -2187,7 +2187,9 @@ name = "exec-epoch"
 version = "0.1.0"
 dependencies = [
  "aegis-engine",
+ "bincode",
  "clap",
+ "hex",
  "methods",
  "postcard",
  "risc0-zkvm",
