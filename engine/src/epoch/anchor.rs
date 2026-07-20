@@ -80,9 +80,37 @@ pub enum AnchorError {
     HeaderEncode(String),
 }
 
-fn ergo_header_id(h: &ErgoHeader) -> Result<[u8; 32], AnchorError> {
+/// Recompute an Ergo header's id (`serialize_header` → blake2b256).
+pub fn ergo_header_id(h: &ErgoHeader) -> Result<[u8; 32], AnchorError> {
     let (_, id) = serialize_header(h).map_err(|e| AnchorError::HeaderEncode(e.to_string()))?;
     Ok(*id.as_bytes())
+}
+
+/// Verify a parent-linked canonical-Ergo ancestor walk: `headers[0]` is the
+/// contract-spliced `ergo_ref_id`, and each header's `parent_id` equals the
+/// recomputed id of the next. On success every `headers[i]` is a canonical
+/// ancestor of `ergo_ref` at depth `i` (canonicality inherited from `ergo_ref =
+/// CONTEXT.headers`). Shared by E4 (the anchor walk) and F3 (the peg-in deposit
+/// walk) so both rest on the exact same linkage rule.
+pub fn verify_ancestor_walk(
+    headers: &[ErgoHeader],
+    ergo_ref_id: &[u8; 32],
+) -> Result<(), AnchorError> {
+    if headers.is_empty() {
+        return Err(AnchorError::EmptyChain);
+    }
+    // ergo_ref (index 0) must be the exact contract-spliced canonical id.
+    if &ergo_header_id(&headers[0])? != ergo_ref_id {
+        return Err(AnchorError::RefMismatch);
+    }
+    // Hash-linkage: each header's parent is the next header's id.
+    for i in 0..headers.len() - 1 {
+        let parent = *headers[i].parent_id.as_bytes();
+        if parent != ergo_header_id(&headers[i + 1])? {
+            return Err(AnchorError::ChainBroken { i, j: i + 1 });
+        }
+    }
+    Ok(())
 }
 
 /// Verify the suffix tip region is committed under an ancestor of the canonical
@@ -93,23 +121,13 @@ pub fn verify_anchor_linkage(
     ergo_ref_id: &[u8; 32],
     anchored_hn_id: &[u8; 32],
 ) -> Result<usize, AnchorError> {
-    if w.headers.is_empty() {
-        return Err(AnchorError::EmptyChain);
-    }
-    // ergo_ref (index 0) must be the exact contract-spliced canonical id.
-    if &ergo_header_id(&w.headers[0])? != ergo_ref_id {
-        return Err(AnchorError::RefMismatch);
-    }
-    // Hash-linkage: each header's parent is the next header's id.
-    for i in 0..w.headers.len() - 1 {
-        let parent = *w.headers[i].parent_id.as_bytes();
-        if parent != ergo_header_id(&w.headers[i + 1])? {
-            return Err(AnchorError::ChainBroken { i, j: i + 1 });
-        }
-    }
+    verify_ancestor_walk(&w.headers, ergo_ref_id)?;
 
     // H_anchor commits id(B_a) via extension-merkle inclusion (no PoW needed).
-    let anchor = w.headers.last().expect("non-empty");
+    let anchor = w
+        .headers
+        .last()
+        .expect("non-empty: verify_ancestor_walk rejects empty");
     if w.anchor_proof.indices.len() != 1 {
         return Err(AnchorError::ProofShape {
             got: w.anchor_proof.indices.len(),

@@ -39,6 +39,17 @@ risc0_zkvm::guest::entry!(main);
 /// set it `false`, but the mainnet floor argument (§6) requires E4 present.
 const REQUIRE_E4: bool = true;
 
+/// F3 pinned deposit-recognition image constants. These are **deployment-
+/// specific** — the deployed vault address's `ergoTree` bytes and the USE token
+/// id (derived from the `VaultSpec`, `bridge-tools/src/vault_epoch.rs`), the same
+/// values the node's `VaultWatch` is configured with. They MUST be pinned at the
+/// cut before any real peg-in can settle. F3 fails CLOSED against a wrong value
+/// (a non-matching tree/token rejects every peg-in as unbacked), so a placeholder
+/// is safe for a pre-cut / no-peg-in devnet image but blocks real mints until set.
+// TODO(cut): replace with the deployed vault tree bytes and USE token id.
+const PINNED_VAULT_TREE_BYTES: &[u8] = &[];
+const PINNED_USE_TOKEN_ID: [u8; 32] = [0u8; 32];
+
 fn main() {
     // §6 cond. 1: E4 is mandatory on the mainnet image — assert require_e4
     // unconditionally. Without the `aux-pow` feature the guest binds no anchor,
@@ -77,7 +88,7 @@ fn main() {
     let tip_id_prev = witness.tip_id_prev;
     let ergo_ref_id = witness.ergo_ref_id;
     let counter_next = witness.counter_next;
-    let result = verify_epoch(&witness).expect("epoch-validity statement must hold");
+    let mut result = verify_epoch(&witness).expect("epoch-validity statement must hold");
     let c_epoch = env::cycle_count();
     env::log(&alloc::format!("CYCLES epoch_validity={}", c_epoch - c_verify));
 
@@ -116,9 +127,34 @@ fn main() {
         // and secures the §6 Ergo-hashrate fabrication floor.
         verify_anchor_linkage_min_depth(&anchor, &ergo_ref_id, &anchored_hn_id, A_MIN)
             .expect("canonical-Ergo anchor linkage at depth >= A_MIN must hold");
+        let c_e4 = env::cycle_count();
+        env::log(&alloc::format!("CYCLES anchor_e4={}", c_e4 - c_e2));
+
+        // ---- F3: peg-in backing — every suffix peg-in mint is backed by a
+        // real, >=PEGIN_CONFIRMATIONS-buried Ergo deposit on the SAME canonical
+        // ergo_ref, minted at most once ever. Folds each deposit's
+        // one-mint-ever key into R6 on top of the F6c nullifiers, so the journal
+        // commits the peg-in-inclusive settled root.
+        use aegis_engine::epoch::aux_wire::PegInBackingWitnessWire;
+        use aegis_engine::epoch::pegin::{verify_pegin_backing, DepositParams, PEGIN_CONFIRMATIONS};
+        let backing_wire: PegInBackingWitnessWire = env::read();
+        let backing = backing_wire.into_witness();
+        let deposit_params = DepositParams {
+            vault_tree_bytes: PINNED_VAULT_TREE_BYTES.to_vec(),
+            use_token_id: PINNED_USE_TOKEN_ID,
+            pegin_confirmations: PEGIN_CONFIRMATIONS,
+        };
+        result.settled_root_out = verify_pegin_backing(
+            &witness.blocks,
+            &backing,
+            &ergo_ref_id,
+            result.settled_root_out,
+            &deposit_params,
+        )
+        .expect("every peg-in must be backed by a real, buried, uniquely-minted deposit");
         env::log(&alloc::format!(
-            "CYCLES anchor_e4={}",
-            env::cycle_count() - c_e2
+            "CYCLES pegin_backing_f3={}",
+            env::cycle_count() - c_e4
         ));
     }
 
