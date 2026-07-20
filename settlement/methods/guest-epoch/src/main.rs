@@ -32,7 +32,22 @@ use risc0_zkvm::guest::env;
 
 risc0_zkvm::guest::entry!(main);
 
+/// D-F5 §6 condition 1: whether E4 (canonical-Ergo anchor binding) is MANDATORY
+/// on this image. The mainnet image pins it `true`; it is asserted
+/// unconditionally in `main` (outside the `aux-pow` cfg), so an image built
+/// without E4 cannot settle. A devnet mechanism-demonstration image (§6.5) may
+/// set it `false`, but the mainnet floor argument (§6) requires E4 present.
+const REQUIRE_E4: bool = true;
+
 fn main() {
+    // §6 cond. 1: E4 is mandatory on the mainnet image — assert require_e4
+    // unconditionally. Without the `aux-pow` feature the guest binds no anchor,
+    // so a required-E4 image built that way must refuse to run.
+    assert!(
+        !REQUIRE_E4 || cfg!(feature = "aux-pow"),
+        "require_e4: mainnet image must bind E4 (build with the `aux-pow` feature)"
+    );
+
     // ---- private inputs (env::read order; the host writes exactly this) ----
     let root_bytes: Vec<u8> = env::read();
     let witness_wire: EpochWitnessWire = env::read();
@@ -69,7 +84,7 @@ fn main() {
     // ---- 4+5. E2 aux-PoW share verify + E4 anchor linkage (priced fabrication) ----
     #[cfg(feature = "aux-pow")]
     {
-        use aegis_engine::epoch::anchor::verify_anchor_linkage;
+        use aegis_engine::epoch::anchor::{verify_anchor_linkage_min_depth, A_MIN};
         use aegis_engine::epoch::aux_wire::{AnchorWitnessWire, ShareWitnessWire};
         use aegis_engine::epoch::header_id::header_id;
         use aegis_engine::epoch::share::verify_share;
@@ -96,8 +111,11 @@ fn main() {
         let anchor_wire: AnchorWitnessWire = env::read();
         let anchor = anchor_wire.into_witness();
         let anchored_hn_id = header_id(witness.chain_id, witness.blocks.last().unwrap());
-        verify_anchor_linkage(&anchor, &ergo_ref_id, &anchored_hn_id)
-            .expect("canonical-Ergo anchor linkage must hold");
+        // F5: the tip's anchor must be buried >= A_MIN canonical Ergo blocks —
+        // this is what turns "one Ergo block" into "A_MIN settled Ergo blocks"
+        // and secures the §6 Ergo-hashrate fabrication floor.
+        verify_anchor_linkage_min_depth(&anchor, &ergo_ref_id, &anchored_hn_id, A_MIN)
+            .expect("canonical-Ergo anchor linkage at depth >= A_MIN must hold");
         env::log(&alloc::format!(
             "CYCLES anchor_e4={}",
             env::cycle_count() - c_e2
