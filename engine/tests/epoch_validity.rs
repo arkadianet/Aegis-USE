@@ -7,8 +7,10 @@
 
 use aegis_engine::burn::burn_cm_expected;
 use aegis_engine::epoch::digest::epoch_spend_root;
-use aegis_engine::epoch::header_id::header_id;
-use aegis_engine::epoch::types::{coinbase_amount, peg_fee, FLAT_FEE, PEGOUT_DELAY};
+use aegis_engine::epoch::header_id::{header_id, header_id_from_fields, SeamHeader};
+use aegis_engine::epoch::types::{
+    coinbase_amount, peg_fee, FLAT_FEE, GENESIS_HEADER_ID, PEGOUT_DELAY,
+};
 use aegis_engine::epoch::verify::{verify_epoch, EpochError, EpochWitness};
 use aegis_engine::epoch::{epoch_journal, PegIn, PegOut, SpendPublics, SuffixBlock};
 use aegis_engine::merkle::Frontier;
@@ -37,8 +39,9 @@ struct Builder {
     all_spends: Vec<SpendPublics>,
     counter: u32,
     tip_id_prev: [u8; 32],
-    pot_before: u64,
-    shielded_before: u64,
+    /// The authenticated seam tip (`T_prev`): a length-1, genesis-terminated seam
+    /// standing for a young chain whose sealed tip has the pre-suffix state root.
+    seam_tip: SeamHeader,
 }
 
 /// A peg-out to add: (amount, recipient).
@@ -50,20 +53,38 @@ struct PegSpec {
 impl Builder {
     fn new(pot: u64, shielded: u64, start_height: u64) -> Self {
         let frontier = Frontier::new();
+        // The sealed tip `T_prev`: state_root == the pre-suffix (empty) frontier
+        // root (the weld), parent == the genesis sentinel (a young chain), and
+        // pot/shielded == the pre-suffix totals the guest derives back.
+        let seam_tip = SeamHeader {
+            height: start_height - 1,
+            prev_header_id: GENESIS_HEADER_ID,
+            prev_root: Frontier::new().root(),
+            state_root: Frontier::new().root(),
+            timestamp_ms: 1_760_000_000_000 + (start_height - 1) * 15_000,
+            sc_nbits: 0x2000_0100,
+            miner_owner: digest(7),
+            coinbase_amount: 0,
+            coinbase_cm: digest(0),
+            coinbase_is_reward: true,
+            pot_after: pot,
+            shielded_after: shielded,
+            body_cm: digest(0),
+        };
+        let tip_id = header_id_from_fields(CHAIN_ID, &seam_tip);
         Self {
             chain_id: CHAIN_ID,
             frontier,
             pot,
             shielded,
             height: start_height,
-            prev_header_id: [0u8; 32],
+            prev_header_id: tip_id,
             miner_owner: digest(7),
             blocks: Vec::new(),
             all_spends: Vec::new(),
             counter: 1000,
-            tip_id_prev: [0u8; 32],
-            pot_before: pot,
-            shielded_before: shielded,
+            tip_id_prev: tip_id,
+            seam_tip,
         }
     }
 
@@ -202,9 +223,7 @@ impl Builder {
             blocks: self.blocks.clone(),
             frontier_bytes: postcard::to_allocvec(&Frontier::new()).unwrap(),
             tip_id_prev: self.tip_id_prev,
-            pot_before: self.pot_before,
-            shielded_before: self.shielded_before,
-            seam_roots: vec![],
+            seam: vec![self.seam_tip.clone()],
             settled_root_in: empty_settled_root(),
             settled_paths: paths,
             spend_root_digest: epoch_spend_root(&self.all_spends),
@@ -346,12 +365,77 @@ fn broken_header_chain_dies() {
 
 #[test]
 fn wrong_sealed_tip_dies() {
+    // Tampering R7 breaks the seam's very first check: seam[0]'s recomputed id no
+    // longer equals the sealed tip the vault pinned.
     let b = honest_builder();
     let mut w = b.finish(1);
     w.tip_id_prev[0] ^= 1;
+    assert_eq!(verify_epoch(&w), Err(EpochError::SeamTipMismatch));
+}
+
+// ----- F1: the authenticated seam cannot be forged -----
+
+#[test]
+fn private_seam_state_root_dies_at_the_seam_tip() {
+    // THE F1 headline: a fabricator wants a private-tree root in the anchor
+    // window, so they doctor seam[0].state_root to a value that would admit their
+    // fake spends. But seam[0] is authenticated — its id must equal R7 — so any
+    // change to a seam field makes header_id_from_fields(seam[0]) != tip_id_prev.
+    // Unbounded value injection via a private anchor is closed at its root.
+    let b = honest_builder();
+    let mut w = b.finish(1);
+    w.seam[0].state_root[0] += F::ONE;
     assert_eq!(
         verify_epoch(&w),
-        Err(EpochError::HeaderChainBroken { i: 0 })
+        Err(EpochError::SeamTipMismatch),
+        "a private-tree seam root cannot chain to the vault's sealed tip (R7)"
+    );
+}
+
+#[test]
+fn seam_not_welded_to_the_frontier_dies() {
+    // The seam authenticates the window; the weld ties its newest root to the
+    // suffix's starting frontier. Break the weld (block[0].prev_root moved off the
+    // tip's state root, seam kept consistent) and it dies at the weld — but here
+    // the frontier binding fires first since prev_root is checked against the
+    // frontier root too; either way an unwelded seam cannot settle.
+    let b = honest_builder();
+    let mut w = b.finish(1);
+    w.blocks[0].prev_root[0] += F::ONE;
+    assert!(matches!(
+        verify_epoch(&w),
+        Err(EpochError::PrevRootMismatch) | Err(EpochError::SeamWeldBroken)
+    ));
+}
+
+// ----- F6a: suffix heights must be continuous with the settled chain -----
+
+#[test]
+fn height_jump_dies_at_height_discontinuity() {
+    // A fabricator claims a low height (e.g. to hit the DAA bootstrap floor) or
+    // any discontinuous height. F6a anchors block[0] to seam[0].height + 1.
+    let b = honest_builder();
+    let mut w = b.finish(1);
+    w.blocks[0].height += 7;
+    assert_eq!(
+        verify_epoch(&w),
+        Err(EpochError::HeightDiscontinuity { i: 0 }),
+        "suffix heights must be continuous with the authenticated seam tip"
+    );
+}
+
+// ----- F6f: timestamps must be monotone across the seam and suffix -----
+
+#[test]
+fn regressing_timestamp_dies() {
+    let b = honest_builder();
+    let mut w = b.finish(1);
+    // Block 1's stamp regresses below block 0's.
+    w.blocks[1].timestamp_ms = w.blocks[0].timestamp_ms - 1;
+    assert_eq!(
+        verify_epoch(&w),
+        Err(EpochError::TimestampRegressed { i: 1 }),
+        "suffix timestamps must be non-decreasing (the only in-guest clock rule)"
     );
 }
 
