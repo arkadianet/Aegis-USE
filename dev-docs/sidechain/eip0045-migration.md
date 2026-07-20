@@ -5,11 +5,21 @@ Do **not** modify the opcode, guests, bridge-tools, vault, or the node until ite
 (the Rust node opcode) is ready to cut over with the rest. The four consensus-coupled
 parts migrate **together**.
 
-Source of truth for the target interface: the migration brief
-(`c9bd4897-AEGISEIP0045MIGRATIONBRIEF.md`). Reference impl: sigmastate PR #1116
-(`a-shannon/sigmastate-interpreter@eip-0045-stark-verifier`) — not reachable from this
-environment; all target-state claims below are grounded in the brief, all current-state
-claims in `file:line` from the live tree.
+Source of truth for the target interface: **the reference implementation itself**, now
+cloned locally and verified — sigmastate @ `9372697` and eips @ `777b9c2`
+(a-shannon). The migration brief (`c9bd4897-AEGISEIP0045MIGRATIONBRIEF.md`) is
+**secondary**: §6 below verifies every target-state claim against the actual Scala impl,
+its byte-pinning KAT tests, and the EIP spec. Where the brief and the reference disagree,
+the reference wins and §6 records the correction. All current-state claims are
+`file:line` from the live tree; all target-state claims now cite
+`sigmastate:<path>:<line>` / `eips:eip-0045.md:<section>`.
+
+> **Verification verdict (see §6): the brief is substantially correct.** Every byte-count,
+> endianness, field order, and headline constant it states is confirmed byte-for-byte
+> against the KATs. The one material fix a cutover must not miss: the stock **`profileId`
+> is `23c4…d383`** (a BLAKE2b-256 digest of the 458-byte profile manifest), which is a
+> *different* 32-byte value from the inner control root `a54d…1f56` the brief lists — the
+> two are distinct profile constants with distinct roles.
 
 ---
 
@@ -109,8 +119,14 @@ same register reads must feed the reconstructed `applicationPayload` after re-fr
   BLAKE2b-256(SELF.propositionBytes)`, and `applicationPayload`; require the proof's RISC0
   claim (SHA-256 tagged struct) to equal the reconstructed statement; enforce `programId`
   against the proof's actual imageId. Fixed **prepaid** cost charged fully upfront before any
-  proof-sized work; stock profile (BabyBear/Ext4/Poseidon2, `RECURSION_PO2=18`, accepts po2
-  15–22). Mirror #1116 `VerifyStark.eval` / `Risc0StockProfileRuntime`.
+  proof-sized work; stock profile (BabyBear/Ext4/Poseidon2, outer/recursion po2 fixed at
+  **18**, inner segment/lift po2 **15–22** — see §6 for the two-axis nuance). Mirror the
+  reference `VerifyStark.eval` (`sigmastate:data/shared/src/main/scala/sigma/ast/VerifyStark.scala:37-107`)
+  / `Risc0RawSealVerifier`. Confirmed 4-child order there: `proofChunks, applicationPayload,
+  programId, profileId`; opcode `0xB9`; script version 4 gate; cost added as two upfront
+  `FixedCost` charges (`snapshot.dispatchJit` then `active.fixedJit`) **before** any child
+  is evaluated (`VerifyStark.scala:52,69`); `contractId = BLAKE2b-256(SELF.propositionBytes)`
+  computed host-side (`VerifyStark.scala:95-96`).
 - **Encoding change:** drop the `vmType`/`costParams` scalars and the `Payload::Five` arm;
   replace free-form `Journal::new(public_inputs)` with the 159-byte-prefixed
   `ErgoStatementV1` reconstruction + claim-equality gate; replace the `InnerReceipt` bincode
@@ -186,12 +202,22 @@ same register reads must feed the reconstructed `applicationPayload` after re-fr
 - **Now:** `vmType = 3` + `costParams = [35, 16]` scattered across `vault_epoch.rs:97-100`,
   `vault.rs:49-53`, and node cost constants `sigma.rs:231-235`. The verifier hard-codes the
   RISC0 v3.0 profile (`sigma.rs:390`).
-- **Target (brief §"Profile constants"):** a single immutable **stock RISC0 succinct profile
-  id** everywhere (risc0-zkp 3.0.4 / risc0-circuit-recursion 4.0.4; BabyBear/Ext4/Poseidon2;
-  `RECURSION_PO2=18`, accepts po2 15–22; Q=50; control root
-  `a54dc85ac99f851c92d7c96d7318af41dbe7c0194edfcc37eb4d422a998c1f56`; inner root over 27
-  recursion control IDs, 10 terminal IDs; 12,359-op recursion constraint table). Fixed prepaid
-  cost owned by the profile.
+- **Target (verified against the reference; see §6):** a single immutable **stock RISC0
+  succinct profileId** everywhere. **The profileId is
+  `23c4a123ffb33a1c8db89436fe0e7972bd8e4e289459ee5fd71be5440607d383`** — the frozen "B3"
+  value, computed as `BLAKE2b-256(ASCII("Ergo.StarkProfileId.v1") ‖ 0x00 ‖ u32le(458) ‖
+  manifest[458])` (`sigmastate:core/shared/src/main/scala/sigma/stark/profile/Risc0ProfilePackageLoader.scala:178-190`;
+  KAT `Risc0ProfilePackageLoaderSpec.scala:170-171`; used as the profileId in the statement
+  KAT `ErgoStarkStatementSpec.scala:40-51`). This is the value that goes in the 4th
+  `verifyStark` child and at statement offset 59.
+  Profile crypto constants (RISC Zero SDK **3.0.5** / risc0-zkp **3.0.4** /
+  risc0-circuit-recursion **4.0.4** — `eips:eip-0045/profile-v1/README.md:57-58`;
+  BabyBear/Ext4/Poseidon2; outer recursion po2 **18** fixed, inner lift po2 **15–22**;
+  Q=**50** FRI queries; **12,359**-op recursion constraint table; **inner control root
+  `a54dc85ac99f851c92d7c96d7318af41dbe7c0194edfcc37eb4d422a998c1f56`** — NOT the profileId;
+  it commits to 27 upstream recursion control IDs; **10** pairwise-distinct terminal control
+  IDs). Fixed prepaid cost owned by the profile (`dispatchJit + fixedJit`, final numbers
+  are EIP blocker **B5** — see §5.6).
 - **Encoding change:** introduce a `STOCK_PROFILE_ID: [u8; 32]` constant (shared engine/guest/
   vault so they cannot drift, like `EPOCH_JOURNAL_TAG` at `engine/src/epoch/mod.rs:48`); pass
   it as the 4th `verifyStark` child; delete `VM_TYPE_RISC0` / `COST_PARAMS`; on the node,
@@ -247,6 +273,24 @@ carried through byte-identically — the re-framing cannot silently drop it. The
 the frame adds — `contractId = BLAKE2b-256(vault propositionBytes)` and host `chainDomainId`
 — is strictly additional (it fixes L-1's "opcode binds no box" at the statement level).
 
+> **This entire layout is byte-for-byte CONFIRMED against the reference** (see §6). The
+> 26-byte tag, the `0x01` version, the field order (chain→profile→program→contract), the
+> `u32le` payload-length endianness, and the **159-byte** prefix all match the encoder
+> `Risc0ClaimBuilder.encodeStatement` (`sigmastate:core/shared/src/main/scala/sigma/stark/profile/ErgoStarkStatement.scala:195-216`)
+> and are pinned by the KAT `ErgoStarkStatementSpec.scala:11-23` (196-byte vector) and the
+> offset test `:111-128`. Two facts worth carrying into the guest/opcode work:
+>
+> 1. **The guest commits the *whole* `ErgoStatementV1` (prefix + payload), not just the
+>    payload** (`env::commit_slice(statement)`, `eips:eip-0045.md §5:312-318`). The opcode's
+>    expected RISC0 claim is a SHA-256 tagged struct whose journal digest is
+>    `SHA-256(ErgoStatementV1 bytes)` (`ErgoStarkStatement.scala:162,184-192`). So "commit
+>    the AEGISPV1 bytes as payload" is right, but the guest's `env::commit` target is the
+>    full framed statement.
+> 2. **There is a hard payload cap: 16,384 bytes** (max statement 16,543), enforced both at
+>    profile load and in the opcode (`payload.length > active.maxApplicationPayloadBytes →
+>    false`, `VerifyStark.scala:75`; `eips:eip-0045.md:296-297`). Aegis's N≤16 entries fit
+>    with wide margin, but the cut must not exceed it (resolves §5.7).
+
 ---
 
 ## 4. Sequencing / boundaries
@@ -279,39 +323,143 @@ Until then: **the working devnet stays on the 5-child interface.** Do not partia
 
 ---
 
-## 5. Open questions for the EIP author (a-shannon)
+## 5. Open questions — resolved against the reference (sigmastate @ 9372697, eips @ 777b9c2)
 
-1. **`chainDomainId` source & value.** What exactly is the 32-byte `chainDomainId` — Ergo
-   mainnet genesis header id? A domain-separation constant? For Aegis it must be a fixed,
-   host-supplied, non-spoofable value. What does a **merge-mined sidechain / devnet** supply
-   here — the Ergo chain it's anchored to, or its own? This directly affects the E4 anchor
-   design (`vault_epoch.rs:54-67`), which already reads `CONTEXT.headers` from the Ergo chain.
-2. **`contractId` hash.** Confirm `contractId = BLAKE2b-256(SELF.propositionBytes)` uses the
-   *spending* input's propositionBytes (our vault at `INPUTS(0)`), and that a P2S vault tree
-   (version-0, sizeless, constants inline — `vault_epoch.rs:484-492`) hashes the bytes the
-   contract expects. Any ErgoTree-header normalization before hashing?
-3. **Raw seal extraction API.** What is the exact call that yields the 222,668-byte raw
-   succinct seal from a risc0 3.0.4 succinct receipt (vs `bincode::serialize(&receipt.inner)`
-   today)? Confirm the `[65535,65535,65535,26063]` partition is the canonical one the decoder
-   expects and that word-vs-byte ordering matches.
-4. **po2 window vs Aegis proving.** Aegis currently proves at a specific PO2 (see the PO2-env
-   finding — some runs were PO2=20 not 21). Confirm any AEGISPV1 epoch proof landing in po2
-   15–22 with `RECURSION_PO2=18` normal-lift is accepted, and that `AggParams::default()`
-   (the recursion tower, `vault_epoch.rs:102-118`) is compatible with the stock profile's
-   inner root (27 recursion / 10 terminal control IDs).
-5. **~95-bit composed soundness — documented decision input.** The brief states the profile is
-   ~95 bits composed (conjectured/model-dependent, below 128). For a real-value bridge this is
-   a **risk-acceptance decision**, not a bug — but Aegis should record it and decide whether a
-   value cap / additional economic bound is warranted at the mainnet cut. Is a higher-security
-   profile on the roadmap, or is 95-bit the intended mainnet floor?
-6. **Fixed cost calibration.** The immutable prepaid charge is calibrated by the EIP author
-   (~11.8 ms Rust / ~59–65 ms JVM). Our node constant is provisional 150k JIT
-   (`sigma.rs:231`, undercharges relative to the brief's earlier "12–30× underpriced" note).
-   Publish the final per-profile fixed cost so we replace the `BASE+Q*..` model exactly.
-7. **Multi-withdrawal in one statement.** Aegis settles N≤16 withdrawals per epoch release
-   (entries list in the payload). The `ErgoStatementV1` `applicationPayload` is opaque/variable
-   to the opcode, so this should be fine — confirm there is no implicit payload-size cap in the
-   profile beyond the tx/block size limits.
+The local reference resolves most of these outright. **RESOLVED** items are struck with the
+answer inline; the two that remain genuinely **OPEN** are the ones a-shannon has not frozen
+yet (cost numbers) or that live on the Rust prover side (exact seal-extraction call).
+
+1. ~~**`chainDomainId` source & value.**~~ **RESOLVED.** `chainDomainId` = the raw 32 bytes
+   from **Base16-decoding the height-1 genesis `Header.id`** in canonical Ergo byte order —
+   not UTF-8 hex, not state digest/AVL root, not network prefix
+   (`eips:eip-0045.md §4:246-249`). It is host-derived from the trusted node capability
+   (`snapshot.chainDomainId`, `VerifyStark.scala:99`) and scripts MUST NOT override it
+   (`eip-0045.md:261-262`). **Per-network**: each chain pins its *own* genesis id; the EIP
+   assigns no generic "testnet" id (`eip-0045.md:257-259`). Ergo **mainnet =
+   `b0244dfc267baca974a4caee06120321562784303a8a688976ae56170e4d175b`** (`eip-0045.md:251-255`;
+   this is exactly the `chainDomainId` used in the final-B3 statement KAT
+   `ErgoStarkStatementSpec.scala:42`). *For Aegis:* the `verifyStark` box lives on the Ergo
+   chain, so `chainDomainId` is the **Ergo network's** genesis id (mainnet value above; on the
+   stark devnet, that devnet's own genesis id pinned in its activation package) — **not** a
+   sidechain-supplied value. Consistent with the E4 anchor already reading Ergo
+   `CONTEXT.headers` (`vault_epoch.rs:54-67`).
+2. ~~**`contractId` hash.**~~ **RESOLVED.** `contractId = BLAKE2b-256(SELF.propositionBytes)`
+   of the **spending input** (`E.context.SELF.propositionBytes`, `VerifyStark.scala:95-96`;
+   `eip-0045.md §5:291`). It hashes the **raw** propositionBytes — no ErgoTree-header
+   normalization (`ProfileBlake2b256` is plain BLAKE2b-256; its `abc` vector `bddd813c…` and
+   an 85-byte proposition vector are KAT-pinned, `ProfileBlake2b256Spec.scala:52-64`).
+   It binds the *contract*, not the box instance — so Aegis's per-box binding (root chain,
+   `SELF.id`) must keep living in `applicationPayload`, which it does (`eip-0045.md:299-303`).
+3. **(mostly RESOLVED)** **Raw-seal partition & word order — CONFIRMED**; the exact Rust
+   extraction call is the only residual. The `[65535,65535,65535,26063]` partition is *the*
+   canonical one (`RawSealV1Decoder.CanonicalChunkLengths`, every KAT uses it), total
+   **222,668** bytes = **55,667** little-endian u32 words, word 32 = literal outer po2 `18`,
+   even words 0..14 = inner control root (Montgomery-decoded, odd padding must be raw 0),
+   words 16..31 = claim-digest u16 halfwords (`RawSealV1Decoder.scala:114-190`). What the
+   Scala reference does **not** pin is the Rust risc0 3.0.5 API call that yields those 222,668
+   bytes from a succinct receipt (replacing `bincode::serialize(&receipt.inner)`); that stays
+   a prover-side task, but the *target bytes* are now fully specified.
+4. **(mostly RESOLVED)** **po2 window — CONFIRMED 15–22; `AggParams` compat is prover-side.**
+   The profile's 8 normal-lift terminal controls carry parameters `15..22` (loader:
+   `FirstSegmentPo2=15 + i`, `Risc0ProfilePackageLoader.scala:35,290-297`); real seals verify
+   at po2 15 and po2 16 (`Risc0RawSealVerifierE2ESpec.scala:186`, `ArkadiaIndependentRawSealKatSpec.scala:100-101`).
+   Soundness is computed "at the largest accepted segment po2 22 and recursion po2 18"
+   (`eip-0045-cryptographic-rationale.md:480`). So any AEGISPV1 proof landing in **15–22** is
+   accepted, and Aegis's PO2=20/21 runs are inside the window. Whether `AggParams::default()`
+   emits a seal in that exact shape is a Rust-prover check, not something the Scala reference
+   can settle.
+5. **(RESOLVED as documented decision input)** **~95-bit composed soundness.** Confirmed:
+   largest accepted segment **95.30 bits**, recursion 99.76, union-bound composition **95.24
+   bits**, headline "**about 95 conjectured classical bits** under that specific toy model …
+   not a proven lower bound" (`eip-0045-cryptographic-rationale.md:473-489`). The EIP is
+   explicit that this is an **interoperability profile, not a 128-bit custody profile**, and
+   that "applications securing values that require a stronger target should not infer one from
+   the opcode; a hardened future profile would need its own immutable identity…"
+   (`rationale:469,504-508`). **No numeric value cap is prescribed** — so Aegis's own
+   value-cap / economic-bound decision at the mainnet cut is warranted and is squarely a
+   risk-acceptance call, with a hardened profile being explicit future work (a new profileId).
+6. **STILL OPEN (EIP blocker B5).** The fixed prepaid charge is `dispatchJit + fixedJit`,
+   both added upfront before any heavy child (`eip-0045.md §10:1216-1219`; `VerifyStark.scala:52,69`).
+   `fixedJit` is a positive `u32le` inside the exactly-37-byte `CostScheduleFixedV1`
+   (`eip-0045.md:619-642`); `dispatchJit` is generation-versioned in the transition manifest.
+   **The final numeric values are unresolved — EIP blocker B5** ("Final `dispatchJit`,
+   `fixedJit`, schedule bytes, and `scheduleId` from the completed JVM verifier",
+   `eip-0045.md:27`). So our provisional `150k` node constant (`sigma.rs:231`) cannot be
+   replaced with a final number yet — track B5. Mechanism is now exact; only the constant is
+   pending.
+7. ~~**Multi-withdrawal / payload-size cap.**~~ **RESOLVED.** There **is** a cap: the stock
+   profile's `maxApplicationPayloadBytes = 16,384` (`Risc0ProfilePackageLoader.scala:34,281`),
+   enforced in the opcode (`VerifyStark.scala:75`) — max statement 16,543 bytes
+   (`eip-0045.md:296-297`). Aegis's N≤16 entries are far under this, so multi-withdrawal in one
+   statement is fine, but the builder must guarantee the payload never crosses 16,384 bytes.
+
+---
+
+## 6. Reference-impl verification (sigmastate @ `9372697`, eips @ `777b9c2`)
+
+The migration doc's target-state was grounded only in the human brief because the reference
+was unreachable. It is now cloned locally and every target-state claim is checked below
+against the **actual Scala impl + its byte-pinning KAT tests + the EIP spec** (ground truth),
+not the brief. The KAT tests are the strongest oracle (they hard-code exact bytes).
+
+**Bottom line: the brief is substantially correct.** Only one item is a genuine
+*correction* a cutover must not miss (the profileId ≠ inner control root, top of the table);
+the rest are CONFIRMED byte-for-byte, plus several previously-open questions now answered.
+
+### 6.1 Corrections (get these wrong and the cut breaks) — sharpest first
+
+| # | Claim in our doc / brief | Reference says | Cite |
+|---|---|---|---|
+| C1 | Lists control root `a54dc85a…1f56` among profile constants and leaves the 4th-child **`profileId` as an unspecified `STOCK_PROFILE_ID` constant** — the brief's "Profile constants" blurb reads as if `a54dc85a…` is the headline profile identifier. | **`a54dc85a…1f56` is the *inner control root*, not the profileId.** The **profileId** (statement offset 59, the 4th `verifyStark` child) is a **different** 32-byte value: **`23c4a123ffb33a1c8db89436fe0e7972bd8e4e289459ee5fd71be5440607d383`**, the frozen "B3" id = `BLAKE2b-256(ASCII("Ergo.StarkProfileId.v1") ‖ 0x00 ‖ u32le(458) ‖ manifest[458])`. Pinning the wrong one in the child ⇒ profile lookup miss ⇒ `verifyStark` returns false, bridge stuck. | profileId: `Risc0ProfilePackageLoader.scala:178-190,61`; KAT `Risc0ProfilePackageLoaderSpec.scala:170-171,180`; used as profileId in `ErgoStarkStatementSpec.scala:40-51`. inner root: `profile-oracle.tsv:16`, `eips:eip-0045.md:1428-1431` |
+| C2 | "`RECURSION_PO2=18`, accepts po2 15–22" (single axis). | Two distinct po2 axes: the **outer recursion po2 is fixed at 18** (raw seal word 32 must equal 18, else reject), while **15–22 is the inner *segment/lift* po2** (the 8 normal-lift terminal controls, parameters 15..22). Not wrong, but conflated — the "18" and the "15–22" are different quantities. | outer: `RawSealV1Decoder.scala:23,154-156`; lift range: `Risc0ProfilePackageLoader.scala:35,290-297`; soundness note `rationale:480` |
+| C3 | §2(5) implies the fixed cost is a to-be-published single per-profile number to swap for `BASE+Q*..`. | Cost is **two** upfront `FixedCost` charges: generation-scoped `dispatchJit` **+** per-profile `fixedJit` (37-byte `CostScheduleFixedV1`), both added before any child. The **numbers are unfrozen (EIP blocker B5)** — there is no final constant to adopt yet. | `VerifyStark.scala:52,69`; `eip-0045.md:619-642,1216-1219,27` |
+
+### 6.2 Confirmed byte-for-byte (brief was right)
+
+| Target-state claim | Verdict | Reference (file:line / KAT) |
+|---|---|---|
+| Opcode is 4-child `verifyStark(proofChunks, applicationPayload, programId, profileId)`, opcode `0xB9`, script v4 gate, no `vmType`/`costParams` | CONFIRMED ✓ | `VerifyStark.scala:26-31,46,110-126`; `eip-0045.md:205-206` |
+| `contractId` + `chainDomainId` are host-derived (non-spoofable), only `proofChunks/applicationPayload/programId/profileId` are script children | CONFIRMED ✓ | `VerifyStark.scala:51,71,74,77,95-99`; `eip-0045.md:267-270` |
+| Statement tag = `ASCII("Ergo.VerifyStark.Statement")`, **exactly 26 bytes** | CONFIRMED ✓ (KAT hex prefix `4572676f2e566572696679537461726b2e53746174656d656e74` = 26 B) | `ErgoStarkStatement.scala:20`; `ErgoStarkStatementSpec.scala:22,119` |
+| Version byte = `0x01` | CONFIRMED ✓ | `ErgoStarkStatement.scala:18,204`; KAT `:120` |
+| Field order chain → profile → program → contract | CONFIRMED ✓ | `ErgoStarkStatement.scala:206-209`; offset KAT `:121-124` |
+| Payload length = **`u32le`** (little-endian) | CONFIRMED ✓ (len 258 → `02 01 00 00`; 16384 → `00 40 00 00`) | `ErgoStarkStatement.scala:210,274-279`; KAT `:82,125` |
+| Prefix total = **159 bytes** (26+1+32+32+32+32+4) | CONFIRMED ✓ (empty-payload statement length = 159) | `ErgoStarkStatement.scala:17`; KAT `:70` |
+| BLAKE2b-256 for contractId/profileId; SHA-256 for the RISC0 tagged-struct claim | CONFIRMED ✓ (`ProfileBlake2b256("abc")=bddd813c…`; `ProfileSha256("abc")=ba7816bf…`) | `ProfileBlake2b256Spec` / `ProfileSha256Spec:9-10`; `ErgoStarkStatement.scala:185,222-244` |
+| `programId` enforced == proof's actual RISC0 claim/imageId | CONFIRMED ✓ (programId is a `down` child of the ReceiptClaim tagged struct; claim mismatch ⇒ `Left(ClaimMismatch)`) | `ErgoStarkStatement.scala:184-192`; `Risc0RawSealVerifierE2ESpec.scala:189-195` |
+| Raw seal total = **222,668 bytes** | CONFIRMED ✓ | `RawSealV1Decoder.scala:21`; manifest requires it `Risc0ProfilePackageLoader.scala:279` |
+| BabyBear word count = **55,667** | CONFIRMED ✓ | `RawSealV1Decoder.scala:20` |
+| Canonical 4-chunk partition = **`[65535, 65535, 65535, 26063]`** (sum 222,668) | CONFIRMED ✓ | `RawSealV1Decoder.scala:29`; KAT `RawSealV1DecoderSpec.scala:8,18` |
+| Word encoding = **little-endian u32**, exact-size, fail-closed decode | CONFIRMED ✓ (wrong length/total/trailing all typed `Left`; word 32 = literal po2 18) | `RawSealV1Decoder.scala:114-190`; KAT `:27-56,128-133` |
+| Stock profile = BabyBear / **Ext4** / Poseidon2 | CONFIRMED ✓ (ext degree 4; Poseidon2 cells 24/rate 16/out 8) | `Risc0ProfilePackageLoader.scala:420,423-428` |
+| **Q = 50** FRI queries | CONFIRMED ✓ | `Risc0ProfilePackageLoader.scala:431`; `E2ESpec:194` (`FriVerifier.Queries`) |
+| **12,359**-op recursion constraint table | CONFIRMED ✓ (`PolyExtOps = 12359`) | `Risc0ProfilePackageLoader.scala:47,448` |
+| Inner root over **27** upstream recursion control IDs; **10** terminal control IDs | CONFIRMED ✓ (`ControlCount=10`; "commits to the broader upstream set of 27 recursion") | `Risc0ProfilePackageLoader.scala:31`; `eip-0045.md:504,1465` |
+| Versions risc0-zkp **3.0.4** / risc0-circuit-recursion **4.0.4** | CONFIRMED ✓ (+ RISC Zero SDK **3.0.5**) | `eips:eip-0045/profile-v1/README.md:57-58` |
+| Inner control root value `a54dc85a…1f56` | CONFIRMED ✓ (as the *inner control root* — see C1) | `profile-oracle.tsv:16`; `eip-0045.md:1428-1431` |
+| Guest commits the **`ErgoStatementV1` bytes** (payload framed verbatim inside) | CONFIRMED ✓ (`env::commit_slice(statement)`; journal digest = `SHA-256(statement)`) | `eip-0045.md:312-318`; `ErgoStarkStatement.scala:162,184-185` |
+| ~**95-bit** composed soundness (conjectured, below 128) | CONFIRMED ✓ (95.24-bit union-bound composition; "≈95 conjectured classical bits, not a proven bound") | `rationale:473-489` |
+
+### 6.3 Newly-pinned facts the doc did not have
+
+- **Payload cap = 16,384 bytes** (max statement 16,543); enforced at load and in the opcode.
+  `Risc0ProfilePackageLoader.scala:34,281`, `VerifyStark.scala:75`, `eip-0045.md:296-297`.
+- **The stock profileId value** `23c4…d383` (C1) — Aegis's `STOCK_PROFILE_ID` constant.
+- **`chainDomainId` = mainnet genesis id `b0244dfc…175b`** for the Ergo chain (per-network;
+  the opcode runs on Ergo, so Aegis uses the Ergo genesis id). `eip-0045.md:246-259`.
+- **Cost mechanism** (`dispatchJit + fixedJit`, both upfront; final values blocked on B5).
+
+### 6.4 Unverifiable from the reference (out of scope of the Scala impl)
+
+- The exact **Rust risc0 3.0.5 seal-extraction call** that produces the 222,668 bytes
+  (prover-side; the *target bytes* are fully specified, the API is not in the Scala tree).
+- Whether Aegis's `AggParams::default()` emits a seal in the accepted shape (Rust prover).
+- The **final cost constants** (EIP blocker B5 — not yet frozen upstream).
+
+**Confidence:** high that this doc now matches the reference. Every consensus-critical byte
+count, endianness, field order, and headline constant in the brief is confirmed against the
+KATs; the single material correction (C1, profileId vs inner control root) and two
+sharpenings (C2 po2 axes, C3 cost mechanism) are folded into §2/§3/§5 above.
 
 ---
 
