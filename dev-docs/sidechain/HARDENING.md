@@ -60,21 +60,32 @@ demonstration; the crypto-maturity tier gates **real value** only.
 
 ## Tier 3 — cryptographic maturity (the real-value gate)
 
-- [ ] **Epoch-validity fabrication gaps F1-F3 (HIGH — red-review 2026-07-20, MAINNET-BLOCKING).**
-      The epoch-validity mechanism is BUILT (E0 aux-PoW + E1 re-derivation + E2 share-verify
-      + E4 anchor) but does NOT yet actually price fabrication — three real gaps (full detail
-      in `v6-red-review-findings.md`): **F1** anchor-window seam roots are UNAUTHENTICATED
-      (settler names a fake private-tree root → unbounded fake-value injection; the
-      doc-claimed `anchor_seam` auth does NOT exist in code, field is `vec![]`); **F2** E2
-      share-verify checks the block's self-declared `sc_nbits` not the DAA expectation
-      (fabricator mines at difficulty-1 even at mainnet); **F3** peg-in backing not verified
-      in-guest (unbacked mints). Testnet (difficulty-1, honest-settler) collapses these into
-      the accepted residuals; MAINNET requires all three closed. **"Fabrication priced /
-      trustless at the SPV ceiling" is the design INTENT, not the current implementation —
-      do NOT mark epoch-validity done until F1-F3 land.** Fixes: in-guest seam-root auth
-      (walk R7) + bind pot/shielded into the R-register chain; in-guest LWMA/DAA; in-guest
-      peg-in deposit proof. Plus F4 (spend fee declared-not-proof-bound) + F5 (E4 anchor
-      depth ignored) — minor.
+- [x] ~~**Epoch-validity fabrication gaps F1-F3.**~~ **CLOSED + RED-REVIEWED CUT-SAFE
+      (2026-07-20, on main via the v6 merge).** The whole anti-fabrication surface is now
+      priced in-guest (design + security analysis: `epoch-validity-f1-f3-design.md`; the
+      whole-surface hunt expanded the original F1-F3 to 8 fixes): **F1** authenticated seam
+      (header-id hash-walk back to vault R7, induction to pinned genesis; `recent_roots`/
+      `pot_before`/`shielded_before` DERIVED not witnessed; `shielded_after` added as a
+      header field) → private-tree injection dies `SeamTipMismatch`/`AnchorOutOfWindow`;
+      **F2** in-guest LWMA DAA seeded from the authenticated seam, byte-identical port of the
+      node's `next_nbits` → difficulty-1 mining dies `NbitsMismatch`; **F6a** height
+      continuity (closes F2's bootstrap lever); **F6b** distinct-PoW-message dedup, wired
+      into the LIVE guest → share amplification dies `SharedPowMessage`; **F6c** full
+      all-nullifier R6 accumulator (nf0+nf1, every spend) → cross-settlement replay dies
+      `AlreadySettled`; **F3** peg-in backing (tx-Merkle inclusion + box-id recompute +
+      one-mint-ever SMT vs the E4-anchored Ergo chain) → unbacked mints die; **F5** anchor
+      burial ≥ `A_MIN` + mandatory `REQUIRE_E4` → secures the Ergo-hashrate fabrication
+      floor. Node↔guest oracle-parity gates (header-id, DAA, recent-roots window) pass;
+      full workspace green (engine default+aux-pow, node 285, guest ELF cross-compile).
+      **HEADLINE:** merge-mining re-bases the fabrication floor from Aegis-hashrate to
+      ERGO-hashrate (a fake tip must ride a self-mined canonical Ergo block). Remaining are
+      cut-time / mainnet-gate items only, all fail-closed: (i) pin `PINNED_VAULT_TREE_BYTES`
+      / `PINNED_USE_TOKEN_ID` / final `A_MIN` (`TODO(cut)`); (ii) host-side F3 backing-witness
+      generation (`dump_epoch`/`exec-epoch`/`settlement/host`); (iii) MAINNET-gate liveness
+      check — confirm dummy `nf1`s are always distinct across spends (F6c rejects honest
+      settlements otherwise; fails closed, never under-pays); (iv) non-aux-pow images skip
+      backing/DAA but are gated shut by `REQUIRE_E4` on the mainnet image (documented, no
+      mainnet exposure). F4 (spend-fee bind) folded; superseded double-pay entry below.
 - [ ] ~~**Settlement epoch-canonicality / double-pay (red-review 2026-07-19).**~~ Superseded
       by the F1-F3 entry above — epoch-validity IS the fix, but incomplete per F1-F3. Original:
       the settlement guest proves a burn is a leaf of `(prev_root, new_root]` but
