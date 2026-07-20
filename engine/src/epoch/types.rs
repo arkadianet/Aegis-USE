@@ -103,6 +103,12 @@ pub struct SuffixBlock {
     /// allocation block is never inside a settled suffix.
     pub coinbase_is_reward: bool,
     pub pot_after: u64,
+    /// The shielded-pool total AFTER this block (header-committed, D-F1 §1.3a).
+    /// A NEW header field: `pot_after` already pinned the pot; this pins the
+    /// other half of the conservation invariant so that *any* authenticated
+    /// header fixes the full value state. F1's seam derives `shielded_before`
+    /// from `seam[0].shielded_after`, making the injected-value bound exact.
+    pub shielded_after: u64,
 }
 
 impl SuffixBlock {

@@ -173,6 +173,11 @@ pub struct HnBlock {
     /// The pot balance AFTER this block (header-committed; validators recompute
     /// `pot_parent + fees − coinbase` and reject a mismatch).
     pub pot_after: u64,
+    /// The shielded-pool total AFTER this block (header-committed, D-F1 §1.3a).
+    /// Validators recompute it from the conservation replay and reject a
+    /// mismatch — so *every* authenticated header pins the full value state and
+    /// the settlement guest's F1 seam can derive `shielded_before` from it.
+    pub shielded_after: u64,
     /// The merge-mining devnet anchor (monotone across blocks).
     pub anchor: AuxAnchor,
     /// The aux-PoW witness ([`super::auxpow::HnAuxPow`] bytes) binding this
@@ -238,6 +243,8 @@ pub enum HnError {
     BadGenesis,
     #[error("conservation violated: shielded total + pot changed")]
     ConservationViolated,
+    #[error("committed shielded_after does not match the recomputed shielded total")]
+    ShieldedMismatch,
     #[error("peg-in claim reuses an already-minted deposit box id")]
     DuplicatePegIn,
     #[error("peg-in claim is malformed (amount, ciphertext, or commitment)")]
@@ -586,6 +593,14 @@ impl HnState {
             (self.pot, self.shielded_total + amount)
         };
 
+        // The shielded-pool total is header-committed (D-F1 §1.3a): the block's
+        // `shielded_after` must equal the recomputed post-block total, so an
+        // authenticated header pins the value state exactly (the settlement
+        // guest's F1 seam derives `shielded_before` from it).
+        if block.shielded_after != shielded_next {
+            return Err(HnError::ShieldedMismatch);
+        }
+
         // ---- the shielded coinbase note must carry the claimed value ----
         let id = block_id(self.height, &self.tree.root());
         let expected_cm = coinbase_cm_expected(
@@ -794,6 +809,7 @@ mod tests {
             coinbase_ct: mint.ciphertext,
             coinbase_is_reward: true,
             pot_after: st.pot() - amount,
+            shielded_after: st.shielded_total() + amount,
             anchor: AuxAnchor::genesis(),
             aux_pow: None,
         }
@@ -901,6 +917,7 @@ mod tests {
             coinbase_ct: mint.ciphertext,
             coinbase_is_reward: true,
             pot_after: st.pot() - amount,
+            shielded_after: 0, // over-claim fails at CoinbaseMismatch (before the shielded check)
             anchor: AuxAnchor::genesis(),
             aux_pow: None,
         };
@@ -935,6 +952,7 @@ mod tests {
             coinbase_ct: mint.ciphertext,
             coinbase_is_reward: true,
             pot_after: 0,
+            shielded_after: 0, // fails at CoinbaseMismatch (before the shielded check)
             anchor: AuxAnchor::genesis(),
             aux_pow: None,
         };
@@ -967,6 +985,7 @@ mod tests {
             coinbase_ct: mint.ciphertext,
             coinbase_is_reward: true,
             pot_after: st.pot(),
+            shielded_after: 0, // under-claim fails at CoinbaseMismatch (before the shielded check)
             anchor: AuxAnchor::genesis(),
             aux_pow: None,
         };
@@ -1076,6 +1095,7 @@ mod tests {
             coinbase_ct: m.ciphertext,
             coinbase_is_reward: false,
             pot_after: 50,
+            shielded_after: 100, // genesis grows the pool by the pinned allocation
             anchor: AuxAnchor::genesis(),
             aux_pow: None,
         };
@@ -1108,6 +1128,23 @@ mod tests {
         assert!(matches!(
             st.apply_block(&bad, &circuit),
             Err(HnError::PotMismatch)
+        ));
+    }
+
+    #[test]
+    fn wrong_shielded_after_is_rejected() {
+        // The shielded-pool total is header-committed (D-F1 §1.3a): a block whose
+        // `shielded_after` does not equal the recomputed post-block total is
+        // consensus-invalid, so no authenticated header can misstate the value
+        // state the settlement guest's F1 seam reads back.
+        let circuit = SpendCircuit::new();
+        let miner = addr(b"m");
+        let mut st = HnState::new(params_pot(1_000));
+        let mut bad = reward_block(&st, &miner);
+        bad.shielded_after += 1;
+        assert!(matches!(
+            st.apply_block(&bad, &circuit),
+            Err(HnError::ShieldedMismatch)
         ));
     }
 
@@ -1153,6 +1190,7 @@ mod tests {
             coinbase_ct: m1.ciphertext,
             coinbase_is_reward: false,
             pot_after: 50,
+            shielded_after: 0, // wrong destination fails at BadGenesis (before the shielded check)
             anchor: AuxAnchor::genesis(),
             aux_pow: None,
         };
@@ -1179,6 +1217,7 @@ mod tests {
             coinbase_ct: m2.ciphertext,
             coinbase_is_reward: false,
             pot_after: 50,
+            shielded_after: 0, // wrong amount fails at BadGenesis (before the shielded check)
             anchor: AuxAnchor::genesis(),
             aux_pow: None,
         };
@@ -1205,6 +1244,7 @@ mod tests {
             coinbase_ct: m3.ciphertext,
             coinbase_is_reward: false,
             pot_after: 50,
+            shielded_after: 100, // the pinned allocation applies and grows the pool by 100
             anchor: AuxAnchor::genesis(),
             aux_pow: None,
         };

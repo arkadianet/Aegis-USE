@@ -247,6 +247,7 @@ fn build_honest(params: &AggParams) -> HonestEpoch {
     let mut blocks: Vec<SuffixBlock> = Vec::new();
     let mut running = pre_frontier.clone();
     let mut pot = pot_before;
+    let mut shielded = shielded_before;
     let mut prev_header_id = [0u8; 32];
     let mut height = START_HEIGHT;
 
@@ -274,6 +275,8 @@ fn build_honest(params: &AggParams) -> HonestEpoch {
         let _ = running.append(coinbase_cm);
         let state_root = running.root();
         let pot_after = pot + fees + pegout_fees - cb;
+        let burn_total: u64 = pegouts.iter().map(|p| p.amount + peg_fee(p.amount)).sum();
+        let shielded_after = shielded + cb - fees - burn_total;
         let block = SuffixBlock {
             height,
             prev_header_id,
@@ -289,10 +292,12 @@ fn build_honest(params: &AggParams) -> HonestEpoch {
             coinbase_cm,
             coinbase_is_reward: true,
             pot_after,
+            shielded_after,
         };
         prev_header_id = header_id(CHAIN_ID, &block);
         blocks.push(block);
         pot = pot_after;
+        shielded = shielded_after;
         height += 1;
     }
 
@@ -305,6 +310,7 @@ fn build_honest(params: &AggParams) -> HonestEpoch {
         let _ = running.append(coinbase_cm);
         let state_root = running.root();
         let pot_after = pot - cb;
+        let shielded_after = shielded + cb;
         let block = SuffixBlock {
             height,
             prev_header_id,
@@ -320,10 +326,12 @@ fn build_honest(params: &AggParams) -> HonestEpoch {
             coinbase_cm,
             coinbase_is_reward: true,
             pot_after,
+            shielded_after,
         };
         prev_header_id = header_id(CHAIN_ID, &block);
         blocks.push(block);
         pot = pot_after;
+        shielded = shielded_after;
         height += 1;
     }
 

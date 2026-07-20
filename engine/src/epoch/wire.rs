@@ -89,6 +89,7 @@ pub struct SuffixBlockWire {
     pub coinbase_cm: LimbDigest,
     pub coinbase_is_reward: bool,
     pub pot_after: u64,
+    pub shielded_after: u64,
 }
 
 impl SuffixBlockWire {
@@ -124,6 +125,7 @@ impl SuffixBlockWire {
             coinbase_cm: to_l(&b.coinbase_cm),
             coinbase_is_reward: b.coinbase_is_reward,
             pot_after: b.pot_after,
+            shielded_after: b.shielded_after,
         }
     }
 
@@ -159,6 +161,7 @@ impl SuffixBlockWire {
             coinbase_cm: to_d(&self.coinbase_cm),
             coinbase_is_reward: self.coinbase_is_reward,
             pot_after: self.pot_after,
+            shielded_after: self.shielded_after,
         }
     }
 }

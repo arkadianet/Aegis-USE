@@ -29,6 +29,7 @@ struct Builder {
     chain_id: u32,
     frontier: Frontier,
     pot: u64,
+    shielded: u64,
     height: u64,
     prev_header_id: [u8; 32],
     miner_owner: Digest,
@@ -53,6 +54,7 @@ impl Builder {
             chain_id: CHAIN_ID,
             frontier,
             pot,
+            shielded,
             height: start_height,
             prev_header_id: [0u8; 32],
             miner_owner: digest(7),
@@ -126,10 +128,19 @@ impl Builder {
             pegout_fees += peg_fee(p.amount);
         }
         let mut pegin_fees = 0u64;
+        let mut pegin_inflow = 0u64;
         for pi in &pins {
             pegin_fees += peg_fee(pi.amount);
+            pegin_inflow += pi.amount;
+        }
+        let mut burn_total = 0u64;
+        for p in &pos {
+            burn_total += p.amount + peg_fee(p.amount);
         }
         let pot_after = self.pot + fees + pegout_fees + pegin_fees - cb;
+        // Conservation replay (mirror of `verify_epoch`): shielded pool grows by
+        // the coinbase + net peg-in, shrinks by fees + burned value.
+        let shielded_after = self.shielded + cb + (pegin_inflow - pegin_fees) - fees - burn_total;
 
         let bid = aegis_engine::epoch::header_id::block_id(self.height, &prev_root);
         let coinbase_cm = coinbase_cm_expected(&self.miner_owner, cb, &bid);
@@ -166,11 +177,12 @@ impl Builder {
             coinbase_cm,
             coinbase_is_reward: true,
             pot_after,
+            shielded_after,
         };
         self.prev_header_id = header_id(self.chain_id, &block);
         self.blocks.push(block);
         self.pot = pot_after;
-        // shielded tracked loosely (conservation is algebraic); keep it large.
+        self.shielded = shielded_after;
         self.height += 1;
     }
 

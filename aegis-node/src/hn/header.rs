@@ -111,6 +111,7 @@ fn to_engine_block(block: &HnBlock) -> EngineSuffixBlock {
         coinbase_cm: limbs_to_digest(&block.coinbase_cm),
         coinbase_is_reward: block.coinbase_is_reward,
         pot_after: block.pot_after,
+        shielded_after: block.shielded_after,
     }
 }
 
@@ -152,6 +153,7 @@ mod tests {
             coinbase_ct: vec![],
             coinbase_is_reward: true,
             pot_after: 999,
+            shielded_after: 1234,
             anchor: AuxAnchor::genesis(),
             aux_pow: None,
         }
@@ -342,6 +344,7 @@ mod tests {
             coinbase_cm: edigest_from(&hn.coinbase_cm),
             coinbase_is_reward: hn.coinbase_is_reward,
             pot_after: hn.pot_after,
+            shielded_after: hn.shielded_after,
         };
 
         assert_eq!(

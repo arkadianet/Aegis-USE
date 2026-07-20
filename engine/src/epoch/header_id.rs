@@ -15,7 +15,7 @@
 //! node↔guest MUST agree or honest blocks fail verification. Self-consistent
 //! within the guest + e2e today; node parity is the cut gate.
 
-use p3_field::{PrimeCharacteristicRing, PrimeField32};
+use p3_field::PrimeCharacteristicRing;
 
 use crate::poseidon::{digest_to_bytes, hash_domain, hash_id_domain, Digest, F};
 use crate::settlement_digest::recipient_commit;
@@ -90,29 +90,84 @@ pub fn body_commitment(block: &SuffixBlock) -> Digest {
     hash_domain(DOMAIN_HN_BODY, &input)
 }
 
-/// The hn **header id**: Poseidon2 over the canonical header fields + the body
-/// commitment, packed to 32 bytes. `chain_id` bound in (cross-chain replay).
-/// The merge-mining anchor is intentionally excluded (one share ⇒ one id).
-pub fn header_id(chain_id: u32, block: &SuffixBlock) -> [u8; 32] {
-    let body = body_commitment(block);
-    let body_limbs: Digest = core::array::from_fn(|i| F::from_u32(body[i].as_canonical_u32()));
+/// A header-only preimage: exactly the fields the [`header_id`] hashes, with the
+/// body already reduced to its commitment (`body_cm`, an *input* — never
+/// recomputed). This is the object F1's authenticated seam walk carries: the
+/// witness supplies a `Vec<SeamHeader>` newest-first, and the guest recomputes
+/// each id via [`header_id_from_fields`] and checks the hash-linked chain to R7.
+///
+/// The field *order* the id hashes is fixed by [`header_id`] (see below), NOT by
+/// this struct's declaration order — the two must stay in lockstep, which is why
+/// [`header_id`] delegates here (one encoding, no drift).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SeamHeader {
+    pub height: u64,
+    pub prev_header_id: [u8; 32],
+    pub prev_root: Digest,
+    pub state_root: Digest,
+    pub timestamp_ms: u64,
+    pub sc_nbits: u32,
+    pub miner_owner: Digest,
+    pub coinbase_amount: u64,
+    pub coinbase_cm: Digest,
+    pub coinbase_is_reward: bool,
+    pub pot_after: u64,
+    pub shielded_after: u64,
+    /// The block's body commitment ([`body_commitment`]) — a witness input for a
+    /// seam header (the seam never consumes the body), recomputed by [`header_id`]
+    /// for a full block. A fabricated `body_cm` simply yields a different id and
+    /// fails the seam's link check.
+    pub body_cm: Digest,
+}
 
+/// The hn **header id** over an explicit header preimage — the single canonical
+/// field sequence. `chain_id` bound in (cross-chain replay); the merge-mining
+/// anchor is intentionally excluded (one share ⇒ one id).
+pub fn header_id_from_fields(chain_id: u32, h: &SeamHeader) -> [u8; 32] {
     let mut input: Vec<F> = Vec::with_capacity(64);
     push_u32(&mut input, chain_id);
-    push_u64(&mut input, block.height);
-    push_id_bytes(&mut input, &block.prev_header_id);
-    push_digest(&mut input, &block.prev_root);
-    push_digest(&mut input, &block.state_root);
-    push_u64(&mut input, block.pot_after);
-    push_u32(&mut input, block.sc_nbits);
-    push_u64(&mut input, block.timestamp_ms);
-    push_digest(&mut input, &block.miner_owner);
-    push_u64(&mut input, block.coinbase_amount);
-    push_digest(&mut input, &block.coinbase_cm);
-    input.push(F::from_u32(u32::from(block.coinbase_is_reward)));
-    push_digest(&mut input, &body_limbs);
+    push_u64(&mut input, h.height);
+    push_id_bytes(&mut input, &h.prev_header_id);
+    push_digest(&mut input, &h.prev_root);
+    push_digest(&mut input, &h.state_root);
+    push_u64(&mut input, h.pot_after);
+    push_u64(&mut input, h.shielded_after);
+    push_u32(&mut input, h.sc_nbits);
+    push_u64(&mut input, h.timestamp_ms);
+    push_digest(&mut input, &h.miner_owner);
+    push_u64(&mut input, h.coinbase_amount);
+    push_digest(&mut input, &h.coinbase_cm);
+    input.push(F::from_u32(u32::from(h.coinbase_is_reward)));
+    push_digest(&mut input, &h.body_cm);
 
     digest_to_bytes(&hash_domain(DOMAIN_HN_HEADER, &input))
+}
+
+/// A full block's [`SeamHeader`] view — header fields verbatim, body reduced to
+/// its [`body_commitment`]. The seam and the block therefore hash IDENTICALLY.
+pub fn seam_header_of(block: &SuffixBlock) -> SeamHeader {
+    SeamHeader {
+        height: block.height,
+        prev_header_id: block.prev_header_id,
+        prev_root: block.prev_root,
+        state_root: block.state_root,
+        timestamp_ms: block.timestamp_ms,
+        sc_nbits: block.sc_nbits,
+        miner_owner: block.miner_owner,
+        coinbase_amount: block.coinbase_amount,
+        coinbase_cm: block.coinbase_cm,
+        coinbase_is_reward: block.coinbase_is_reward,
+        pot_after: block.pot_after,
+        shielded_after: block.shielded_after,
+        body_cm: body_commitment(block),
+    }
+}
+
+/// The hn **header id** of a full block: Poseidon2 over the canonical header
+/// fields + the recomputed body commitment, packed to 32 bytes. Delegates to
+/// [`header_id_from_fields`] so a block and its seam preimage never drift.
+pub fn header_id(chain_id: u32, block: &SuffixBlock) -> [u8; 32] {
+    header_id_from_fields(chain_id, &seam_header_of(block))
 }
 
 /// The coinbase-uniqueness block id `H(height ‖ prev_root)` — the id the
@@ -148,6 +203,7 @@ mod tests {
             coinbase_cm: digest(4),
             coinbase_is_reward: true,
             pot_after: 999,
+            shielded_after: 1234,
         }
     }
 
@@ -175,6 +231,7 @@ mod tests {
             |b| b.coinbase_amount += 1,
             |b| b.coinbase_cm[0] += F::ONE,
             |b| b.pot_after += 1,
+            |b| b.shielded_after += 1,
             |b| b.coinbase_is_reward = !b.coinbase_is_reward,
         ];
         for (i, m) in mutators.iter().enumerate() {
@@ -182,6 +239,19 @@ mod tests {
             m(&mut v);
             assert_ne!(header_id(9, &v), id, "field {i} did not affect the id");
         }
+    }
+
+    #[test]
+    fn header_id_delegates_to_from_fields() {
+        // The full-block id and its seam preimage id are identical by
+        // construction — this is the "one encoding, no drift" guarantee F1 leans
+        // on (a seam header hashes exactly as the block it stands in for).
+        let b = base_block();
+        assert_eq!(
+            header_id(9, &b),
+            header_id_from_fields(9, &seam_header_of(&b)),
+            "header_id must equal header_id_from_fields ∘ seam_header_of"
+        );
     }
 
     #[test]

@@ -193,6 +193,7 @@ mod tests {
             coinbase_cm: digest(4),
             coinbase_is_reward: true,
             pot_after: 10,
+            shielded_after: 11,
         }
     }
 

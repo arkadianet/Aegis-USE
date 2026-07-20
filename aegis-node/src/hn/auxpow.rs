@@ -356,6 +356,7 @@ mod tests {
             coinbase_ct: vec![],
             coinbase_is_reward: true,
             pot_after: 10,
+            shielded_after: 11,
             anchor: AuxAnchor::genesis(),
             aux_pow: None,
         }
