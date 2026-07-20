@@ -360,13 +360,13 @@ fn build_honest(params: &AggParams) -> HonestEpoch {
     let tip_id = header_id(CHAIN_ID, blocks.last().unwrap());
     let (anchor, ergo_ref_id) = build_anchor_chain(tip_id, 3);
 
-    // ---- honest settled-set paths (E3) ----
+    // ---- honest settled-set paths (E3, F6c: every nullifier of every spend) ----
     let mut set = SettledSet::new();
     let mut settled_paths: Vec<[Digest; SETTLED_DEPTH]> = Vec::new();
-    for b in &blocks {
-        for po in &b.pegouts {
-            settled_paths.push(set.witness(&po.spend.nf0));
-            set.insert(&po.spend.nf0);
+    for s in &spends {
+        for nf in [&s.nf0, &s.nf1] {
+            settled_paths.push(set.witness(nf));
+            set.insert(nf);
         }
     }
 

@@ -141,6 +141,8 @@ pub enum EpochError {
     AnchorOutOfWindow { i: usize, j: usize },
     #[error("block[{i}] peg-out #{j} out0 is not the bound burn note")]
     BadBurnBinding { i: usize, j: usize },
+    #[error("block[{i}] peg-out #{j} has amount 0, empty recipient, or recipient > 4096 bytes")]
+    BadPegOutBounds { i: usize, j: usize },
     #[error("block[{i}] duplicate nullifier in suffix (double-spend)")]
     DuplicateNullifier { i: usize },
     #[error("block[{i}] coinbase amount {got} != consensus {want}")]
@@ -157,9 +159,9 @@ pub enum EpochError {
     NotMatured { j: usize, tip: u64, h: u64 },
     #[error("spend-digest bind failed: re-derived suffix != recursion root digest")]
     SpendDigestMismatch,
-    #[error("settled_paths count {got} != peg-out count {want}")]
+    #[error("settled_paths count {got} != {want} (2 per suffix spend — F6c)")]
     SettledPathCount { got: usize, want: usize },
-    #[error("peg-out #{j} nf0 already settled (E3 replay-close)")]
+    #[error("spend #{j} nullifier already settled (E3 all-nullifier replay-close, F6c)")]
     AlreadySettled { j: usize },
     #[error("arithmetic overflow in block[{i}]")]
     Overflow { i: usize },
@@ -355,6 +357,14 @@ pub fn verify_epoch(w: &EpochWitness) -> Result<EpochResult, EpochError> {
         let mut pegout_fees: u64 = 0;
         let mut burn_total: u64 = 0;
         for (j, po) in block.pegouts.iter().enumerate() {
+            // F6g: peg-out well-formedness bounds — parity with the node
+            // (`aegis-node/src/hn/state.rs:482`). A zero amount, empty
+            // recipient proposition, or a recipient over 4096 bytes is
+            // consensus-invalid; enforce it in-guest so the guest's accepted
+            // set stays a subset of the node's (§4.7).
+            if po.amount == 0 || po.recipient_prop.is_empty() || po.recipient_prop.len() > 4096 {
+                return Err(EpochError::BadPegOutBounds { i, j });
+            }
             let fee = peg_fee(po.amount);
             let burn_value = po
                 .amount
@@ -518,17 +528,34 @@ pub fn verify_epoch(w: &EpochWitness) -> Result<EpochResult, EpochError> {
         return Err(EpochError::SpendDigestMismatch);
     }
 
-    // ---- E3: chain the settled-burn set over every burn nf0 ----
-    if w.settled_paths.len() != pegout_records.len() {
+    // ---- E3 (F6c): chain the settled set over EVERY nullifier of every spend ----
+    // Both `nf0` AND `nf1` of every suffix spend (plain txs and peg-outs) are
+    // inserted into R6, non-membership-then-insert, in `all_spends` order (nf0
+    // before nf1 per spend). The old burn-`nf0`-only form (design §4.3 F6c) was
+    // UNSOUND for real value: an attacker who genuinely owns a note could spend
+    // it as a plain tx in settlement N (its nullifier never entered R6), then
+    // re-spend it as a peg-out burn in a later fabricated suffix — extracting the
+    // note's value twice. Recording the full nullifier set closes that
+    // cross-settlement replay. `seen_nf` already proved suffix-internal
+    // distinctness, so these inserts never self-collide within the suffix.
+    let expected_paths = all_spends
+        .len()
+        .checked_mul(2)
+        .ok_or(EpochError::Overflow { i: 0 })?;
+    if w.settled_paths.len() != expected_paths {
         return Err(EpochError::SettledPathCount {
             got: w.settled_paths.len(),
-            want: pegout_records.len(),
+            want: expected_paths,
         });
     }
     let mut settled_root = w.settled_root_in;
-    for (j, ((nf0, _h), path)) in pegout_records.iter().zip(&w.settled_paths).enumerate() {
-        settled_root = settled::verify_insert(&settled_root, nf0, path)
-            .map_err(|_| EpochError::AlreadySettled { j })?;
+    let mut path_iter = w.settled_paths.iter();
+    for (j, s) in all_spends.iter().enumerate() {
+        for nf in [&s.nf0, &s.nf1] {
+            let path = path_iter.next().expect("path count checked above");
+            settled_root = settled::verify_insert(&settled_root, nf, path)
+                .map_err(|_| EpochError::AlreadySettled { j })?;
+        }
     }
 
     Ok(EpochResult {

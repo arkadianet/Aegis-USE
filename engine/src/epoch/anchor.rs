@@ -32,6 +32,16 @@ use ergo_ser::header::{serialize_header, Header as ErgoHeader};
 use super::batch_merkle::verify_batch_merkle_proof;
 use super::share::{mm_leaf_digest, AEGIS_MM_KEY as MM_KEY, MM_COMMITMENT_VERSION as MM_VERSION};
 
+/// F5 / D-F5 (`epoch-validity-f1-f3-design.md` §6 cond. 2, §8): the minimum
+/// number of canonical Ergo blocks the suffix tip's anchor (`H_anchor`) must be
+/// buried under `ergo_ref`. Depth 0 still forces one Ergo block (the §6
+/// Ergo-hashrate floor), but a single-block anchor is reorg-able; requiring a
+/// few *settled* Ergo blocks converts "one Ergo block" into "`A_MIN` buried
+/// Ergo blocks" and defeats a private single-block equivocation the attacker
+/// reorgs away after the release confirms. Pinned image constant; the exact
+/// production value is an operator/params decision (D-F5 recommends "several").
+pub const A_MIN: usize = 3;
+
 /// The anchor-linkage witness: a parent-linked chain of Ergo headers from
 /// `ergo_ref` (index 0) back to `H_anchor` (last), plus the extension-inclusion
 /// proof that `H_anchor` commits the anchored hn block id.
@@ -64,13 +74,43 @@ pub enum AnchorError {
     ProofInvalid,
     #[error("H_anchor does not commit the claimed anchored hn block id")]
     AnchoredIdMismatch,
+    #[error("anchor buried at depth {depth} < A_min {min} (F5)")]
+    InsufficientDepth { depth: usize, min: usize },
     #[error("header serialize failed: {0}")]
     HeaderEncode(String),
 }
 
-fn ergo_header_id(h: &ErgoHeader) -> Result<[u8; 32], AnchorError> {
+/// Recompute an Ergo header's id (`serialize_header` → blake2b256).
+pub fn ergo_header_id(h: &ErgoHeader) -> Result<[u8; 32], AnchorError> {
     let (_, id) = serialize_header(h).map_err(|e| AnchorError::HeaderEncode(e.to_string()))?;
     Ok(*id.as_bytes())
+}
+
+/// Verify a parent-linked canonical-Ergo ancestor walk: `headers[0]` is the
+/// contract-spliced `ergo_ref_id`, and each header's `parent_id` equals the
+/// recomputed id of the next. On success every `headers[i]` is a canonical
+/// ancestor of `ergo_ref` at depth `i` (canonicality inherited from `ergo_ref =
+/// CONTEXT.headers`). Shared by E4 (the anchor walk) and F3 (the peg-in deposit
+/// walk) so both rest on the exact same linkage rule.
+pub fn verify_ancestor_walk(
+    headers: &[ErgoHeader],
+    ergo_ref_id: &[u8; 32],
+) -> Result<(), AnchorError> {
+    if headers.is_empty() {
+        return Err(AnchorError::EmptyChain);
+    }
+    // ergo_ref (index 0) must be the exact contract-spliced canonical id.
+    if &ergo_header_id(&headers[0])? != ergo_ref_id {
+        return Err(AnchorError::RefMismatch);
+    }
+    // Hash-linkage: each header's parent is the next header's id.
+    for i in 0..headers.len() - 1 {
+        let parent = *headers[i].parent_id.as_bytes();
+        if parent != ergo_header_id(&headers[i + 1])? {
+            return Err(AnchorError::ChainBroken { i, j: i + 1 });
+        }
+    }
+    Ok(())
 }
 
 /// Verify the suffix tip region is committed under an ancestor of the canonical
@@ -81,23 +121,13 @@ pub fn verify_anchor_linkage(
     ergo_ref_id: &[u8; 32],
     anchored_hn_id: &[u8; 32],
 ) -> Result<usize, AnchorError> {
-    if w.headers.is_empty() {
-        return Err(AnchorError::EmptyChain);
-    }
-    // ergo_ref (index 0) must be the exact contract-spliced canonical id.
-    if &ergo_header_id(&w.headers[0])? != ergo_ref_id {
-        return Err(AnchorError::RefMismatch);
-    }
-    // Hash-linkage: each header's parent is the next header's id.
-    for i in 0..w.headers.len() - 1 {
-        let parent = *w.headers[i].parent_id.as_bytes();
-        if parent != ergo_header_id(&w.headers[i + 1])? {
-            return Err(AnchorError::ChainBroken { i, j: i + 1 });
-        }
-    }
+    verify_ancestor_walk(&w.headers, ergo_ref_id)?;
 
     // H_anchor commits id(B_a) via extension-merkle inclusion (no PoW needed).
-    let anchor = w.headers.last().expect("non-empty");
+    let anchor = w
+        .headers
+        .last()
+        .expect("non-empty: verify_ancestor_walk rejects empty");
     if w.anchor_proof.indices.len() != 1 {
         return Err(AnchorError::ProofShape {
             got: w.anchor_proof.indices.len(),
@@ -120,6 +150,23 @@ pub fn verify_anchor_linkage(
     }
 
     Ok(w.headers.len() - 1)
+}
+
+/// Verify anchor linkage AND enforce F5 burial depth (`depth >= a_min`). This is
+/// what the mainnet guest calls: the suffix tip is not merely committed in *some*
+/// canonical-Ergo ancestor of `ergo_ref`, but one buried under at least `a_min`
+/// Ergo blocks (§6 cond. 2). Returns the verified anchor depth.
+pub fn verify_anchor_linkage_min_depth(
+    w: &AnchorWitness,
+    ergo_ref_id: &[u8; 32],
+    anchored_hn_id: &[u8; 32],
+    a_min: usize,
+) -> Result<usize, AnchorError> {
+    let depth = verify_anchor_linkage(w, ergo_ref_id, anchored_hn_id)?;
+    if depth < a_min {
+        return Err(AnchorError::InsufficientDepth { depth, min: a_min });
+    }
+    Ok(depth)
 }
 
 #[cfg(test)]
@@ -260,6 +307,116 @@ mod tests {
             Err(AnchorError::AnchoredIdMismatch),
             "the anchored hn id must match what H_anchor commits"
         );
+    }
+
+    // ----- F5 burial depth -----
+
+    #[test]
+    fn anchor_buried_below_a_min_is_rejected() {
+        // A tip anchored at depth < A_MIN is a single (or too-shallow), reorg-able
+        // Ergo commitment — F5 rejects it.
+        let hn_id = [0x42u8; 32];
+        let (anchor, field, proof) = anchor_header(hn_id);
+        let headers = linked_chain(anchor, A_MIN - 1); // depth A_MIN-1 < A_MIN
+        let ergo_ref = ergo_header_id(&headers[0]).unwrap();
+        let w = AnchorWitness {
+            headers,
+            anchor_field: field,
+            anchor_proof: proof,
+        };
+        // Pure linkage still succeeds…
+        assert_eq!(verify_anchor_linkage(&w, &ergo_ref, &hn_id), Ok(A_MIN - 1));
+        // …but the depth-enforcing entry point rejects the shallow burial.
+        assert_eq!(
+            verify_anchor_linkage_min_depth(&w, &ergo_ref, &hn_id, A_MIN),
+            Err(AnchorError::InsufficientDepth {
+                depth: A_MIN - 1,
+                min: A_MIN
+            }),
+            "the tip anchor must be buried >= A_MIN Ergo blocks (F5)"
+        );
+    }
+
+    #[test]
+    fn anchor_buried_at_a_min_is_accepted() {
+        let hn_id = [0x42u8; 32];
+        let (anchor, field, proof) = anchor_header(hn_id);
+        let headers = linked_chain(anchor, A_MIN); // depth == A_MIN
+        let ergo_ref = ergo_header_id(&headers[0]).unwrap();
+        let w = AnchorWitness {
+            headers,
+            anchor_field: field,
+            anchor_proof: proof,
+        };
+        assert_eq!(
+            verify_anchor_linkage_min_depth(&w, &ergo_ref, &hn_id, A_MIN),
+            Ok(A_MIN),
+            "burial exactly at A_MIN is sufficient"
+        );
+    }
+
+    // ----- §6 caveat: no honest Ergo commitment coincides with a fake tip -----
+
+    #[test]
+    fn an_honest_tip_commitment_cannot_be_passed_off_as_a_fake_tip() {
+        // §6 caveat asserted: an Ergo block that honestly commits the real hn tip
+        // id carries a DIFFERENT id from any fabricator-reachable fake tip (whose
+        // body / chain_id differ), by Poseidon2 collision-resistance of the hn
+        // header id + chain_id binding. So E4 cannot be satisfied by free-riding
+        // an honest Ergo block: the fabricator must mine their OWN Ergo block
+        // committing THEIR fake tip.
+        use super::super::header_id::header_id;
+        use super::super::types::SuffixBlock;
+        use crate::poseidon::F;
+        use p3_field::PrimeCharacteristicRing;
+
+        let honest = SuffixBlock {
+            height: 42,
+            prev_header_id: [1u8; 32],
+            prev_root: core::array::from_fn(|i| F::from_u32(i as u32 + 1)),
+            state_root: core::array::from_fn(|i| F::from_u32(i as u32 + 9)),
+            timestamp_ms: 1_760_000_000_000,
+            sc_nbits: 0x2000_0100,
+            txs: vec![],
+            pegouts: vec![],
+            pegins: vec![],
+            miner_owner: core::array::from_fn(|i| F::from_u32(i as u32 + 3)),
+            coinbase_amount: 5,
+            coinbase_cm: core::array::from_fn(|i| F::from_u32(i as u32 + 7)),
+            coinbase_is_reward: true,
+            pot_after: 1000,
+        };
+        // A "fake" tip differing only in a body/coinbase field.
+        let mut fake = honest.clone();
+        fake.coinbase_amount = 6;
+
+        let honest_id = header_id(0x484E_0005, &honest);
+        let fake_id = header_id(0x484E_0005, &fake);
+        assert_ne!(honest_id, fake_id, "distinct bodies => distinct tip ids");
+        // Different chain_id also separates the commitment (cross-chain replay).
+        assert_ne!(
+            honest_id,
+            header_id(0x484E_0006, &honest),
+            "chain_id binds the tip id"
+        );
+
+        // An Ergo header honestly committing `honest_id` does NOT verify as an
+        // anchor for `fake_id` — the pass-off is infeasible.
+        let (anchor, field, proof) = anchor_header(honest_id);
+        let headers = linked_chain(anchor, A_MIN);
+        let ergo_ref = ergo_header_id(&headers[0]).unwrap();
+        let w = AnchorWitness {
+            headers,
+            anchor_field: field,
+            anchor_proof: proof,
+        };
+        assert_eq!(
+            verify_anchor_linkage_min_depth(&w, &ergo_ref, &fake_id, A_MIN),
+            Err(AnchorError::AnchoredIdMismatch),
+            "an honest tip commitment cannot anchor a fabricator's fake tip"
+        );
+        // Sanity: it DOES anchor the honest tip it actually commits.
+        assert!(verify_anchor_linkage_min_depth(&w, &ergo_ref, &honest_id, A_MIN).is_ok());
     }
 
     // ----- round-trips -----

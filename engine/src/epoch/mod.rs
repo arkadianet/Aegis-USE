@@ -29,6 +29,8 @@ pub mod daa;
 pub mod digest;
 pub mod header_id;
 #[cfg(feature = "aux-pow")]
+pub mod pegin;
+#[cfg(feature = "aux-pow")]
 pub mod share;
 #[cfg(feature = "aux-pow")]
 pub mod testgen;

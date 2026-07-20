@@ -21,7 +21,12 @@ use ergo_ser::extension::ExtensionField;
 use ergo_ser::header::{read_header, serialize_header};
 use serde::{Deserialize, Serialize};
 
+use crate::poseidon::{digest_to_limbs, DIGEST_ELEMS, F};
+use crate::settled::SETTLED_DEPTH;
+use p3_field::PrimeCharacteristicRing;
+
 use super::anchor::AnchorWitness;
+use super::pegin::{DepositProof, PegInBackingWitness};
 use super::share::ShareWitness;
 
 /// A `ShareWitness` in wire form: the Ergo candidate header, the MM extension
@@ -113,6 +118,93 @@ impl AnchorWitnessWire {
     }
 }
 
+/// A `DepositProof` in wire form: the deposit tx + its inclusion proof as
+/// canonical byte images, and the one-mint-ever path as limb digests.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DepositProofWire {
+    pub tx_bytes: Vec<u8>,
+    pub output_index: u16,
+    pub tx_merkle_proof_bytes: Vec<u8>,
+    pub dep_header_index: usize,
+    pub used_path: Vec<[u32; DIGEST_ELEMS]>,
+}
+
+/// A `PegInBackingWitness` (F3) in wire form: the parent-linked deposit walk
+/// (`[ergo_ref, …, deepest H_dep]`) as header byte images, plus one deposit
+/// proof per suffix peg-in.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PegInBackingWitnessWire {
+    pub deposit_header_bytes: Vec<Vec<u8>>,
+    pub deposits: Vec<DepositProofWire>,
+}
+
+impl PegInBackingWitnessWire {
+    /// Serialize a typed witness (host side).
+    pub fn from_witness(w: &PegInBackingWitness) -> Self {
+        let deposit_header_bytes = w
+            .deposit_headers
+            .iter()
+            .map(|h| serialize_header(h).expect("deposit header serializes").0)
+            .collect();
+        let deposits = w
+            .deposits
+            .iter()
+            .map(|d| DepositProofWire {
+                tx_bytes: d.tx_bytes.clone(),
+                output_index: d.output_index,
+                tx_merkle_proof_bytes: serialize_batch_merkle_proof(&d.tx_merkle_proof),
+                dep_header_index: d.dep_header_index,
+                used_path: d.used_path.iter().map(digest_to_limbs).collect(),
+            })
+            .collect();
+        Self {
+            deposit_header_bytes,
+            deposits,
+        }
+    }
+
+    /// Rebuild the typed witness (guest side). Fails closed on a malformed image.
+    pub fn into_witness(self) -> PegInBackingWitness {
+        let deposit_headers = self
+            .deposit_header_bytes
+            .iter()
+            .map(|b| {
+                let mut r = VlqReader::new(b);
+                read_header(&mut r).expect("deposit header decodes")
+            })
+            .collect();
+        let deposits = self
+            .deposits
+            .into_iter()
+            .map(|d| {
+                let tx_merkle_proof = deserialize_batch_merkle_proof(&d.tx_merkle_proof_bytes)
+                    .expect("deposit tx-Merkle proof decodes");
+                assert_eq!(
+                    d.used_path.len(),
+                    SETTLED_DEPTH,
+                    "deposit used_path must be 248 siblings"
+                );
+                let mut used_path = [[F::ZERO; DIGEST_ELEMS]; SETTLED_DEPTH];
+                for (dst, src) in used_path.iter_mut().zip(&d.used_path) {
+                    *dst = core::array::from_fn(|i| F::from_u32(src[i]));
+                }
+                DepositProof {
+                    tx_bytes: d.tx_bytes,
+                    output_index: d.output_index,
+                    tx_merkle_proof,
+                    dep_header_index: d.dep_header_index,
+                    used_path,
+                }
+            })
+            .collect();
+        PegInBackingWitness {
+            deposit_headers,
+            deposits,
+        }
+    }
+}
+
 // The wire round-trips are tested where their mining/linking helpers live:
 // `share.rs::tests::share_wire_roundtrip_still_verifies` and
-// `anchor.rs::tests::anchor_wire_roundtrip_still_links`.
+// `anchor.rs::tests::anchor_wire_roundtrip_still_links`; the F3 backing wire is
+// covered by `pegin.rs::tests` via `pegin_backing_wire_roundtrip`.

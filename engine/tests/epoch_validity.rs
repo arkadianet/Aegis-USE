@@ -243,13 +243,15 @@ impl Builder {
 
     /// Finish into a witness with honest E3 paths + the honest recursion digest.
     fn finish(&self, counter_next: u64) -> EpochWitness {
-        // Honest settled-set witnesses in peg-out order.
+        // Honest settled-set witnesses over EVERY nullifier (nf0 then nf1) of
+        // every spend, in all_spends order (F6c) — matches verify_epoch's insert
+        // loop exactly.
         let mut set = SettledSet::new();
         let mut paths: Vec<[Digest; SETTLED_DEPTH]> = Vec::new();
-        for b in &self.blocks {
-            for po in &b.pegouts {
-                paths.push(set.witness(&po.spend.nf0));
-                set.insert(&po.spend.nf0);
+        for s in &self.all_spends {
+            for nf in [&s.nf0, &s.nf1] {
+                paths.push(set.witness(nf));
+                set.insert(nf);
             }
         }
         EpochWitness {
@@ -560,26 +562,31 @@ fn redirected_recipient_dies_at_the_burn_binding() {
 
 #[test]
 fn re_settling_a_burn_dies_at_the_settled_set() {
-    // Settle once, then attempt to settle the SAME burn again against the
-    // resulting R6 — the non-membership proof cannot reproduce it.
+    // Settle once, then attempt to settle the SAME suffix again against the
+    // resulting R6 — the non-membership proofs cannot reproduce it.
     let b = honest_builder();
     let w1 = b.finish(1);
     let r1 = verify_epoch(&w1).expect("first settlement");
 
-    // A second (synthetic non-canonical) epoch re-appending the same burn nf0.
-    let nf0 = b.blocks[0].pegouts[0].spend.nf0;
+    // Rebuild R6 as it stands after settlement 1 (all nullifiers inserted).
     let mut set = SettledSet::new();
-    set.insert(&nf0); // it was settled in r1
-    let path = set.witness(&nf0);
-
-    // Build a fresh single-block-ish witness re-presenting the burn against R6_out.
+    for s in &b.all_spends {
+        for nf in [&s.nf0, &s.nf1] {
+            set.insert(nf);
+        }
+    }
+    // Present the same suffix again with honest non-membership witnesses against
+    // that post-insert set — every nullifier is now a MEMBER, so verify_insert
+    // fails at the first spend.
     let mut w2 = b.finish(2);
     w2.settled_root_in = r1.settled_root_out;
-    w2.settled_paths = vec![path];
-    // (Only the first peg-out's path is under attack; give the honest set state.)
-    // Force just the E3 check: keep everything else valid but re-present nf0.
-    // The suffix already contains the burn with this nf0; its path now proves a
-    // MEMBER, so verify_insert fails.
+    let mut paths = Vec::new();
+    for s in &b.all_spends {
+        for nf in [&s.nf0, &s.nf1] {
+            paths.push(set.witness(nf));
+        }
+    }
+    w2.settled_paths = paths;
     match verify_epoch(&w2) {
         Err(EpochError::AlreadySettled { .. }) => {}
         other => panic!("expected AlreadySettled, got {other:?}"),
@@ -613,5 +620,93 @@ fn self_declared_nbits_dies_at_nbits_mismatch() {
         verify_epoch(&w),
         Err(EpochError::NbitsMismatch { i: 0 }),
         "a block's sc_nbits must equal the authenticated LWMA/DAA expectation"
+    );
+}
+
+// ----- F6c: the all-nullifier accumulator (cross-settlement replay of a real note) -----
+
+#[test]
+fn f6c_a_settled_plain_tx_nullifier_cannot_be_respent() {
+    // The F6c core attack, closed: a plain-tx nullifier is now recorded in R6
+    // (not just burns). Settle an honest suffix, then re-present the SAME suffix
+    // against the resulting R6 — the PLAIN TX's nullifier (spend #0) is a member
+    // and the insert dies at spend #0. Under the old burn-`nf0`-only accumulator
+    // this nullifier would be absent from R6 and the re-insert would SUCCEED, so
+    // this is exactly the F6c regression: a note spent as a plain tx in one
+    // settlement can no longer be re-spent (e.g. re-burned) in a later one.
+    let b = honest_builder();
+    let w1 = b.finish(1);
+    let r1 = verify_epoch(&w1).expect("first settlement");
+
+    let mut set = SettledSet::new();
+    for s in &b.all_spends {
+        for nf in [&s.nf0, &s.nf1] {
+            set.insert(nf);
+        }
+    }
+    let mut w2 = b.finish(2);
+    w2.settled_root_in = r1.settled_root_out;
+    let mut paths = Vec::new();
+    for s in &b.all_spends {
+        for nf in [&s.nf0, &s.nf1] {
+            paths.push(set.witness(nf));
+        }
+    }
+    w2.settled_paths = paths;
+    // all_spends order is txs-then-pegouts, so spend #0 is the plain tx.
+    assert_eq!(
+        verify_epoch(&w2),
+        Err(EpochError::AlreadySettled { j: 0 }),
+        "a plain-tx nullifier must be remembered across settlements (F6c)"
+    );
+}
+
+#[test]
+fn f6c_wrong_settled_path_count_is_rejected() {
+    // The accumulator now requires exactly two paths per suffix spend.
+    let b = honest_builder();
+    let mut w = b.finish(1);
+    w.settled_paths.pop(); // one short
+    match verify_epoch(&w) {
+        Err(EpochError::SettledPathCount { .. }) => {}
+        other => panic!("expected SettledPathCount, got {other:?}"),
+    }
+}
+
+// ----- F6g: peg-out well-formedness bounds -----
+
+#[test]
+fn f6g_zero_amount_pegout_dies() {
+    let b = honest_builder();
+    let mut w = b.finish(1);
+    w.blocks[0].pegouts[0].amount = 0;
+    assert_eq!(
+        verify_epoch(&w),
+        Err(EpochError::BadPegOutBounds { i: 0, j: 0 }),
+        "a zero-amount peg-out is consensus-invalid (F6g)"
+    );
+}
+
+#[test]
+fn f6g_empty_recipient_pegout_dies() {
+    let b = honest_builder();
+    let mut w = b.finish(1);
+    w.blocks[0].pegouts[0].recipient_prop = vec![];
+    assert_eq!(
+        verify_epoch(&w),
+        Err(EpochError::BadPegOutBounds { i: 0, j: 0 }),
+        "an empty recipient proposition is consensus-invalid (F6g)"
+    );
+}
+
+#[test]
+fn f6g_oversized_recipient_pegout_dies() {
+    let b = honest_builder();
+    let mut w = b.finish(1);
+    w.blocks[0].pegouts[0].recipient_prop = vec![0u8; 4097];
+    assert_eq!(
+        verify_epoch(&w),
+        Err(EpochError::BadPegOutBounds { i: 0, j: 0 }),
+        "a recipient proposition over 4096 bytes is consensus-invalid (F6g)"
     );
 }
