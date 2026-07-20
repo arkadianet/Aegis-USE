@@ -77,7 +77,7 @@ fn eval_full_round<AB: AirBuilder<F = BabyBear>>(
 fn eval_partial_round<AB: AirBuilder<F = BabyBear>>(
     builder: &mut AB,
     state: &mut [AB::Expr; WIDTH],
-    round: &PartialRound<AB::Var, SBOX_DEGREE, SBOX_REGISTERS>,
+    round: &PartialRound<AB::Var, WIDTH, SBOX_DEGREE, SBOX_REGISTERS>,
     round_constant: BabyBear,
 ) {
     state[0] = state[0].clone() + round_constant;

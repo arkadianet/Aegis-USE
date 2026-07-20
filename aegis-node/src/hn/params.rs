@@ -21,6 +21,15 @@
 
 use aegis_engine::address::{Address, WalletKeys, HRP_TEST};
 
+use crate::daa::{difficulty_to_nbits, DaaParams};
+use num_bigint::BigUint;
+
+/// hn block-time target (seconds) the LWMA difficulty adjustment aims for.
+pub const HN_BLOCK_TARGET_SECS: u64 = 15;
+
+/// hn LWMA window (blocks), matching the Curve-Trees `consensus.md` §3 DAA.
+pub const HN_DAA_WINDOW: usize = 90;
+
 /// The hn testnet chain id / network magic. Distinct from the Curve-Trees
 /// profiles so the two networks can never confuse blocks or peers.
 /// v5: the fast-settlement cut — SHA-256 FRI-Merkle MMCS client proofs
@@ -78,6 +87,25 @@ pub struct HnChainParams {
     /// hn blocks a recorded withdrawal waits before it is settleable
     /// (T_delay batching: the settle loop only proves withdrawals this deep).
     pub pegout_delay: u64,
+    /// Minimum aux-PoW difficulty (compact nbits) — the DAA floor and the
+    /// difficulty of the genesis prefix. Devnet mines difficulty-1 from
+    /// genesis, so this is the aux-PoW weight of every early block.
+    pub min_difficulty_nbits: u32,
+    /// LWMA block-time target (seconds) the aux-PoW difficulty aims for.
+    pub daa_target_secs: u64,
+    /// LWMA window (blocks) — below `window + 1` blocks the chain stays at
+    /// `min_difficulty_nbits`.
+    pub daa_window: usize,
+    /// Aux-PoW enforcement mode (E0):
+    /// - `false` (**DevStub**, default): the running devnet, which is
+    ///   API-anchored but does not merge-mine yet — blocks carry no aux-PoW
+    ///   witness and consensus does NOT require one. Fork-choice weight is the
+    ///   self-declared `sc_nbits`, so this mode is LIVENESS-only (the
+    ///   `epoch-validity-design.md` §6.5 "devnet toothlessness" residual).
+    /// - `true` (**Strict**): every non-genesis block MUST carry an aux-PoW
+    ///   witness that binds its `hn_header_id` to real Autolykos work clearing
+    ///   `sc_nbits` — the fork-choice weight is then genuine PoW.
+    pub require_aux_pow: bool,
 }
 
 /// The seed the genesis faucet's keys derive from — its address funds the e2e
@@ -118,6 +146,29 @@ impl HnChainParams {
             peg_fee_percent: 1,
             pegin_confirmations: 10,
             pegout_delay: 10,
+            min_difficulty_nbits: difficulty_to_nbits(&BigUint::from(1u8)),
+            daa_target_secs: HN_BLOCK_TARGET_SECS,
+            daa_window: HN_DAA_WINDOW,
+            require_aux_pow: false,
+        }
+    }
+
+    /// This profile with Strict aux-PoW enforcement (every non-genesis block
+    /// must carry a verified aux-PoW witness) — the mainnet-grade posture.
+    pub fn with_strict_aux_pow(mut self) -> Self {
+        self.require_aux_pow = true;
+        self
+    }
+
+    /// The LWMA difficulty-adjustment parameters for this profile — the single
+    /// spelling shared by block production, block validation, and (E0) the
+    /// aux-PoW share verifier's `sc_nbits`-vs-DAA equality; the three must
+    /// never diverge.
+    pub fn daa(&self) -> DaaParams {
+        DaaParams {
+            target_secs: self.daa_target_secs,
+            window: self.daa_window,
+            min_difficulty_nbits: self.min_difficulty_nbits,
         }
     }
 

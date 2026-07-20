@@ -1,0 +1,712 @@
+//! Stage-T epoch-validity end-to-end (E1 + E3): the honest happy path settles,
+//! and a fabricated (non-canonical private-tree) epoch CANNOT — it dies at the
+//! structural re-derivation / digest bind / anchor / header-chain / maturity /
+//! replay checks. This is the design's §"Stage T" headline deliverable, run at
+//! the engine level (exactly what the guest executes; the recursion digest
+//! channel is parity-tested separately in `aegis-recursion`).
+
+use aegis_engine::burn::burn_cm_expected;
+use aegis_engine::epoch::digest::epoch_spend_root;
+use aegis_engine::epoch::header_id::{header_id, header_id_from_fields, SeamHeader};
+use aegis_engine::epoch::types::{
+    coinbase_amount, peg_fee, FLAT_FEE, GENESIS_HEADER_ID, PEGOUT_DELAY,
+};
+use aegis_engine::epoch::verify::{verify_epoch, EpochError, EpochWitness};
+use aegis_engine::epoch::{epoch_journal, PegIn, PegOut, SpendPublics, SuffixBlock};
+use aegis_engine::merkle::Frontier;
+use aegis_engine::mint::coinbase_cm_expected;
+use aegis_engine::poseidon::{Digest, F};
+use aegis_engine::settled::{empty_settled_root, SettledSet, SETTLED_DEPTH};
+use p3_field::PrimeCharacteristicRing;
+
+const CHAIN_ID: u32 = 0x484E_0005;
+
+/// The `sc_nbits` honest suffix blocks (and the seam tip) declare. Under
+/// `aux-pow` F2 is live and — with a short (< window+1) authenticated seam — the
+/// DAA expectation is the min-difficulty floor, so honest blocks must carry
+/// exactly it; without the feature F2 is compiled out and any value is fine.
+#[cfg(feature = "aux-pow")]
+fn suffix_nbits() -> u32 {
+    aegis_engine::epoch::testgen::diff1_nbits()
+}
+#[cfg(not(feature = "aux-pow"))]
+fn suffix_nbits() -> u32 {
+    0x2000_0100
+}
+
+fn digest(base: u32) -> Digest {
+    core::array::from_fn(|i| F::from_u32(base.wrapping_mul(131) + i as u32 + 1))
+}
+
+/// A host-side honest-suffix builder — mirrors `apply_block` so honest blocks
+/// pass `verify_epoch` by construction. Non-consensus test tooling.
+struct Builder {
+    chain_id: u32,
+    frontier: Frontier,
+    pot: u64,
+    shielded: u64,
+    height: u64,
+    prev_header_id: [u8; 32],
+    miner_owner: Digest,
+    blocks: Vec<SuffixBlock>,
+    all_spends: Vec<SpendPublics>,
+    counter: u32,
+    tip_id_prev: [u8; 32],
+    /// A real 2-header, genesis-terminated authenticated seam (newest first):
+    /// `seam[0]` = `T_prev` (state_root == the pre-suffix frontier root, the
+    /// weld), `seam[1]` = its parent, whose parent is the genesis sentinel. Two
+    /// headers so every honest test exercises the multi-hop hash-link walk (the
+    /// core of the F1 induction), not just the tip check.
+    seam: Vec<SeamHeader>,
+}
+
+/// A peg-out to add: (amount, recipient).
+struct PegSpec {
+    amount: u64,
+    recipient: Vec<u8>,
+}
+
+impl Builder {
+    fn new(pot: u64, shielded: u64, start_height: u64) -> Self {
+        // seam[1] = T_prev's parent: bottoms out at the genesis sentinel. Its
+        // fields below the tip are unconstrained by the guest (only seam[0]
+        // provides pot/shielded_before), but its id must hash-link from seam[0].
+        let seam_prev = SeamHeader {
+            height: start_height - 2,
+            prev_header_id: GENESIS_HEADER_ID,
+            prev_root: Frontier::new().root(),
+            state_root: digest(0x5EA1),
+            timestamp_ms: 1_760_000_000_000 + (start_height - 2) * 15_000,
+            sc_nbits: suffix_nbits(),
+            miner_owner: digest(7),
+            coinbase_amount: 0,
+            coinbase_cm: digest(0),
+            coinbase_is_reward: true,
+            pot_after: pot,
+            shielded_after: shielded,
+            body_cm: digest(0),
+        };
+        let seam_prev_id = header_id_from_fields(CHAIN_ID, &seam_prev);
+        // seam[0] = T_prev: state_root == the pre-suffix (empty) frontier root
+        // (the weld); parent == seam[1]'s id (the hash link); pot/shielded ==
+        // the pre-suffix totals the guest derives back.
+        let seam_tip = SeamHeader {
+            height: start_height - 1,
+            prev_header_id: seam_prev_id,
+            prev_root: Frontier::new().root(),
+            state_root: Frontier::new().root(),
+            timestamp_ms: 1_760_000_000_000 + (start_height - 1) * 15_000,
+            sc_nbits: suffix_nbits(),
+            miner_owner: digest(7),
+            coinbase_amount: 0,
+            coinbase_cm: digest(0),
+            coinbase_is_reward: true,
+            pot_after: pot,
+            shielded_after: shielded,
+            body_cm: digest(0),
+        };
+        let tip_id = header_id_from_fields(CHAIN_ID, &seam_tip);
+        Self {
+            chain_id: CHAIN_ID,
+            frontier: Frontier::new(),
+            pot,
+            shielded,
+            height: start_height,
+            prev_header_id: tip_id,
+            miner_owner: digest(7),
+            blocks: Vec::new(),
+            all_spends: Vec::new(),
+            counter: 1000,
+            tip_id_prev: tip_id,
+            seam: vec![seam_tip, seam_prev],
+        }
+    }
+
+    fn fresh(&mut self) -> u32 {
+        self.counter += 1;
+        self.counter
+    }
+
+    /// A plain 2-in/2-out tx anchored at the current tip root.
+    fn plain_tx(&mut self, prev_root: Digest) -> SpendPublics {
+        SpendPublics {
+            root: prev_root,
+            nf0: digest(self.fresh()),
+            nf1: digest(self.fresh()),
+            cm0: digest(self.fresh()),
+            cm1: digest(self.fresh()),
+            fee: FLAT_FEE,
+        }
+    }
+
+    /// A peg-out spend whose cm0 is the bound burn note.
+    fn pegout(&mut self, prev_root: Digest, amount: u64, recipient: Vec<u8>) -> PegOut {
+        let nf0 = digest(self.fresh());
+        let fee = peg_fee(amount);
+        let cm0 = burn_cm_expected(amount + fee, &nf0, &recipient, amount);
+        PegOut {
+            spend: SpendPublics {
+                root: prev_root,
+                nf0,
+                nf1: digest(self.fresh()),
+                cm0,
+                cm1: digest(self.fresh()),
+                fee: FLAT_FEE,
+            },
+            amount,
+            recipient_prop: recipient,
+        }
+    }
+
+    fn add_block(&mut self, n_tx: usize, pegouts: Vec<PegSpec>, pegins: Vec<(u64, Digest)>) {
+        let prev_root = self.frontier.root();
+        let txs: Vec<SpendPublics> = (0..n_tx).map(|_| self.plain_tx(prev_root)).collect();
+        let pos: Vec<PegOut> = pegouts
+            .into_iter()
+            .map(|p| self.pegout(prev_root, p.amount, p.recipient))
+            .collect();
+        let pins: Vec<PegIn> = pegins
+            .into_iter()
+            .enumerate()
+            .map(|(i, (amount, owner))| PegIn {
+                box_id: [(self.height as u8).wrapping_add(i as u8); 32],
+                dest_owner: owner,
+                amount,
+            })
+            .collect();
+
+        let n_spends = txs.len() + pos.len();
+        let fees = FLAT_FEE * n_spends as u64;
+        let cb = coinbase_amount(self.pot, n_spends);
+        let mut pegout_fees = 0u64;
+        for p in &pos {
+            pegout_fees += peg_fee(p.amount);
+        }
+        let mut pegin_fees = 0u64;
+        let mut pegin_inflow = 0u64;
+        for pi in &pins {
+            pegin_fees += peg_fee(pi.amount);
+            pegin_inflow += pi.amount;
+        }
+        let mut burn_total = 0u64;
+        for p in &pos {
+            burn_total += p.amount + peg_fee(p.amount);
+        }
+        let pot_after = self.pot + fees + pegout_fees + pegin_fees - cb;
+        // Conservation replay (mirror of `verify_epoch`): shielded pool grows by
+        // the coinbase + net peg-in, shrinks by fees + burned value.
+        let shielded_after = self.shielded + cb + (pegin_inflow - pegin_fees) - fees - burn_total;
+
+        let bid = aegis_engine::epoch::header_id::block_id(self.height, &prev_root);
+        let coinbase_cm = coinbase_cm_expected(&self.miner_owner, cb, &bid);
+
+        // Re-derive leaves in consensus order and advance the frontier.
+        for s in txs.iter().chain(pos.iter().map(|p| &p.spend)) {
+            let _ = self.frontier.append(s.cm0);
+            let _ = self.frontier.append(s.cm1);
+        }
+        for pi in &pins {
+            let minted = pi.amount - peg_fee(pi.amount);
+            let cm = aegis_engine::mint::pegmint_cm_expected(&pi.dest_owner, minted, &pi.box_id);
+            let _ = self.frontier.append(cm);
+        }
+        let _ = self.frontier.append(coinbase_cm);
+        let state_root = self.frontier.root();
+
+        for s in txs.iter().chain(pos.iter().map(|p| &p.spend)) {
+            self.all_spends.push(s.clone());
+        }
+
+        let block = SuffixBlock {
+            height: self.height,
+            prev_header_id: self.prev_header_id,
+            prev_root,
+            state_root,
+            timestamp_ms: 1_760_000_000_000 + self.height * 15_000,
+            sc_nbits: suffix_nbits(),
+            txs,
+            pegouts: pos,
+            pegins: pins,
+            miner_owner: self.miner_owner,
+            coinbase_amount: cb,
+            coinbase_cm,
+            coinbase_is_reward: true,
+            pot_after,
+            shielded_after,
+        };
+        self.prev_header_id = header_id(self.chain_id, &block);
+        self.blocks.push(block);
+        self.pot = pot_after;
+        self.shielded = shielded_after;
+        self.height += 1;
+    }
+
+    /// Finish into a witness with honest E3 paths + the honest recursion digest.
+    fn finish(&self, counter_next: u64) -> EpochWitness {
+        // Honest settled-set witnesses over EVERY nullifier (nf0 then nf1) of
+        // every spend, in all_spends order (F6c) — matches verify_epoch's insert
+        // loop exactly.
+        let mut set = SettledSet::new();
+        let mut paths: Vec<[Digest; SETTLED_DEPTH]> = Vec::new();
+        for s in &self.all_spends {
+            for nf in [&s.nf0, &s.nf1] {
+                paths.push(set.witness(nf));
+                set.insert(nf);
+            }
+        }
+        EpochWitness {
+            chain_id: self.chain_id,
+            blocks: self.blocks.clone(),
+            frontier_bytes: postcard::to_allocvec(&Frontier::new()).unwrap(),
+            tip_id_prev: self.tip_id_prev,
+            seam: self.seam.clone(),
+            settled_root_in: empty_settled_root(),
+            settled_paths: paths,
+            spend_root_digest: epoch_spend_root(&self.all_spends),
+            ergo_ref_id: [0xEE; 32],
+            counter_next,
+        }
+    }
+}
+
+/// Build an honest suffix: block 0 carries a tx + a peg-out; then `PEGOUT_DELAY`
+/// maturing blocks so the burn is settleable at the tip.
+fn honest_builder() -> Builder {
+    let mut b = Builder::new(1_000_000, 1_000_000, 100);
+    b.add_block(
+        1,
+        vec![PegSpec {
+            amount: 5000,
+            recipient: b"\x00\x08\xcd recipient-ergotree".to_vec(),
+        }],
+        vec![(2000, digest(999))],
+    );
+    for _ in 0..PEGOUT_DELAY {
+        b.add_block(0, vec![], vec![]);
+    }
+    b
+}
+
+// ----- happy path -----
+
+#[test]
+fn honest_epoch_settles() {
+    let b = honest_builder();
+    let w = b.finish(1);
+    let r = verify_epoch(&w).expect("an honest canonical epoch settles");
+    assert_eq!(r.prev_root, Frontier::new().root());
+    assert_eq!(r.new_root, b.blocks.last().unwrap().state_root);
+    assert_eq!(r.withdrawals.len(), 1);
+    assert_eq!(r.withdrawals[0].amount, 5000);
+    assert_ne!(r.settled_root_out, empty_settled_root());
+    // The journal reconstructs cleanly at fixed offsets.
+    let j = epoch_journal(
+        &r,
+        &w.settled_root_in,
+        &w.tip_id_prev,
+        &w.ergo_ref_id,
+        w.counter_next,
+    );
+    assert_eq!(&j[0..8], aegis_engine::epoch::EPOCH_JOURNAL_TAG);
+    assert_eq!(
+        j.len(),
+        8 + 32 * 7 + 8 + (8 + 8 + w.blocks[0].pegouts[0].recipient_prop.len())
+    );
+}
+
+// ----- the fabrication headline: it dies at four distinct checks -----
+
+#[test]
+fn fabricated_private_tree_note_dies_at_the_digest_bind() {
+    // The core attack: a settler mints a fake note into a private tree, produces
+    // a "valid" burn against it, and appends it. The burn binding + arithmetic
+    // are all internally consistent — but the fake spend is NOT one the recursion
+    // tree verified, so the re-derived suffix digest != the bound root digest.
+    let b = honest_builder();
+    let mut w = b.finish(1);
+
+    // Inject a fabricated peg-out into block 0 (a note from nowhere), rebuilding
+    // block 0's state_root/pot so the block is internally consistent — the ONLY
+    // thing the fabricator cannot fake is the recursion digest.
+    let mut fab = Builder::new(1_000_000, 1_000_000, 100);
+    let extra = PegSpec {
+        amount: 90_000,
+        recipient: b"\x00\x08\xcd attacker".to_vec(),
+    };
+    fab.add_block(
+        1,
+        vec![
+            PegSpec {
+                amount: 5000,
+                recipient: b"\x00\x08\xcd recipient-ergotree".to_vec(),
+            },
+            extra,
+        ],
+        vec![(2000, digest(999))],
+    );
+    for _ in 0..PEGOUT_DELAY {
+        fab.add_block(0, vec![], vec![]);
+    }
+    let fab_w = fab.finish(1);
+
+    // The fabricator presents the honest recursion digest (they only have proofs
+    // for the real spends) but a suffix containing the extra fake spend.
+    w.blocks = fab_w.blocks.clone();
+    w.settled_paths = fab_w.settled_paths.clone();
+    // spend_root_digest stays the HONEST one (real proofs only).
+    let honest_digest = epoch_spend_root(&b.all_spends);
+    w.spend_root_digest = honest_digest;
+
+    assert_eq!(
+        verify_epoch(&w),
+        Err(EpochError::SpendDigestMismatch),
+        "a fabricated private-tree note has no real spend proof — the bind dies"
+    );
+}
+
+#[test]
+fn spend_anchored_to_a_private_root_dies_at_the_anchor_window() {
+    let b = honest_builder();
+    let mut w = b.finish(1);
+    // Repoint block 0's first tx to a private (never-real) anchor root.
+    w.blocks[0].txs[0].root = digest(0xDEAD);
+    // Keep the digest bind consistent with the tampered suffix so the anchor
+    // check is what fires (not the bind).
+    let mut spends = Vec::new();
+    for blk in &w.blocks {
+        for s in blk.txs.iter().chain(blk.pegouts.iter().map(|p| &p.spend)) {
+            spends.push(s.clone());
+        }
+    }
+    w.spend_root_digest = epoch_spend_root(&spends);
+    assert_eq!(
+        verify_epoch(&w),
+        Err(EpochError::AnchorOutOfWindow { i: 0, j: 0 }),
+        "a spend can only anchor to a real recent state-root, never a private tree"
+    );
+}
+
+#[test]
+fn broken_header_chain_dies() {
+    let b = honest_builder();
+    let mut w = b.finish(1);
+    // Snap the link between block 0 and block 1.
+    w.blocks[1].prev_header_id[0] ^= 0xFF;
+    assert_eq!(
+        verify_epoch(&w),
+        Err(EpochError::HeaderChainBroken { i: 1 }),
+        "the suffix must be a real header-id chain from the sealed tip"
+    );
+}
+
+#[test]
+fn wrong_sealed_tip_dies() {
+    // Tampering R7 breaks the seam's very first check: seam[0]'s recomputed id no
+    // longer equals the sealed tip the vault pinned.
+    let b = honest_builder();
+    let mut w = b.finish(1);
+    w.tip_id_prev[0] ^= 1;
+    assert_eq!(verify_epoch(&w), Err(EpochError::SeamTipMismatch));
+}
+
+// ----- F1: the authenticated seam cannot be forged -----
+
+#[test]
+fn private_seam_state_root_dies_at_the_seam_tip() {
+    // THE F1 headline: a fabricator wants a private-tree root in the anchor
+    // window, so they doctor seam[0].state_root to a value that would admit their
+    // fake spends. But seam[0] is authenticated — its id must equal R7 — so any
+    // change to a seam field makes header_id_from_fields(seam[0]) != tip_id_prev.
+    // Unbounded value injection via a private anchor is closed at its root.
+    let b = honest_builder();
+    let mut w = b.finish(1);
+    w.seam[0].state_root[0] += F::ONE;
+    assert_eq!(
+        verify_epoch(&w),
+        Err(EpochError::SeamTipMismatch),
+        "a private-tree seam root cannot chain to the vault's sealed tip (R7)"
+    );
+}
+
+#[test]
+fn broken_seam_link_dies() {
+    // Tamper a DEEPER seam header (seam[1]): its id changes, so seam[0]'s
+    // prev_header_id no longer hash-links to it. seam[0]'s own id is untouched, so
+    // the tip check passes and the multi-hop walk is what catches the forgery —
+    // exercising the F1 induction beyond the first header.
+    let b = honest_builder();
+    let mut w = b.finish(1);
+    assert!(w.seam.len() >= 2, "honest seam walks at least one link");
+    w.seam[1].state_root[0] += F::ONE;
+    assert_eq!(
+        verify_epoch(&w),
+        Err(EpochError::SeamLinkBroken { i: 0 }),
+        "every seam header's id must hash-link from its successor, back to R7"
+    );
+}
+
+#[test]
+fn seam_not_welded_to_the_frontier_dies() {
+    // The seam authenticates the window; the weld ties its newest root to the
+    // suffix's starting frontier. Break the weld (block[0].prev_root moved off the
+    // tip's state root, seam kept consistent) and it dies at the weld — but here
+    // the frontier binding fires first since prev_root is checked against the
+    // frontier root too; either way an unwelded seam cannot settle.
+    let b = honest_builder();
+    let mut w = b.finish(1);
+    w.blocks[0].prev_root[0] += F::ONE;
+    assert!(matches!(
+        verify_epoch(&w),
+        Err(EpochError::PrevRootMismatch) | Err(EpochError::SeamWeldBroken)
+    ));
+}
+
+// ----- F6a: suffix heights must be continuous with the settled chain -----
+
+#[test]
+fn height_jump_dies_at_height_discontinuity() {
+    // A fabricator claims a low height (e.g. to hit the DAA bootstrap floor) or
+    // any discontinuous height. F6a anchors block[0] to seam[0].height + 1.
+    let b = honest_builder();
+    let mut w = b.finish(1);
+    w.blocks[0].height += 7;
+    assert_eq!(
+        verify_epoch(&w),
+        Err(EpochError::HeightDiscontinuity { i: 0 }),
+        "suffix heights must be continuous with the authenticated seam tip"
+    );
+}
+
+// ----- F6f: timestamps must be monotone across the seam and suffix -----
+
+#[test]
+fn regressing_timestamp_dies() {
+    let b = honest_builder();
+    let mut w = b.finish(1);
+    // Block 1's stamp regresses below block 0's.
+    w.blocks[1].timestamp_ms = w.blocks[0].timestamp_ms - 1;
+    assert_eq!(
+        verify_epoch(&w),
+        Err(EpochError::TimestampRegressed { i: 1 }),
+        "suffix timestamps must be non-decreasing (the only in-guest clock rule)"
+    );
+}
+
+#[test]
+fn immature_burn_dies_at_pegout_delay() {
+    // A suffix that settles a burn younger than pegout_delay is rejected — this
+    // is what forces a fabricator to mine a >= pegout_delay+1-block suffix.
+    let mut b = Builder::new(1_000_000, 1_000_000, 100);
+    b.add_block(
+        0,
+        vec![PegSpec {
+            amount: 5000,
+            recipient: b"r".to_vec(),
+        }],
+        vec![],
+    );
+    // Only a couple maturing blocks (< PEGOUT_DELAY).
+    for _ in 0..3 {
+        b.add_block(0, vec![], vec![]);
+    }
+    let w = b.finish(1);
+    match verify_epoch(&w) {
+        Err(EpochError::NotMatured { .. }) => {}
+        other => panic!("expected NotMatured, got {other:?}"),
+    }
+}
+
+#[test]
+fn tampered_state_root_dies() {
+    let b = honest_builder();
+    let mut w = b.finish(1);
+    w.blocks[0].state_root[0] += F::ONE;
+    // Rebuild header chain from the tamper so the header check passes and the
+    // state-root weld is what fires.
+    let mut prev = w.tip_id_prev;
+    for blk in w.blocks.iter_mut() {
+        blk.prev_header_id = prev;
+        prev = header_id(CHAIN_ID, blk);
+    }
+    assert_eq!(
+        verify_epoch(&w),
+        Err(EpochError::StateRootMismatch { i: 0 }),
+        "state_root must equal the frontier root over the re-derived leaves"
+    );
+}
+
+// ----- D1 recipient binding -----
+
+#[test]
+fn redirected_recipient_dies_at_the_burn_binding() {
+    // THE D1 theft vector at the settlement layer: a permissionless settler
+    // takes the victim's real matured burn (real spend, real cm0, built for the
+    // honest recipient) and re-labels the recorded withdrawal to pay THEIR OWN
+    // address. Because the burn nonces bind (recipient_prop, amount) (D1), the
+    // guest's recomputed burn commitment no longer reproduces the spend's out0,
+    // so the redirect dies at the burn binding — before it can ever be journaled
+    // and paid. Block 0's peg-out burn binding is checked ahead of the following
+    // block's header link, so this is the check that fires.
+    let b = honest_builder();
+    let mut w = b.finish(1);
+    // cm0 stays the honestly-built burn note; only the recorded recipient moves.
+    w.blocks[0].pegouts[0].recipient_prop = b"\x00\x08\xcd attacker".to_vec();
+    assert_eq!(
+        verify_epoch(&w),
+        Err(EpochError::BadBurnBinding { i: 0, j: 0 }),
+        "a burn note is only reproducible with the recipient it was built for (D1)"
+    );
+}
+
+// ----- E3 replay-close -----
+
+#[test]
+fn re_settling_a_burn_dies_at_the_settled_set() {
+    // Settle once, then attempt to settle the SAME suffix again against the
+    // resulting R6 — the non-membership proofs cannot reproduce it.
+    let b = honest_builder();
+    let w1 = b.finish(1);
+    let r1 = verify_epoch(&w1).expect("first settlement");
+
+    // Rebuild R6 as it stands after settlement 1 (all nullifiers inserted).
+    let mut set = SettledSet::new();
+    for s in &b.all_spends {
+        for nf in [&s.nf0, &s.nf1] {
+            set.insert(nf);
+        }
+    }
+    // Present the same suffix again with honest non-membership witnesses against
+    // that post-insert set — every nullifier is now a MEMBER, so verify_insert
+    // fails at the first spend.
+    let mut w2 = b.finish(2);
+    w2.settled_root_in = r1.settled_root_out;
+    let mut paths = Vec::new();
+    for s in &b.all_spends {
+        for nf in [&s.nf0, &s.nf1] {
+            paths.push(set.witness(nf));
+        }
+    }
+    w2.settled_paths = paths;
+    match verify_epoch(&w2) {
+        Err(EpochError::AlreadySettled { .. }) => {}
+        other => panic!("expected AlreadySettled, got {other:?}"),
+    }
+}
+
+// ----- F2: a difficulty-1 fake block at the wrong DAA target dies -----
+
+/// The honest suffix already declares exactly the DAA expectation (the
+/// min-difficulty floor for a young chain), so it settles under F2. A fabricator
+/// who "mines" a block at a self-chosen difficulty — here anything other than the
+/// authenticated DAA expectation — is rejected at NbitsMismatch, which is what
+/// forces real, un-discountable Autolykos work in every fake block.
+#[cfg(feature = "aux-pow")]
+#[test]
+fn self_declared_nbits_dies_at_nbits_mismatch() {
+    let b = honest_builder();
+    let honest = b.finish(1);
+    verify_epoch(&honest).expect("honest suffix declares the DAA expectation and settles");
+
+    // Re-declare block 0's difficulty away from the DAA floor, rebuilding the
+    // header chain so the header-id links still hold and F2 is what fires.
+    let mut w = b.finish(1);
+    w.blocks[0].sc_nbits = w.blocks[0].sc_nbits.wrapping_add(1);
+    let mut prev = w.tip_id_prev;
+    for blk in w.blocks.iter_mut() {
+        blk.prev_header_id = prev;
+        prev = header_id(CHAIN_ID, blk);
+    }
+    assert_eq!(
+        verify_epoch(&w),
+        Err(EpochError::NbitsMismatch { i: 0 }),
+        "a block's sc_nbits must equal the authenticated LWMA/DAA expectation"
+    );
+}
+
+// ----- F6c: the all-nullifier accumulator (cross-settlement replay of a real note) -----
+
+#[test]
+fn f6c_a_settled_plain_tx_nullifier_cannot_be_respent() {
+    // The F6c core attack, closed: a plain-tx nullifier is now recorded in R6
+    // (not just burns). Settle an honest suffix, then re-present the SAME suffix
+    // against the resulting R6 — the PLAIN TX's nullifier (spend #0) is a member
+    // and the insert dies at spend #0. Under the old burn-`nf0`-only accumulator
+    // this nullifier would be absent from R6 and the re-insert would SUCCEED, so
+    // this is exactly the F6c regression: a note spent as a plain tx in one
+    // settlement can no longer be re-spent (e.g. re-burned) in a later one.
+    let b = honest_builder();
+    let w1 = b.finish(1);
+    let r1 = verify_epoch(&w1).expect("first settlement");
+
+    let mut set = SettledSet::new();
+    for s in &b.all_spends {
+        for nf in [&s.nf0, &s.nf1] {
+            set.insert(nf);
+        }
+    }
+    let mut w2 = b.finish(2);
+    w2.settled_root_in = r1.settled_root_out;
+    let mut paths = Vec::new();
+    for s in &b.all_spends {
+        for nf in [&s.nf0, &s.nf1] {
+            paths.push(set.witness(nf));
+        }
+    }
+    w2.settled_paths = paths;
+    // all_spends order is txs-then-pegouts, so spend #0 is the plain tx.
+    assert_eq!(
+        verify_epoch(&w2),
+        Err(EpochError::AlreadySettled { j: 0 }),
+        "a plain-tx nullifier must be remembered across settlements (F6c)"
+    );
+}
+
+#[test]
+fn f6c_wrong_settled_path_count_is_rejected() {
+    // The accumulator now requires exactly two paths per suffix spend.
+    let b = honest_builder();
+    let mut w = b.finish(1);
+    w.settled_paths.pop(); // one short
+    match verify_epoch(&w) {
+        Err(EpochError::SettledPathCount { .. }) => {}
+        other => panic!("expected SettledPathCount, got {other:?}"),
+    }
+}
+
+// ----- F6g: peg-out well-formedness bounds -----
+
+#[test]
+fn f6g_zero_amount_pegout_dies() {
+    let b = honest_builder();
+    let mut w = b.finish(1);
+    w.blocks[0].pegouts[0].amount = 0;
+    assert_eq!(
+        verify_epoch(&w),
+        Err(EpochError::BadPegOutBounds { i: 0, j: 0 }),
+        "a zero-amount peg-out is consensus-invalid (F6g)"
+    );
+}
+
+#[test]
+fn f6g_empty_recipient_pegout_dies() {
+    let b = honest_builder();
+    let mut w = b.finish(1);
+    w.blocks[0].pegouts[0].recipient_prop = vec![];
+    assert_eq!(
+        verify_epoch(&w),
+        Err(EpochError::BadPegOutBounds { i: 0, j: 0 }),
+        "an empty recipient proposition is consensus-invalid (F6g)"
+    );
+}
+
+#[test]
+fn f6g_oversized_recipient_pegout_dies() {
+    let b = honest_builder();
+    let mut w = b.finish(1);
+    w.blocks[0].pegouts[0].recipient_prop = vec![0u8; 4097];
+    assert_eq!(
+        verify_epoch(&w),
+        Err(EpochError::BadPegOutBounds { i: 0, j: 0 }),
+        "a recipient proposition over 4096 bytes is consensus-invalid (F6g)"
+    );
+}

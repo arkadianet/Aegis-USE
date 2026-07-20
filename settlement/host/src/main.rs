@@ -341,7 +341,14 @@ fn smoke_input() -> (ProveInput, Digest, Digest) {
     let peg_fee = params.peg_fee(withdrawal);
     let recipient_prop = vec![0xAA; 36];
     let burn_tx = bob
-        .burn_spend(&chain, chain.circuit(), withdrawal + peg_fee, flat)
+        .burn_spend(
+            &chain,
+            chain.circuit(),
+            withdrawal,
+            peg_fee,
+            &recipient_prop,
+            flat,
+        )
         .expect("burn spend");
     chain
         .submit_pegout(PegOutTx {
@@ -379,6 +386,16 @@ fn smoke_input() -> (ProveInput, Digest, Digest) {
     };
     (input, prev_root, new_root)
 }
+
+// NOTE (v6 convergence): D1's original single-withdrawal host execute-tests are
+// intentionally NOT carried here. On this lineage `AEGIS_SETTLEMENT_GUEST_ELF`
+// is the BATCH guest (driven by `exec-i4`, batch input order), and the epoch
+// guest by `exec-epoch`; this legacy single-withdrawal host driver
+// (`ProveInput`/`build_env`/`smoke_input`) predates that and no longer matches
+// the guest's `env::read` shape. The D1 recipient-binding is regression-tested
+// where it is actually wired on this lineage: `engine/src/burn.rs` (derivation),
+// `aegis-node` mempool/block validation (`hn_peg_e2e.rs`), the batch guest and
+// `engine::epoch::verify_epoch` burn binding (redirect ⇒ `BadBurnBinding`).
 
 fn main() {
     let cli = Cli::parse();

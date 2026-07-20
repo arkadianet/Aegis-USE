@@ -16,6 +16,7 @@
 
 pub mod baked_vk;
 pub mod balance_air;
+pub mod batch;
 pub mod merkle_air;
 pub mod monolith;
 pub mod nullifier_air;

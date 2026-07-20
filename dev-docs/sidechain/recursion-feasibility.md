@@ -681,3 +681,525 @@ in isolated `CARGO_TARGET_DIR`s — `p3rec-target` (scalar/default),
 `p3rec-target-v3` (`-Ctarget-cpu=x86-64-v3`, AVX2), `p3rec-target-native`
 (`-Ctarget-cpu=native`, AVX-512); run at `RAYON_NUM_THREADS=1` and `=4`,
 `I1_ITERS=5`, min-of-5 reported.*
+
+---
+
+## 10. I4 RESULT (2026-07-19): the settlement statement is BLOCKED — the root does NOT surface per-leaf publics
+
+> **Status: BLOCKED — precise STOP, empirically confirmed (this machine, warm
+> I3 `CARGO_TARGET_DIR`, `RUSTFLAGS=-Ctarget-cpu=native` + `parallel`).** I4
+> was "turn the I3 aggregation root into an on-chain-verifiable settlement
+> proof": surface each withdrawal's `(amount, recipient_prop, nf0)` /
+> `(nf0, cm0)` into the root's committed journal so the batch-settlement
+> statement (batch-settlement-design.md §1) binds to exactly the aggregated
+> withdrawals. **The crux (I4 item 1 — the one §5/task flagged as the possible
+> research problem) does not hold with the b363397 library as-is: the aggregate
+> root exposes no per-leaf publics, and the proof format offers no external
+> public-input check to bind them.** Items 2–4 (SHA-final wrap, RISC0-guest-
+> over-root, constant-in-N cost) are UNBLOCKED and already measured GREEN in §7
+> — only the *binding* is blocked. Building a guest that emits the §1 journal
+> without the binding would be an **unsound** settlement statement (security
+> theater), so per the task's explicit instruction I stopped rather than force
+> it.
+
+### 10.1 What the settlement statement requires (and why v5 has it, recursion doesn't)
+
+v5's single-withdrawal guest binds the withdrawal to the spend proof by
+verifying it **in-field against externally-supplied `pis`**:
+`verify_with_preprocessed(config, air, proof, pis, vk)`
+(`guest-settlement/src/main.rs:84`) — `pis` is passed in and CHECKED, so
+`nf0 = pis[PUB_NF0..]`, `cm0 = pis[PUB_CMO0..]` (`main.rs:94-95`) are provably
+the ones this proof attested. The burn binding and journal then read from that
+bound `pis`. Recursion's whole point is to replace the N in-field verifies
+with ONE root verify — so the root must surface those N×(nf0,cm0,amount,
+recipient) in a form the guest can **read** and the verifier **checks**.
+It does neither.
+
+### 10.2 The mechanism, cited — three independent walls, one conclusion
+
+1. **`verify_all_tables` takes no external publics.** Signature is
+   `verify_all_tables<EF>(&self, proof: &BatchStarkProof<SC>)` — no public-
+   value argument (`circuit-prover/src/batch_stark_prover.rs:1284`). The
+   internal `verify` (`:1737`) builds `pvs` as `vec![Vec::new(); NUM_PRIMITIVE_
+   TABLES]` and only `push`es `entry.public_values` for **non-primitive**
+   tables (`:1778-1794`), then calls `p3_batch_stark::verify_batch(config,
+   airs, proof, &pvs, common)` (`:1813`). So the primitive `Const/Public/Alu`
+   tables are verified with **empty** external public values — nothing to bind
+   against. The M1 guest confirms this operationally: it verifies the root with
+   `verify_root(&proof)` supplying no publics at all (§7).
+2. **Circuit `public_input()` values live in the primitive `Public` table's
+   committed trace — not as AIR public values.** The `Public` table is
+   `WitnessSendAir`: "The AIR has no constraints" and exposes **no** AIR public
+   values (`circuit-prover/src/air/public_air.rs:16,173-196`); the public-input
+   VALUES are committed in the main trace and bound only via an internal
+   `"WitnessChecks"` bus lookup (`:202-229`). They are never plaintext in the
+   proof and never externally checked.
+3. **The only propagating/plaintext channel is non-primitive `public_values`,
+   and it does not reach the root.** In the aggregation verifier, the child's
+   re-exposed air-public counts are `vec![0; NUM_PRIMITIVE_TABLES]` then, per
+   non-primitive entry, `entry.public_values.len()`
+   (`recursion/src/verifier/batch_stark.rs:313-316`) — i.e. **only** non-
+   primitive table `public_values` propagate to the parent, and they land as
+   the parent's *primitive* `public_input()`s (count 0 upstream) → they die
+   after exactly one level. The 44 client publics enter at layer-1 as the
+   verified client instance's air publics → the layer-1 circuit's **primitive**
+   `Public` values (`engine/recursion/src/lib.rs:432-436`, `air_public_counts
+   = [44]`) → they never propagate even one level. `RecursionOutput::
+   into_recursion_input::<BatchOnly>()` hard-codes `table_public_inputs:
+   vec![vec![]; num_tables]` (`recursion/src/recursion.rs:132-137`),
+   consistent with (2)/(3). The library book agrees: recursion public inputs
+   are "the previous proof's commitments, opened values, and challenges"
+   (`book/src/user_guide/public_inputs.md:3`) — **not** an inner AIR's
+   statement values; there is no surfacing facility (grep of `recursion/`,
+   `circuit-prover/` for expose/carry/forward/propagate-public: none).
+
+### 10.3 Empirical confirmation (the incontrovertible nail)
+
+`engine/recursion/tests/surface_publics.rs` (new, committed) aggregates **two
+REAL distinct spends** to a root and inspects every plaintext public surface:
+
+```
+[I4-PROBE] root 754108 bytes | 2 non-primitive tables | 0 total EXPOSED public values
+[I4-PROBE]   non_primitive[0] op=poseidon2_perm/baby_bear_d4_w16 public_values.len()=0
+[I4-PROBE]   non_primitive[1] op=recompose                        public_values.len()=0
+[I4-PROBE] leaf nf0/cm0 octets recoverable from root exposed publics: 0 / 4
+test root_does_not_expose_per_withdrawal_publics ... ok   (9.91s)
+```
+
+**The root exposes ZERO plaintext public values.** No `nf0`, no `cm0`, no
+`amount` — nothing the §1 journal or the burn binding needs is readable from
+or checkable against the root. The withdrawal publics are cryptographically
+*bound inside* layer-1's `Public`-table commitment (the tower attests each
+client proof is valid) but are **not surfaced**, so a settlement guest cannot
+tie the `(amount_i, recipient_i, nf0_i, cm0_i)` it journals to the proofs the
+root verified. Recursion-without-surfacing is therefore **strictly weaker than
+v5** (it loses even the spend→withdrawal link v5 gets for free), not merely
+subject to the already-documented honest-scope caveats (§4 epoch-canonicality,
+§7 H1 recipient-binding). This is a **core soundness gap, not a deferrable
+stub.**
+
+### 10.4 Options to unblock (ranked — for the orchestrator to choose; each is real work, none is "structure the guest to slot it in")
+
+- **(A) Accumulating-digest carry via a non-primitive `public_values` channel
+  (recommended, biggest lift).** Make each aggregation layer compute in-circuit
+  a Poseidon2 fold `d_parent = H(d_left ‖ d_right)` of its children's
+  withdrawal digests, and route `d_parent` onto a *non-primitive* table's
+  `public_values` (the one channel that both propagates one level AND is
+  plaintext+observed at the root). At layer-1, seed the leaf digest from the
+  44 client publics. The root's non-primitive `public_values` then carry the
+  epoch's Merkle-root-of-withdrawals; the guest recomputes it from the
+  §1 entry list and checks equality. Requires: (i) a small custom NPO/AIR that
+  exposes `public_values` and is threaded through `prove_aggregation_layer`
+  at every level (the library today zeroes primitive publics and only carries
+  NPO publics one level — this needs the digest to *re-seed* the NPO channel
+  each level), and (ii) in-circuit Poseidon2 folding wired into the aggregation
+  circuit builder. Substantial work inside the **unaudited** library; weeks-
+  scale; must go through the value-gate review.
+- **(B) External public-input check in the final verify (smaller, but library
+  core).** Add a `verify_all_tables_with_publics(proof, expected_public_inputs)`
+  that passes the primitive `Public` table's expected values through to
+  `p3_batch_stark::verify_batch`'s `pvs` (today hard-zeroed at
+  `batch_stark_prover.rs:1780`) and binds them. Then a dedicated final
+  "settlement-wrap" layer exposes the withdrawal digest as its `public_input()`
+  and the guest supplies+checks it. Smaller diff, but it modifies the
+  circuit-prover's verification core and its soundness (the `WitnessChecks`
+  bus semantics for externally-pinned publics) must be reviewed — again inside
+  the unaudited library.
+- **(C) Abandon in-guest surfacing; bind via a second RISC0 receipt per leaf
+  (the §5 fallback, no recursion-lib change).** Keep the root verify for
+  batch-independence of *validity*, but bind each withdrawal's publics with a
+  cheap per-leaf statement (e.g. the client proof's `pis` committed by a
+  tiny per-leaf receipt composed via `env::verify`). Loses part of the
+  batch-independence win (O(N) small receipts) but needs zero unaudited-lib
+  surgery. Weakest structurally, safest to ship.
+
+### 10.5 What IS green and ready (so I4 is blocked, not worthless)
+
+- The RISC0 wrap over the root is measured and constant in N: **0.227 B cyc
+  (Poseidon2) / 48 M cyc (SHA-256 final layer, 4.72×)**, N=2→8 flat (§7). The
+  SHA-final integration (item 2) and the guest-over-root (item 3) are proven
+  out in the M1 harness (`scratchpad/m1-wrap`, `m1_sha_final.rs`); porting them
+  into `settlement/` is mechanical **once the binding channel from 10.4
+  exists** — without it they would only reproduce §7.
+- The I3 pipeline (`aggregate_spends`/`verify_root`) is unaffected and green;
+  the new probe test runs alongside `tests/aggregate.rs`.
+
+**Recommendation: adopt (A) as the I4 design, scoped as its own milestone
+inside the value-gate review, before any guest/journal code.** Do not ship a
+journal-emitting guest until one of (A)/(B)/(C) binds the per-withdrawal
+publics — an unbound §1 journal is not a settlement proof.
+
+*I4 harness: `engine/recursion/tests/surface_publics.rs` (aggregates 2 real
+spends, inspects `root.non_primitives[*].public_values`), run in the warm I3
+`CARGO_TARGET_DIR` (`scratchpad/i3-target`) with the mandated flags. Source
+audit: `circuit-prover/src/batch_stark_prover.rs:1284,1737-1815`,
+`circuit-prover/src/air/public_air.rs`,
+`recursion/src/verifier/batch_stark.rs:313-321`,
+`recursion/src/recursion.rs:128-138,597-646`,
+`recursion/src/public_inputs.rs:361-385`,
+`book/src/user_guide/public_inputs.md` (Plonky3-recursion @ b363397).*
+
+---
+
+## 11. OPTION-A SPIKE RESULT (2026-07-19): the digest-binding channel is BUILDABLE — **FEASIBLE, measured**
+
+> **Status: FEASIBLE — the §10.4(A) accumulating-digest carry works end-to-end,
+> proven on a minimal but real prototype (this machine, isolated
+> `CARGO_TARGET_DIR`, `RUSTFLAGS=-Ctarget-cpu=native` + `parallel`).** A custom
+> non-primitive "digest-expose" table (`aegis/digest`) carries an
+> in-circuit-folded digest through the aggregation layers so it surfaces at the
+> ROOT as plaintext, verifier-checked `public_values`, cryptographically bound
+> to the leaves' public inputs. **No library fork was needed** — the whole
+> prototype lives in `aegis-recursion` (`src/digest.rs`, `src/digest_agg.rs`)
+> against the b363397 library's public plugin APIs.
+
+### 11.1 The mechanism that works (and why §10's "one level" was the right read)
+
+§10.2(3) said non-primitive `public_values` propagate exactly one level. That
+is correct — and it is ENOUGH, because the level they propagate to re-exposes
+them as **circuit public-input Targets** that the parent can compute on:
+
+1. **Leaf (layer-1)**: the digest `d = Poseidon2-sponge(pis)` is computed
+   in-circuit over the SAME `air_public_targets` the recursive verifier checks
+   against the client proof (44 publics for a real spend). `d` is fed to the
+   `aegis/digest` table, whose entry exposes `d`'s 8 BabyBear limbs as
+   `public_values`.
+2. **Every aggregation layer**: `verify_p3_batch_proof_circuit` allocates the
+   child's digest `public_values` as parent circuit publics
+   (`air_public_counts[digest] = 8`, `verifier/batch_stark.rs:315-321`) and
+   folds the child digest AIR's constraints against them — so the targets are
+   BOUND to the child's committed digest table. The parent hashes
+   `d_parent = H(d_left ‖ d_right)` over those targets and re-seeds `d_parent`
+   onto its OWN `aegis/digest` entry. The channel chains by re-injection,
+   exactly as §10.4(A) prescribed.
+3. **Root**: `verify_all_tables` (the §7 guest call) passes every non-primitive
+   entry's `public_values` into `p3_batch_stark::verify_batch` as that AIR's
+   publics (`batch_stark_prover.rs:1794`) — the digest AIR constrains
+   `main[j] == public_values[j]` on its real row, and the trace cells are
+   WitnessChecks-bus receives (mult −1 reader) against the in-circuit fold's
+   witness. Plaintext, checked, bound.
+
+The digest table itself is ~15 committed cells per proof (8 main + 5
+preprocessed, 1 row): three soundness links — publics == trace (AIR
+constraint), trace == circuit witness (LogUp bus), witness == H(children)
+(the fold circuit).
+
+### 11.2 Measured (all 6 prototype tests green, `tests/digest_channel.rs`)
+
+| check | result |
+|---|---|
+| 2 toy leaves → root: root digest == H(d_L ‖ d_R), root verifies | **PASS** (leaves ~12 ms each, layer 1.3–1.5 s) |
+| 4 toy leaves → 2 levels: root digest == H(H(d1‖d2) ‖ H(d3‖d4)) | **PASS** — the CHAINING crux (4.4 s total) |
+| **2 REAL spends → layer-1(+digest) → root: digest == H(H(pis_a) ‖ H(pis_b)) over the 44 client publics** | **PASS** (~3.1 s/leaf incl. client-proof verify, 2.1 s layer — within the I1 ~2 s/layer envelope; digest adds ~5–10%) |
+| changed leaf seed changes root digest | **PASS** (bound, not decorative) |
+| tampered ROOT digest publics | **verification FAILS** (AIR pv-constraint enforced natively) |
+| tampered LEAF digest publics | **aggregation layer cannot even prove** — `WitnessConflict` at the parent's witness run (the in-circuit check catches the lie before a proof exists) |
+
+Expected digests recomputed natively (independent witness-only circuit run of
+the same sponge — the §1-journal recomputation the guest will do; per §7 the
+in-guest hashing cost is already measured).
+
+### 11.3 What made it work WITHOUT forking the library
+
+Everything needed is public API at b363397:
+- `CircuitBuilder::register_npo` (custom circuit op + executor + trace
+  generator), `push_non_primitive_op_with_outputs`, `add_hash_slice`;
+- `BatchStarkProver::register_table_prover` (custom `TableProver` returning
+  `BatchTableInstance { public_values, .. }`), `NpoPreprocessor`,
+  `NpoAirBuilder`, `get_airs_and_degrees_with_prep`;
+- `verify_p3_batch_proof_circuit` takes a caller-supplied prover list, so the
+  aggregation layer was hand-rolled in `aegis-recursion` (mirroring
+  `prove_aggregation_layer`) with the digest plugin included; `RecursionInput::
+  BatchStark.table_public_inputs` accepts the child entries' publics (the stock
+  `into_recursion_input` hard-zeroes them — we construct the input manually).
+
+Caveats found (minor): `impl_table_prover_batch_instances_from_base!` is
+unusable outside the crate (`transmute_traces` is `pub(crate)`) — implement the
+`batch_instance_d*` methods via a small generic helper instead;
+`FriRecursionBackend`'s plugin lists are hard-coded, so the layer driver is
+re-implemented rather than reused (~150 lines, all public calls).
+
+### 11.4 Full-build estimate (the real I4, on top of this prototype)
+
+The channel is proven; what remains for the production settlement statement:
+1. **Digest schema**: replace the spike's `H(all 44 pis)` leaf seed with the §1
+   entry digest `d_leaf = H(amount ‖ recipient_prop_hash ‖ nf0 ‖ cm0)`
+   (selected pis), plus the epoch/anchor binding fields — design work in
+   batch-settlement-design.md, ~days.
+2. **Identity leaves for padding** (§10's non-power-of-two note): pad with a
+   fixed identity digest, guest treats it as "no withdrawal" — small.
+3. **Guest integration**: port the §7 M1 harness to verify the root AND check
+   `root_digest == H-fold(journal entries)` in-guest — mechanical per §10.5,
+   ~days (the digest table verifies inside the existing `verify_all_tables`
+   call; zero extra wrap cost beyond hashing the entry list, which §7 already
+   measured).
+4. **Hardening the spike code**: multi-op digest rows, packing/lane audit,
+   negative tests at every level, plus review of the WitnessChecks mult
+   accounting (the −1-reader convention mirrors the stock recompose/coeff
+   tables). ~1–2 weeks.
+5. **Value-gate review surface**: the custom table (~650 lines,
+   `digest.rs` + `digest_agg.rs`) + the three-link soundness argument in 11.1.
+   This is NEW consensus-critical circuit code inside the same unaudited-library
+   review gate — it must be in scope of the external crypto review, but it does
+   NOT enlarge the library-fork surface (no upstream patches).
+
+Total: **~2–4 weeks** to a journal-emitting, digest-bound settlement guest,
+vs. the §10 alternative readings (B: library-core verify change, C: O(N)
+per-leaf receipts). **(A) is confirmed as the right choice and is now
+de-risked.**
+
+*Spike harness: `engine/recursion/src/digest.rs` (the `aegis/digest` table:
+executor/trace/plugin + AIR/TableProver/preprocessor/air-builder),
+`engine/recursion/src/digest_agg.rs` (toy leaf, `layer1_digest` over real
+spends, digest-folding aggregation layer, native sponge oracle),
+`engine/recursion/tests/digest_channel.rs` (6 tests incl. tamper checks). Run:
+`RUSTFLAGS="-Ctarget-cpu=native" cargo test --release --test digest_channel`
+in an isolated `CARGO_TARGET_DIR`.*
+
+---
+
+## 12. I4 BUILT (2026-07-19): the digest-bound batch settlement statement — MEASURED, guest EXECUTES
+
+> **Status: BUILT + MEASURED (this machine; recursion crate under
+> `RUSTFLAGS=-Ctarget-cpu=native` + `parallel`, RISC0 executor for the guest).**
+> The §11 option-A prototype is productionised into a real, on-chain-verifiable
+> batch settlement statement over the recursion root. Branch
+> `feat/recursion-settlement-i4-build` off the §11 spike.
+
+### 12.1 What shipped (items 1–4)
+
+1. **Entry digest schema** (`engine/src/settlement_digest.rs`,
+   `engine/recursion/src/digest_agg.rs::layer1_settlement`): the leaf digest is
+   `d_leaf = H(amount ‖ recipient_commit ‖ nf0 ‖ cm0)`, folded IN-CIRCUIT with
+   `nf0`/`cm0` taken from the verifier's `air_public_targets` (proof-bound) and
+   `amount`/`recipient_commit` as leaf publics (the settlement declaration). The
+   root's surfaced digest is the withdrawals-Merkle-root (the tree's `H(l ‖ r)`
+   fold) over exactly these tuples.
+2. **Identity padding leaves** (`identity_leaf` / `identity_digest`): a
+   non-power-of-two batch pads with a leaf pinned to `H(IDENTITY_PREIMAGE)`. A
+   padding slot contributes a fixed constant no real tuple can produce, so it
+   cannot smuggle a withdrawal. Heterogeneous real+identity pairing proves and
+   verifies (`settlement_channel::…_n3_padded`).
+3. **RISC0 settlement guest over the root**
+   (`settlement/methods/guest-settlement`): verifies the ONE aggregate root
+   in-field (constant in N; links the recursion verify path with the
+   `aegis/digest` table, no rayon/p3-recursion/rand), reads the surfaced digest,
+   **recomputes it from the §1 journal entries and checks equality** (the bind:
+   journal == what the proofs attested), does the per-withdrawal burn binding +
+   epoch membership + distinct-nf0, advances the frontier `prev_root→new_root`,
+   and commits the §1 `AEGISPB1` journal. REPLACES the v5 verify-N-in-field guest.
+4. **End-to-end measurement** — the guest EXECUTES cleanly (all checks pass,
+   correct journal committed) over burn-valid N-withdrawal roots:
+
+| N | in-guest root_verify | bind (O(N)) | tree_transition | total user cyc | journal |
+|---|---|---|---|---|---|
+| 2 | **558.5 M** | 1.7 M | 3.5 M | 650.3 M | 178 B |
+| 4 | **541.1 M** | 3.4 M | 4.9 M | 632.4 M | 276 B |
+
+- **root_verify is CONSTANT in N** (558 M vs 541 M — within packing noise), vs
+  the old verify-N-in-field cost `N × 0.30 B` (0.6 B → 1.2 B → … → 19.2 B at
+  N=64). Batch-independence holds for the REAL I4 guest, digest table included.
+- `bind` is O(N) but ~0.85 M cycles/withdrawal — the digest recompute + burn +
+  membership + distinctness are micro-scale next to the wrap.
+- Host pipeline (leaves+aggregate) N=2 ≈ 8.3 s, N=4 ≈ 18.2 s; root ≈ 735–765 KB
+  (≈ constant); native verify-from-bytes ≈ 15–17 ms (the same op the guest runs).
+- The root is the **Poseidon2** config at full engine FRI params (Q=67), which
+  is why 558 M > §7's 227 M (Q=36 proxy). The §7 **SHA-final layer** (measured
+  4.7×, ≈ 120 M) is the structured follow-on: swap the final layer's MMCS +
+  the guest's config reconstruction — the digest bind is unchanged. Guest image
+  id (Poseidon2 config): `14fc66bbfa0dedd848fc7eb182e1a8d04dc29c6506a43cbc4d6cf48e016fcbce`.
+
+### 12.2 Soundness surface + guest-parity (the load-bearing claim)
+
+The guest never runs a circuit; it recomputes the digest with a NATIVE
+`circuit_sponge` (`settlement_digest.rs`) that reproduces the recursion library's
+in-circuit `add_hash_slice` (Poseidon2-W16 overwrite sponge, each limb re-exposed
+as `(v,0,0,0)`). `engine/recursion/tests/sponge_parity.rs` asserts
+`circuit_sponge(x) == ` the in-circuit oracle for every width the schema uses —
+so the guest's recomputation is provably the value the circuit folded. New
+consensus-critical circuit code (the review surface): the §11 `aegis/digest`
+table (~650 LOC, unchanged) + `layer1_settlement`/`identity_leaf`/
+`aggregate_settlement` (~120 LOC) + the native `settlement_digest.rs` (~180 LOC).
+No upstream library patches.
+
+### 12.3 Negative tests (all GREEN)
+
+- `settlement_channel`: a tampered journal entry (wrong amount / recipient /
+  nf0 / reordered / dropped) recomputes a different `withdrawals_root` ≠ the
+  root's surfaced digest → the guest digest-check FAILS. Tampering the root's or
+  a leaf's digest publics fails verification / aggregation (§11 mechanism,
+  carried to settlement leaves). `identity_digest ≠` any real leaf digest.
+- `settlement_digest` unit tests: reorder/add/drop/amount/recipient/nf0 each
+  change the root; identity pinned; journal layout byte-exact.
+
+### 12.4 I5 (structured, not built)
+
+Epoch-validity (`new_root` canonical) and the settled-burn accumulator
+(settlement-nullifier set → each burn settles once; the §4 cross-batch
+double-release fix) add guest checks + a vault register; the per-withdrawal
+tuple and `AEGISPB1` journal are stable across that work. Also I5: the SHA-final
+layer adoption, baking the recursion tower's circuit fingerprint into the ELF
+(vk-pinning, §4(d)), the PegVault v6 batch predicate (`batch-settlement-design.md`
+§3), and the testnet re-cut. Cross-batch anti-replay currently rests on the
+honest-settler / epoch-canonicality assumption — testnet-fine, mainnet-blocking
+until I5. Chain-id-breaking; NOT cut/deployed.
+
+*I4 harness: `engine/src/settlement_digest.rs`,
+`engine/recursion/src/digest_agg.rs` (settlement leaf/identity/aggregate +
+`verify_root_bytes`), tests `sponge_parity` / `settlement_channel` /
+`settlement_measure` / `dump_artifacts`; `settlement/methods/guest-settlement`
+(the guest) + `settlement/exec-i4` (RISC0-executor measurement). Run the guest:
+`cargo build -p methods` then `exec-i4 --dir <dumped artifacts>`.*
+
+---
+
+## 13. I5a BUILT (2026-07-20): SHA-256 final layer — the guest verifies on the accelerator, ~5.4x cheaper
+
+> **Status: BUILT + MEASURED (this machine; recursion crate under
+> `RUSTFLAGS=-Ctarget-cpu=native` + `parallel`, RISC0 executor for the guest).**
+> The §7 SHA-final mitigation is adopted into the real I4 settlement statement:
+> the FINAL aggregation layer is now committed under a SHA-256 config so the
+> settlement guest verifies the root on the RISC0 SHA accelerator instead of
+> software Poseidon2. The digest bind is UNCHANGED. Branch
+> `verify/recursion-settlement-i5a-sha-final` off §12's I4 build.
+
+### 13.1 What changed (config swap only; the bind is untouched)
+
+- **The SHA-256 final-layer config** (`engine/recursion/src/lib.rs`,
+  `ShaFinalConfig` / `sha_final_config`): `TwoAdicFriPcs<BabyBear, SHA-256 MMCS>
+  + SerializingChallenger32` — the SAME shape as the engine's own `EngineConfig`
+  (`config.rs`), at the SAME FRI numbers as the Poseidon2 layers (full engine
+  Q=67, via `AggParams`), so the root keeps full security. It is a plain
+  `StarkConfig`, NOT a `FriRecursionConfig`: the root is never recursed further,
+  only verified in-guest.
+- **Only the ROOT proof's own commitments/transcript switch to SHA.** ALL
+  interior aggregation layers stay Poseidon2 (`agg_pair_digest`), and the final
+  layer's *in-circuit* verify of its two children stays Poseidon2 (its children
+  are `PlainAggConfig` proofs). `aggregate_settlement_sha` runs Poseidon2 layers
+  until two proofs remain, then proves the top node under `ShaFinalConfig`
+  (`agg_pair_settlement_sha`). The digest circuit is byte-identical to the
+  Poseidon2 path — the `aegis/digest` table (`DigestProver`/`DigestAirBuilder`/
+  `BatchAir`) is config-generic, so the fold and the surfaced `public_values`
+  channel are produced identically. **The withdrawals-digest survives the SHA
+  final layer unchanged** — proven, not assumed: `settlement_channel`'s
+  `root_digest == withdrawals_root` bind and every tamper negative pass under the
+  SHA config (§13.3). This was the one flagged risk (the non-primitive public
+  channel behaving differently under SHA); it does not.
+- **The guest** (`settlement/methods/guest-settlement`) verifies via
+  `verify_root_bytes_sha` (reconstructs `ShaFinalConfig` + the same poseidon2 +
+  recompose + `aegis/digest` verifier). The digest-check, burn binding, epoch
+  membership, distinctness, frontier transition, and `AEGISPB1` journal are all
+  UNCHANGED. The guest's `sha2` is routed to RISC0's accelerated fork via
+  `[patch.crates-io] sha2 = risc0/RustCrypto-hashes@sha2-v0.11.0-risczero.0`.
+
+### 13.2 Measured guest cycles — root_verify 558M → ~102M, ~5.4x, still constant in N
+
+RISC0 executor (`exec-i4`) over burn-valid N-withdrawal SHA-final roots, same
+methodology as §12.1:
+
+| N | in-guest root_verify (SHA) | §12 Poseidon2 baseline | speedup | bind | tree_transition | total user cyc | root bytes | journal |
+|---|---|---|---|---|---|---|---|---|
+| 2 | **102.4 M** (102,357,166) | 558.5 M | **5.46x** | 1.73 M | 3.49 M | **183.3 M** (183,337,766) | 669,056 | 178 B |
+| 4 | **106.9 M** (106,930,484) | 541.1 M | **5.06x** | 3.38 M | 4.87 M | **188.5 M** (188,506,280) | 647,406 | 276 B |
+
+- **root_verify collapses to ~102–107 M — below the §7/task ~120 M prediction**
+  (§7's 4.72x was on the Q=36 proxy; at full Q=67 the MMCS-hashing fraction the
+  accelerator eats is larger, so the ratio lands at ~5.1–5.5x). Total guest cost
+  drops **650 M → 183 M (N=2)** / **632 M → 188 M (N=4)** — ~3.4–3.6x.
+- **Still constant in N.** root_verify N=2 vs N=4 differ by 4.5% (102.4 vs 106.9
+  M) — the same level-1 (2,2)-packing vs level-2 (1,3)-packing noise as §12's
+  Poseidon2 spread, NOT N-scaling. Batch-independence holds under the SHA config.
+- The SHA final layer also **shrinks the root**: 669 KB (N=2) / 647 KB (N=4) vs
+  §12's ~735–765 KB Poseidon2 — consistent with §7.
+- **SHA accelerator confirmed firing** (three independent signals): (i) the guest
+  `Cargo.lock` resolves `sha2 0.11.0` from
+  `git+github.com/risc0/RustCrypto-hashes?tag=sha2-v0.11.0-risczero.0`; (ii) the
+  guest ELF carries `risc0_zkp::core::hash::sha::guest::Impl` / `Sha256VarCore`
+  symbols (the `sys_sha` precompile path); (iii) a 5.46x drop is only physically
+  achievable with the hardware accelerator — software SHA would be *slower* than
+  software Poseidon2, not faster. (§7 measured 5,934 Sha2 ecalls on the analogous
+  Q=36 N=4 root; the mechanism, not a fresh discrete count, is what I re-confirmed
+  here.)
+
+### 13.3 Tests + parity (all GREEN under the SHA-final config)
+
+- **`settlement_channel`** (repointed to `aggregate_settlement_sha` +
+  `verify_root_proof_sha`): the N=2 production-shape bind
+  (`root_digest == withdrawals_root([e0,e1])`) and the N=3→4 padded bind pass;
+  every tamper negative (wrong amount / recipient / nf0 / reorder) still yields a
+  different root and rejects. **The digest bind rejects a lying journal under the
+  SHA final layer.**
+- **`settlement_measure`** (SHA): N=2/N=4 pipeline + native `verify_root_bytes_sha`
+  round-trip green; root 669/647 KB, native verify ~5–6 ms.
+- **`sponge_parity`, `surface_publics`, `aggregate`** unchanged and green.
+- **`digest_channel`** (the §11 Poseidon2 toy spike, whose `agg_pair_digest` was
+  refactored to share the circuit builder with the SHA path) — all 6 green,
+  including both tamper-negative checks: the refactor is behavior-preserving.
+
+### 13.4 Image id + scope
+
+New guest image id (SHA-final config, LE-per-word hex per host/`exec-i4`):
+`869406858e1a42a9718f5492c5403ccec56f9e61a6d10cd10a506cb545450fa4`
+(`[u32;8] = [2231800966, 2839681678, 2455015281, 3460055237, 1637773253,
+3507278246, 3043774474, 2752464197]`). Chain-id-breaking vs §12's Poseidon2 guest
+— **expected, NOT cut/deployed.** The tracked `settlement/IMAGE_ID.hex` is a v5-era
+pin and is intentionally left untouched (image-id / vk-pinning baking is the
+separate I5 item, §12.4 / §4(d)). `aggregate_settlement_sha` requires the padded
+tree to have ≥2 leaves (one aggregation node); a single-withdrawal epoch (no
+node) is out of scope for the SHA-final path.
+
+The remaining I5 pieces (§12.4) are unchanged: epoch-validity (`new_root`
+canonical), the settled-burn accumulator, the PegVault v6 batch predicate,
+vk-pinning, and the testnet re-cut.
+
+*I5a harness: `engine/recursion/src/lib.rs` (`ShaFinalConfig` / `sha_final_config`),
+`engine/recursion/src/digest_agg.rs` (`agg_pair_settlement_sha` /
+`aggregate_settlement_sha` / `verify_root_bytes_sha` / `serialize_root_sha` +
+shared `build_agg_pair`), tests `settlement_channel` / `settlement_measure` /
+`dump_artifacts` repointed to the SHA path; `settlement/methods/guest-settlement`
+(the `[patch] sha2` accelerator + `verify_root_bytes_sha`). Reproduce:
+`AEGIS_I4_DUMP_DIR=<dir> AEGIS_I4_N={2,4} cargo test --release --test dump_artifacts
+-- --ignored` then `exec-i4 --dir <dir>`.*
+
+## 14. vk-pin + REAL epoch-validity prove → vault verifyStark (deferred gate CLOSED)
+
+The last v6 validation gap — a REAL epoch-validity settlement proof accepted by
+the v6 PegVault via `verifyStark` end-to-end — is now closed (2026-07-20, branch
+`feat/v6-vkpin-e2e`). No live chain cut; that follows the red-review.
+
+**vk / image-id pin (§4(d)/§12.4).** `settlement/EPOCH_IMAGE_ID.hex` =
+`67837eaac6e5f5240b014e4481b209ad4ce83414a7fc6abbe9d6f7f7a861aa47` — the aux-PoW
+epoch-validity guest (v7 `AEGISPV1`) RISC0 image id, built under `~/apps/risc0-cuda`
+(`AEGIS_EPOCH_AUXPOW=1`, `--features cuda`) and **bit-for-bit identical to the host
+build** (image-id parity holds at the pinned worktree path). The guest ELF bakes
+the epoch statement AND `AggParams::default()` (the whole recursion tower), so a
+swapped guest or a drifted aggregation config both change this id AND trip
+`aegis_recursion::PINNED_AGG_PARAMS` (`engine/recursion/tests/agg_params_pin.rs`).
+The id is pinned in `bridge-tools::vault_epoch` (`pinned_epoch_image_id`), the sole
+value `verifyStark` will release funds for.
+
+**Real GPU prove (batch-independent, minutes).** `settlement/exec-epoch prove`
+over the honest 11-block / 2-withdrawal epoch (`dump_epoch.rs`), RTX 3090, real
+succinct receipt (no dev-mode): **wall = 825.5 s (~13.8 min)** at `segment_po2=20`
+(po2=21 OOMs the 24 GB card in the lift phase), **user_cycles = 417,484,933**
+(root_verify 101.4 M + epoch_validity 59.7 M + aux_pow_e2 179.5 M + anchor_e4
+0.5 M — the M-E1 breakdown), 425 segments, **receipt 218 KiB**, **journal 338 B**
+(`AEGISPV1`, counter_next=2). `receipt.verify(image_id)` passes locally.
+
+**Vault verifyStark TRUE (the deferred gate).**
+`bridge-tools/tests/epoch_vault_real_receipt.rs` (real-verify, ergo-sigma oracle
+tier) reconstructs the `AEGISPV1` journal from the release tx — R4/R6/R7 endpoints
++ the `CONTEXT.headers` anchor splice + recipient entries — **byte-exact** the
+receipt's committed journal, then runs the FULL v6 epoch vault predicate with the
+real receipt in the context extension and `image_id` = the pin ⇒ **verifyStark
+TRUE**. A tampered receipt (flipped byte) and a journal-mismatch (bumped recipient
+amount, real receipt) ⇒ FALSE. The complete loop — guest → real proof → vault
+verifyStark → would-release — is validated.
+
+**Fabrication dies at prove time, for real.** `dump_epoch::dump_fabricated`
+presents a REAL aggregation root for a spend set the settler could genuinely prove
+paired with the honest (consensus-consistent) suffix recording the withdrawals
+they actually want — the fabrication vector. Run through the COMPILED guest
+(`exec-epoch execute`), the guest panics `SpendDigestMismatch` before any
+proving — so no receipt exists for the vault to accept. The engine structural
+suite (`engine/tests/epoch_validity.rs`, 9/9) covers the four other death modes.

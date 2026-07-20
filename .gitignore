@@ -3,3 +3,13 @@
 .DS_Store
 # Cargo.lock IS committed (this is a node/app + a value bridge — reproducible
 # builds are required). Do not ignore it.
+/.e0-target/
+
+# Stage-T isolated build artifacts (never committed)
+/.stageT-target/
+
+# Isolated vault-predicate build artifacts (never committed)
+/.epoch-vault-target/
+
+# v6-converged isolated build artifacts (external target dir; never committed)
+/.v6conv-target/

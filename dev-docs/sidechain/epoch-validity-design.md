@@ -309,6 +309,42 @@ the blake2b AIR as the planned scale optimization. Gate: measure blake2b
 cycles/compression in-guest before pinning (M-E1 measurement, same
 discipline as M1/Q5).
 
+### 4.1 M-E1 MEASURED (the make-or-break number, now real)
+
+The full aux-PoW epoch-validity guest (E1+E2+E3+E4) cross-compiles to
+`riscv32im-risc0-zkvm-elf` (packaging fix: the `ergo-validation → ergo-sigma`
+`panic="unwind"` edge is dropped by vendoring `verify_batch_merkle_proof` into
+`engine/epoch/batch_merkle.rs`) and was EXECUTED end-to-end over a real honest
+epoch — 11 suffix blocks (`pegout_delay + 1` = the minimum settleable suffix),
+2 burn-valid withdrawals aggregated via `layer1_epoch` into a SHA-final root,
+11 real mined difficulty-1 aux-PoW shares, and a depth-3 canonical-Ergo anchor
+chain. Harness: `engine/recursion/tests/dump_epoch.rs` + `settlement/exec-epoch`.
+
+In-guest cycle breakdown (RISC0 executor, `total_user_cycles`):
+
+| phase | cycles | per-unit |
+|---|---|---|
+| root-verify (SHA-final agg root, constant in N) | **101.4 M** | — |
+| E1+E3 structural + settled-set (11 blocks, 2 wd) | **59.3 M** | ~5.4 M/block |
+| **E2 in-guest aux-PoW share verify (11 blocks)** | **179.5 M** | **16.3 M/block** |
+| E4 canonical-Ergo anchor linkage (4 headers) | **0.53 M** | noise |
+| **total (whole 11-block epoch)** | **417 M** | — |
+
+**Verdict on E2.** The measured **16.3 M cycles/block** lands squarely in the
+reasoned 11–32 M/block window — the design's arithmetic was right. E4 (0.53 M)
+is even cheaper than the reasoned 2–4 M. Reading:
+
+- **Short devnet epochs are tractable in-guest.** An 11-block suffix's E2 is
+  179.5 M — comparable to root-verify (101 M), ~43 % of the 417 M total. The
+  whole epoch guest at ~2.2× the ~185 M-class settlement baseline is fine for a
+  devnet execute/prove. Stage-T ships E2 software-in-guest for short suffixes.
+- **Production-length epochs confirm the "per-block IVC needed" prediction.**
+  At 16.3 M/block a 240-block hourly epoch is ≈ **3.9 B cycles/epoch** of E2
+  alone — inside the predicted 2.6–7.7 B and far past a single wrap's budget.
+  So the **per-block IVC carrier (D-EV2, recommended) is confirmed as the
+  Stage-M carrier**; the blake2b AIR remains the scale endgame. The 60 s
+  block-time lever (4×) applies directly.
+
 ## 5. Interactions (asked explicitly)
 
 - **Incremental frontier:** unchanged and load-bearing — `prev_root →

@@ -7,3 +7,4 @@ pub mod devnet;
 pub mod hn;
 pub mod txbuild;
 pub mod vault;
+pub mod vault_epoch;

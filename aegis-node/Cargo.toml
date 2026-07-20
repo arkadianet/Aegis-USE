@@ -19,7 +19,12 @@ aegis-engine    = { path = "../engine" }
 aegis-hn-wallet = { path = "../engine/wallet" }
 postcard        = { version = "1", features = ["alloc"] }
 serde           = { version = "1", features = ["derive"] }
-p3-field        = { git = "https://github.com/Plonky3/Plonky3", rev = "4aed8fe4195d40305175d55e58690f46171258d9" }
+# p3-field is only used for the `PrimeField32` / `PrimeCharacteristicRing`
+# traits over the engine's `F` (BabyBear). It MUST resolve to the same p3 the
+# engine links, else the trait bounds on `F` are unsatisfied. The recursion
+# stack pinned the engine to crates.io p3 =0.6.1 (I1), so pin this to match —
+# a single p3-field 0.6.1 across the whole root workspace.
+p3-field        = "=0.6.1"
 ark-ec          = { workspace = true }
 ark-serialize   = { workspace = true }
 ergo-primitives = { workspace = true }
@@ -47,6 +52,12 @@ serde_json     = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+# Enable the engine's `aux-pow` feature in TEST builds only, so the node↔guest
+# DAA-parity cut gate can compare `crate::daa::next_nbits` against the guest port
+# `aegis_engine::epoch::daa::next_nbits` (all its transitive deps — ergo-ser,
+# num-bigint, ergo-rest-json, serde_json — are already node dependencies, so this
+# adds no new external crates; production node builds stay lean).
+aegis-engine = { path = "../engine", features = ["aux-pow"] }
 # The shared wire-type fixture (`aegis_types::tx::testutil::sample_transfer`)
 # that state/chain/seed/store/mm-forkchoice tests build blocks from.
 aegis-types = { path = "../aegis-types", features = ["testutil"] }

@@ -288,6 +288,103 @@ pub fn build_release(
     })
 }
 
+/// One settled withdrawal in an epoch release: `amount` USE to `recipient_tree`.
+pub struct EpochWithdrawal {
+    pub amount: u64,
+    pub recipient_tree: Vec<u8>,
+}
+
+/// The epoch-validity release tx (`vault_epoch` predicate): spend the vault box
+/// (script-only — empty proof, proof chunks in context-extension var 0) into a
+/// successor carrying the advanced R4/R5/R6/R7, N recipient outputs, and the
+/// fee box (always last). The `AEGISPV1` journal the guest committed is
+/// reconstructed by the contract from exactly this shape (design §2.2).
+///
+/// The E4 `ergo_ref` anchor is NOT a tx element: the contract splices it from
+/// `CONTEXT.headers` at validation time, so the caller's job is only to have
+/// the release land in a block whose recent-header window carries the anchor
+/// the receipt committed (operational; see `vault_epoch::ANCHOR_HEADER_INDEX`).
+#[allow(clippy::too_many_arguments)]
+pub fn build_release_epoch(
+    vault_box_id: &str,
+    vault_value: u64,
+    vault_tokens: Vec<Token>, // [(NFT,1),(USE,N)]
+    vault_tree: &[u8],
+    new_root: &[u8; 32],
+    settled_root_out: &[u8; 32],
+    tip_id_new: &[u8; 32],
+    counter_prev: i64, // vault R5; successor R5 = counter_prev + n
+    use_id: [u8; 32],
+    withdrawals: &[EpochWithdrawal],
+    receipt: &[u8],
+    height: u32,
+) -> Result<Transaction> {
+    let n = withdrawals.len();
+    if n == 0 {
+        return Err(anyhow!("epoch release needs >= 1 withdrawal"));
+    }
+    let (var_tpe, var_val) = crate::vault_epoch::chunk_proof(receipt);
+    let mut ext = ContextExtension::empty();
+    ext.values.insert(0u8, (var_tpe, var_val));
+
+    let use_in = vault_tokens
+        .iter()
+        .find(|t| *t.token_id.as_bytes() == use_id)
+        .map(|t| t.amount)
+        .ok_or_else(|| anyhow!("vault box carries no USE"))?;
+    let nft = vault_tokens
+        .iter()
+        .find(|t| *t.token_id.as_bytes() != use_id)
+        .cloned()
+        .ok_or_else(|| anyhow!("vault box carries no NFT"))?;
+
+    let total_out: u64 = withdrawals.iter().map(|w| w.amount).sum();
+    let successor = candidate(
+        vault_value - FEE_NANOERG - BOX_ERG * (n as u64),
+        vault_tree,
+        height,
+        vec![
+            nft,
+            Token {
+                token_id: TokenId::from_bytes(use_id),
+                amount: use_in
+                    .checked_sub(total_out)
+                    .ok_or_else(|| anyhow!("vault underfunded for the batch"))?,
+            },
+        ],
+        vec![
+            coll_byte_reg(new_root),           // R4
+            long_reg(counter_prev + n as i64), // R5
+            coll_byte_reg(settled_root_out),   // R6
+            coll_byte_reg(tip_id_new),         // R7
+        ],
+    )?;
+
+    let mut outputs = vec![successor];
+    for w in withdrawals {
+        outputs.push(candidate(
+            BOX_ERG,
+            &w.recipient_tree,
+            height,
+            vec![Token {
+                token_id: TokenId::from_bytes(use_id),
+                amount: w.amount,
+            }],
+            vec![],
+        )?);
+    }
+    outputs.push(fee_candidate(height)?);
+
+    Ok(Transaction {
+        inputs: vec![Input {
+            box_id: digest32(vault_box_id)?,
+            spending_proof: SpendingProof::new(vec![], ext).map_err(|e| anyhow!("{e:?}"))?,
+        }],
+        data_inputs: vec![],
+        output_candidates: outputs,
+    })
+}
+
 /// Data-input free re-export so main.rs needn't import ergo-ser directly.
 pub fn no_data_inputs() -> Vec<DataInput> {
     vec![]
