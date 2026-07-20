@@ -31,12 +31,41 @@ use std::sync::OnceLock;
 
 use p3_field::PrimeCharacteristicRing;
 
-use crate::poseidon::{compress, Digest, DIGEST_ELEMS, F};
+use crate::poseidon::{compress, hash_domain, Digest, DIGEST_ELEMS, F};
 
 /// Fixed SMT depth: 8 limbs × 31 canonical bits = 248-bit key.
 pub const SETTLED_DEPTH: usize = 248;
 /// Canonical bits per BabyBear limb (`p < 2^31`).
 const BITS_PER_LIMB: usize = 31;
+
+/// Domain-separation tag for the peg-in one-mint-ever keys living in the SAME
+/// R6 SMT as the burn/spend nullifiers (D-F3, `epoch-validity-f1-f3-design.md`
+/// §3.1 step 6b). A settled nullifier is inserted under its raw digest (itself a
+/// `DOMAIN_NULLIFIER`-tagged Poseidon2 output); a used peg-in is inserted under
+/// [`pegin_used_key`] = `hash_domain(DOMAIN_PEGIN_USED, box_id_limbs)`. The two
+/// key families are therefore Poseidon2-domain-separated: a collision between a
+/// nullifier key and a peg-in key would require a `DOMAIN_NULLIFIER` output to
+/// equal a `DOMAIN_PEGIN_USED` output (a ~2^124 birthday event), and the peg-in
+/// side is not attacker-grindable — `box_id` must be a real, buried Ergo deposit
+/// (F3). One accumulator thus safely serves both one-spend-ever and
+/// one-mint-ever. Pinned; changing it is chain-id-breaking.
+pub const DOMAIN_PEGIN_USED: u32 = 0x0A05;
+
+/// The R6 SMT key digest for a used peg-in deposit `box_id` (the 32-byte Ergo
+/// box id). Maps the box id into the digest space via a domain-separated
+/// Poseidon2 sponge over its eight canonical little-endian `u32` limbs, so the
+/// peg-in key namespace never overlaps the nullifier namespace ([`DOMAIN_PEGIN_USED`]).
+///
+/// The resulting digest is fed to [`verify_insert`] exactly like a nullifier —
+/// its 248-bit [`key_bits`] decomposition is the SMT position. Pinned by
+/// [`tests::pegin_used_key_is_domain_separated`].
+pub fn pegin_used_key(box_id: &[u8; 32]) -> Digest {
+    let mut limbs = [F::ZERO; DIGEST_ELEMS];
+    for (limb, chunk) in limbs.iter_mut().zip(box_id.chunks_exact(4)) {
+        *limb = F::from_u32(u32::from_le_bytes(chunk.try_into().expect("4-byte chunk")));
+    }
+    hash_domain(DOMAIN_PEGIN_USED, &limbs)
+}
 
 /// The empty-position leaf.
 pub const EMPTY: Digest = [F::ZERO; DIGEST_ELEMS];
@@ -271,6 +300,73 @@ mod tests {
             b.root(),
             "root is a function of the set, not order"
         );
+    }
+
+    // ----- peg-in one-mint-ever (domain-separated R6 sharing) -----
+
+    #[test]
+    fn pegin_used_key_is_deterministic_and_box_id_bound() {
+        assert_eq!(pegin_used_key(&[7u8; 32]), pegin_used_key(&[7u8; 32]));
+        let mut other = [7u8; 32];
+        other[0] = 8;
+        assert_ne!(
+            pegin_used_key(&[7u8; 32]),
+            pegin_used_key(&other),
+            "distinct box ids must map to distinct keys"
+        );
+    }
+
+    #[test]
+    fn pegin_used_key_is_domain_separated_from_a_raw_nullifier() {
+        // A nullifier whose limbs are numerically the box-id limbs must NOT
+        // land at the same R6 position as the peg-in key for that box id — the
+        // domain tag is the separation. (This is the one-sided separation the
+        // shared-R6 decision D-F3 relies on.)
+        let box_id = [0x11u8; 32];
+        let raw_nf: Digest = core::array::from_fn(|i| {
+            F::from_u32(u32::from_le_bytes(
+                box_id[i * 4..i * 4 + 4].try_into().unwrap(),
+            ))
+        });
+        assert_ne!(
+            key_bits(&raw_nf),
+            key_bits(&pegin_used_key(&box_id)),
+            "peg-in key must be domain-separated from the same-limbs nullifier"
+        );
+    }
+
+    #[test]
+    fn a_used_pegin_cannot_be_minted_twice_across_settlements() {
+        // One-mint-ever: insert a peg-in box id into R6, then a second insert of
+        // the same box id against the post-insert root is rejected (member).
+        let mut set = SettledSet::new();
+        let key = pegin_used_key(&[0xABu8; 32]);
+        let w0 = set.witness(&key);
+        let root1 = verify_insert(&empty_settled_root(), &key, &w0).expect("fresh mint inserts");
+        set.insert(&key);
+        let w1 = set.witness(&key);
+        assert_eq!(
+            verify_insert(&root1, &key, &w1),
+            Err(SettledError::AlreadySettled),
+            "a peg-in deposit can be minted at most once, ever"
+        );
+    }
+
+    #[test]
+    fn nullifiers_and_pegins_coexist_in_one_r6() {
+        // Both key families insert into the SAME set without interfering.
+        let mut set = SettledSet::new();
+        let mut root = empty_settled_root();
+        let nf_a = nf(1);
+        let nf_b = nf(2);
+        let pk_a = pegin_used_key(&[1u8; 32]);
+        let pk_b = pegin_used_key(&[2u8; 32]);
+        for key in [nf_a, nf_b, pk_a, pk_b] {
+            let w = set.witness(&key);
+            root = verify_insert(&root, &key, &w).expect("distinct keys insert");
+            set.insert(&key);
+        }
+        assert_ne!(root, empty_settled_root());
     }
 
     // ----- oracle parity -----
