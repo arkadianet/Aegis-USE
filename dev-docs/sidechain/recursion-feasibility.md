@@ -1160,3 +1160,46 @@ shared `build_agg_pair`), tests `settlement_channel` / `settlement_measure` /
 (the `[patch] sha2` accelerator + `verify_root_bytes_sha`). Reproduce:
 `AEGIS_I4_DUMP_DIR=<dir> AEGIS_I4_N={2,4} cargo test --release --test dump_artifacts
 -- --ignored` then `exec-i4 --dir <dir>`.*
+
+## 14. vk-pin + REAL epoch-validity prove → vault verifyStark (deferred gate CLOSED)
+
+The last v6 validation gap — a REAL epoch-validity settlement proof accepted by
+the v6 PegVault via `verifyStark` end-to-end — is now closed (2026-07-20, branch
+`feat/v6-vkpin-e2e`). No live chain cut; that follows the red-review.
+
+**vk / image-id pin (§4(d)/§12.4).** `settlement/EPOCH_IMAGE_ID.hex` =
+`67837eaac6e5f5240b014e4481b209ad4ce83414a7fc6abbe9d6f7f7a861aa47` — the aux-PoW
+epoch-validity guest (v7 `AEGISPV1`) RISC0 image id, built under `~/apps/risc0-cuda`
+(`AEGIS_EPOCH_AUXPOW=1`, `--features cuda`) and **bit-for-bit identical to the host
+build** (image-id parity holds at the pinned worktree path). The guest ELF bakes
+the epoch statement AND `AggParams::default()` (the whole recursion tower), so a
+swapped guest or a drifted aggregation config both change this id AND trip
+`aegis_recursion::PINNED_AGG_PARAMS` (`engine/recursion/tests/agg_params_pin.rs`).
+The id is pinned in `bridge-tools::vault_epoch` (`pinned_epoch_image_id`), the sole
+value `verifyStark` will release funds for.
+
+**Real GPU prove (batch-independent, minutes).** `settlement/exec-epoch prove`
+over the honest 11-block / 2-withdrawal epoch (`dump_epoch.rs`), RTX 3090, real
+succinct receipt (no dev-mode): **wall = 825.5 s (~13.8 min)** at `segment_po2=20`
+(po2=21 OOMs the 24 GB card in the lift phase), **user_cycles = 417,484,933**
+(root_verify 101.4 M + epoch_validity 59.7 M + aux_pow_e2 179.5 M + anchor_e4
+0.5 M — the M-E1 breakdown), 425 segments, **receipt 218 KiB**, **journal 338 B**
+(`AEGISPV1`, counter_next=2). `receipt.verify(image_id)` passes locally.
+
+**Vault verifyStark TRUE (the deferred gate).**
+`bridge-tools/tests/epoch_vault_real_receipt.rs` (real-verify, ergo-sigma oracle
+tier) reconstructs the `AEGISPV1` journal from the release tx — R4/R6/R7 endpoints
++ the `CONTEXT.headers` anchor splice + recipient entries — **byte-exact** the
+receipt's committed journal, then runs the FULL v6 epoch vault predicate with the
+real receipt in the context extension and `image_id` = the pin ⇒ **verifyStark
+TRUE**. A tampered receipt (flipped byte) and a journal-mismatch (bumped recipient
+amount, real receipt) ⇒ FALSE. The complete loop — guest → real proof → vault
+verifyStark → would-release — is validated.
+
+**Fabrication dies at prove time, for real.** `dump_epoch::dump_fabricated`
+presents a REAL aggregation root for a spend set the settler could genuinely prove
+paired with the honest (consensus-consistent) suffix recording the withdrawals
+they actually want — the fabrication vector. Run through the COMPILED guest
+(`exec-epoch execute`), the guest panics `SpendDigestMismatch` before any
+proving — so no receipt exists for the vault to accept. The engine structural
+suite (`engine/tests/epoch_validity.rs`, 9/9) covers the four other death modes.

@@ -26,7 +26,7 @@ use aegis_engine::epoch::testgen::{build_anchor_chain, diff1_nbits, mine_diff1_s
 use aegis_engine::epoch::types::{
     coinbase_amount, peg_fee, PegOut, SpendPublics, SuffixBlock, FLAT_FEE, PEGOUT_DELAY,
 };
-use aegis_engine::epoch::verify::{verify_epoch, EpochWitness};
+use aegis_engine::epoch::verify::{verify_epoch, EpochError, EpochWitness};
 use aegis_engine::epoch::wire::EpochWitnessWire;
 use aegis_engine::merkle::{Frontier, NoteTree};
 use aegis_engine::mint::coinbase_cm_expected;
@@ -156,16 +156,22 @@ fn spend_publics(b: &BuiltSpend) -> SpendPublics {
     }
 }
 
-#[test]
-#[ignore = "M-E1 dump; run explicitly with AEGIS_EPOCH_DUMP_DIR set"]
-fn dump() {
-    let Ok(dir) = std::env::var("AEGIS_EPOCH_DUMP_DIR") else {
-        eprintln!("AEGIS_EPOCH_DUMP_DIR unset — skipping");
-        return;
-    };
-    let dir = Path::new(&dir);
-    std::fs::create_dir_all(dir).unwrap();
-    let params = AggParams::default();
+/// The honest epoch artifact set: the SHA-final aggregation root (real proofs),
+/// the guest witness, per-block shares (E2), the anchor (E4), and the honest
+/// spend set (for the fabrication test's decoy comparison).
+struct HonestEpoch {
+    root_bytes: Vec<u8>,
+    witness: EpochWitness,
+    share_wires: Vec<ShareWitnessWire>,
+    anchor_wire: AnchorWitnessWire,
+    honest_spends: Vec<SpendPublics>,
+    n_withdrawals: usize,
+}
+
+/// Build the honest 11-block / 2-withdrawal epoch (the M-E1 statement). Shared by
+/// the honest dump and the fabrication dump (which reuses this exact — fully
+/// consensus-consistent — suffix, swapping only the aggregation root).
+fn build_honest(params: &AggParams) -> HonestEpoch {
     let miner_owner = digest_arr(7);
     let pot_before = 1_000_000u64;
     let shielded_before = 1_000_000_000u64;
@@ -216,7 +222,7 @@ fn dump() {
         .iter()
         .map(|b| {
             layer1_epoch(
-                &params,
+                params,
                 &SpendProofInput {
                     proof: &b.proof,
                     common: &b.common,
@@ -226,11 +232,11 @@ fn dump() {
             )
         })
         .collect();
-    let (root, _levels) = aggregate_settlement_sha(&params, leaves);
+    let (root, _levels) = aggregate_settlement_sha(params, leaves);
     let root_bytes = serialize_root_sha(&root);
     // The bind: aggregated root digest == epoch_spend_root over the same spends.
     assert_eq!(
-        verify_root_bytes_sha(&params, &root_bytes)
+        verify_root_bytes_sha(params, &root_bytes)
             .expect("root verifies")
             .as_slice(),
         epoch_spend_root(&spends).as_slice(),
@@ -360,20 +366,134 @@ fn dump() {
         .map(|b| ShareWitnessWire::from_witness(&mine_diff1_share(CHAIN_ID, b)))
         .collect();
     let anchor_wire = AnchorWitnessWire::from_witness(&anchor);
-    let witness_wire = EpochWitnessWire::from_witness(&witness);
+
+    HonestEpoch {
+        root_bytes,
+        witness,
+        share_wires,
+        anchor_wire,
+        honest_spends: spends,
+        n_withdrawals: built.len(),
+    }
+}
+
+/// Build a REAL SHA-final aggregation root over a DIFFERENT valid spend set — the
+/// "decoy" a settler could genuinely prove (they hold real proofs), which does
+/// NOT match the withdrawals recorded in the honest suffix. Returns the root
+/// bytes + its surfaced spend digest.
+fn build_decoy_root(params: &AggParams) -> (Vec<u8>, Digest) {
+    let mut tree = NoteTree::new();
+    let prep: Vec<_> = [(3u32, 5001u64), (4u32, 8001u64)]
+        .into_iter()
+        .map(|(s, amt)| (s, prepare_inputs(&mut tree, s, amt)))
+        .collect();
+    let built: Vec<BuiltSpend> = prep
+        .into_iter()
+        .map(|(s, (in0, in1, amt))| prove_burn(&tree, s, in0, in1, amt))
+        .collect();
+    let spends: Vec<SpendPublics> = built.iter().map(spend_publics).collect();
+    let leaves: Vec<_> = built
+        .iter()
+        .map(|b| {
+            layer1_epoch(
+                params,
+                &SpendProofInput {
+                    proof: &b.proof,
+                    common: &b.common,
+                    pis: &b.pis,
+                },
+                FLAT_FEE,
+            )
+        })
+        .collect();
+    let (root, _) = aggregate_settlement_sha(params, leaves);
+    let root_bytes = serialize_root_sha(&root);
+    let limbs = verify_root_bytes_sha(params, &root_bytes).expect("decoy root verifies");
+    let digest: Digest = core::array::from_fn(|i| limbs[i]);
+    assert_eq!(
+        digest.as_slice(),
+        epoch_spend_root(&spends).as_slice(),
+        "decoy root digest == its own spend set"
+    );
+    (root_bytes, digest)
+}
+
+#[test]
+#[ignore = "M-E1 dump; run explicitly with AEGIS_EPOCH_DUMP_DIR set"]
+fn dump() {
+    let Ok(dir) = std::env::var("AEGIS_EPOCH_DUMP_DIR") else {
+        eprintln!("AEGIS_EPOCH_DUMP_DIR unset — skipping");
+        return;
+    };
+    let dir = Path::new(&dir);
+    std::fs::create_dir_all(dir).unwrap();
+    let e = build_honest(&AggParams::default());
+    let witness_wire = EpochWitnessWire::from_witness(&e.witness);
 
     // ---- dump guest inputs (env::read order) ----
-    std::fs::write(dir.join("root.bin"), &root_bytes).unwrap();
+    std::fs::write(dir.join("root.bin"), &e.root_bytes).unwrap();
     write_pc(dir, "witness.pc", &witness_wire);
-    write_pc(dir, "shares.pc", &share_wires);
-    write_pc(dir, "anchor.pc", &anchor_wire);
+    write_pc(dir, "shares.pc", &e.share_wires);
+    write_pc(dir, "anchor.pc", &e.anchor_wire);
 
     println!(
         "[EPOCH-DUMP] {} blocks ({} withdrawals), root {} bytes, {} shares -> {}",
-        blocks.len(),
-        built.len(),
-        root_bytes.len(),
-        share_wires.len(),
+        e.witness.blocks.len(),
+        e.n_withdrawals,
+        e.root_bytes.len(),
+        e.share_wires.len(),
+        dir.display()
+    );
+}
+
+#[test]
+#[ignore = "fabrication dump; run explicitly with AEGIS_EPOCH_FAB_DUMP_DIR set"]
+fn dump_fabricated() {
+    // The fabrication vector, for real: the settler presents a REAL aggregation
+    // root — but for a spend set they could actually prove — while the suffix
+    // records the withdrawals they WANT (which they cannot prove). Everything in
+    // the suffix is consensus-consistent; the ONE thing they cannot forge is a
+    // root whose surfaced digest equals the re-derived suffix digest. The guest
+    // overwrites `witness.spend_root_digest` with the verified root's digest and
+    // then requires the re-derived suffix digest to match — so it dies at the
+    // digest bind BEFORE producing any receipt. Dumping the honest (consistent)
+    // suffix with a decoy root is the faithful, guest-executable form of this.
+    let Ok(dir) = std::env::var("AEGIS_EPOCH_FAB_DUMP_DIR") else {
+        eprintln!("AEGIS_EPOCH_FAB_DUMP_DIR unset — skipping");
+        return;
+    };
+    let dir = Path::new(&dir);
+    std::fs::create_dir_all(dir).unwrap();
+    let params = AggParams::default();
+    let mut e = build_honest(&params);
+    // Dump the honest witness UNCHANGED (the guest overwrites its digest field
+    // from the root anyway).
+    let witness_wire = EpochWitnessWire::from_witness(&e.witness);
+
+    let (decoy_bytes, decoy_digest) = build_decoy_root(&params);
+    let honest_digest = epoch_spend_root(&e.honest_spends);
+    assert_ne!(
+        decoy_digest, honest_digest,
+        "decoy spend set must differ from the honest suffix"
+    );
+    // The exact fact the guest enforces: bind the decoy digest, the honest suffix
+    // re-derivation no longer matches => SpendDigestMismatch (no receipt possible).
+    e.witness.spend_root_digest = decoy_digest;
+    assert_eq!(
+        verify_epoch(&e.witness),
+        Err(EpochError::SpendDigestMismatch),
+        "a fabricated (mismatched-root) epoch must die at the digest bind"
+    );
+
+    // ---- dump the guest inputs: decoy root + honest suffix/shares/anchor ----
+    std::fs::write(dir.join("root.bin"), &decoy_bytes).unwrap();
+    write_pc(dir, "witness.pc", &witness_wire);
+    write_pc(dir, "shares.pc", &e.share_wires);
+    write_pc(dir, "anchor.pc", &e.anchor_wire);
+
+    println!(
+        "[EPOCH-FAB-DUMP] decoy root {} bytes; the guest MUST die SpendDigestMismatch (no proof) -> {}",
+        decoy_bytes.len(),
         dir.display()
     );
 }
