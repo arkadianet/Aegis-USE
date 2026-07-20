@@ -543,6 +543,7 @@ mod tests {
             coinbase_cm: [F::ZERO; 8],
             coinbase_is_reward: true,
             pot_after: 0,
+            shielded_after: 0,
         }]
     }
 

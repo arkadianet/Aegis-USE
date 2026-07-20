@@ -385,6 +385,7 @@ mod tests {
             coinbase_cm: core::array::from_fn(|i| F::from_u32(i as u32 + 7)),
             coinbase_is_reward: true,
             pot_after: 1000,
+            shielded_after: 0,
         };
         // A "fake" tip differing only in a body/coinbase field.
         let mut fake = honest.clone();
