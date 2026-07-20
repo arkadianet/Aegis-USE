@@ -60,8 +60,24 @@ demonstration; the crypto-maturity tier gates **real value** only.
 
 ## Tier 3 — cryptographic maturity (the real-value gate)
 
-- [ ] **Settlement epoch-canonicality / double-pay (HIGH — red-review 2026-07-19).**
-      The settlement guest proves a burn is a leaf of `(prev_root, new_root]` but
+- [ ] **Epoch-validity fabrication gaps F1-F3 (HIGH — red-review 2026-07-20, MAINNET-BLOCKING).**
+      The epoch-validity mechanism is BUILT (E0 aux-PoW + E1 re-derivation + E2 share-verify
+      + E4 anchor) but does NOT yet actually price fabrication — three real gaps (full detail
+      in `v6-red-review-findings.md`): **F1** anchor-window seam roots are UNAUTHENTICATED
+      (settler names a fake private-tree root → unbounded fake-value injection; the
+      doc-claimed `anchor_seam` auth does NOT exist in code, field is `vec![]`); **F2** E2
+      share-verify checks the block's self-declared `sc_nbits` not the DAA expectation
+      (fabricator mines at difficulty-1 even at mainnet); **F3** peg-in backing not verified
+      in-guest (unbacked mints). Testnet (difficulty-1, honest-settler) collapses these into
+      the accepted residuals; MAINNET requires all three closed. **"Fabrication priced /
+      trustless at the SPV ceiling" is the design INTENT, not the current implementation —
+      do NOT mark epoch-validity done until F1-F3 land.** Fixes: in-guest seam-root auth
+      (walk R7) + bind pot/shielded into the R-register chain; in-guest LWMA/DAA; in-guest
+      peg-in deposit proof. Plus F4 (spend fee declared-not-proof-bound) + F5 (E4 anchor
+      depth ignored) — minor.
+- [ ] ~~**Settlement epoch-canonicality / double-pay (red-review 2026-07-19).**~~ Superseded
+      by the F1-F3 entry above — epoch-validity IS the fix, but incomplete per F1-F3. Original:
+      the settlement guest proves a burn is a leaf of `(prev_root, new_root]` but
       NOT that `new_root` is the *canonical* hn chain root. A malicious permissionless
       settler can build a non-canonical epoch re-appending an already-settled burn +
       reuse its spend proof → **double-pay / peg-inflation** (pays the original
