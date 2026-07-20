@@ -24,6 +24,8 @@ pub mod anchor;
 pub mod aux_wire;
 #[cfg(feature = "aux-pow")]
 pub mod batch_merkle;
+#[cfg(feature = "aux-pow")]
+pub mod daa;
 pub mod digest;
 pub mod header_id;
 #[cfg(feature = "aux-pow")]

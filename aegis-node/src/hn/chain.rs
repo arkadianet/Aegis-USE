@@ -493,6 +493,24 @@ impl HnChain {
             .chain(self.pegin_queue.iter().map(|pi| params.peg_fee(pi.amount)))
             .sum();
         let pot_after = self.state.pot() + fees + peg_fees - coinbase_amount;
+        // The post-block shielded total (header-committed, D-F1 §1.3a) — the same
+        // conservation replay `apply_block` enforces: pool grows by the coinbase
+        // + net peg-in, shrinks by tx/peg-out fees + burned peg-out value.
+        let pegin_inflow: u64 = self.pegin_queue.iter().map(|pi| pi.amount).sum();
+        let pegin_fees: u64 = self
+            .pegin_queue
+            .iter()
+            .map(|pi| params.peg_fee(pi.amount))
+            .sum();
+        let burn_total: u64 = self
+            .mempool_pegouts
+            .iter()
+            .map(|po| po.amount + params.peg_fee(po.amount))
+            .sum();
+        let shielded_after =
+            self.state.shielded_total() + coinbase_amount + (pegin_inflow - pegin_fees)
+                - fees
+                - burn_total;
         let block_id = self.block_id();
         let MintOut {
             cm: coinbase_cm,
@@ -537,6 +555,7 @@ impl HnChain {
             coinbase_ct,
             coinbase_is_reward: true,
             pot_after,
+            shielded_after,
             anchor,
             aux_pow: None,
         };
@@ -579,6 +598,8 @@ impl HnChain {
             coinbase_ct,
             coinbase_is_reward: false,
             pot_after: self.state.pot(),
+            // Genesis issuance grows the pool by exactly the pinned allocation.
+            shielded_after: self.state.shielded_total() + amount,
             anchor: AuxAnchor::genesis(),
             aux_pow: None,
         };

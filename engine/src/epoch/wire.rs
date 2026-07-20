@@ -12,6 +12,7 @@ use crate::poseidon::{digest_to_limbs, Digest, DIGEST_ELEMS, F};
 use crate::settled::SETTLED_DEPTH;
 use p3_field::PrimeCharacteristicRing;
 
+use super::header_id::SeamHeader;
 use super::types::{PegIn, PegOut, SpendPublics, SuffixBlock};
 use super::verify::EpochWitness;
 
@@ -89,6 +90,7 @@ pub struct SuffixBlockWire {
     pub coinbase_cm: LimbDigest,
     pub coinbase_is_reward: bool,
     pub pot_after: u64,
+    pub shielded_after: u64,
 }
 
 impl SuffixBlockWire {
@@ -124,6 +126,7 @@ impl SuffixBlockWire {
             coinbase_cm: to_l(&b.coinbase_cm),
             coinbase_is_reward: b.coinbase_is_reward,
             pot_after: b.pot_after,
+            shielded_after: b.shielded_after,
         }
     }
 
@@ -159,6 +162,63 @@ impl SuffixBlockWire {
             coinbase_cm: to_d(&self.coinbase_cm),
             coinbase_is_reward: self.coinbase_is_reward,
             pot_after: self.pot_after,
+            shielded_after: self.shielded_after,
+        }
+    }
+}
+
+/// Serde wire form of a [`SeamHeader`] — digests as canonical `u32` limbs.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SeamHeaderWire {
+    pub height: u64,
+    pub prev_header_id: [u8; 32],
+    pub prev_root: LimbDigest,
+    pub state_root: LimbDigest,
+    pub timestamp_ms: u64,
+    pub sc_nbits: u32,
+    pub miner_owner: LimbDigest,
+    pub coinbase_amount: u64,
+    pub coinbase_cm: LimbDigest,
+    pub coinbase_is_reward: bool,
+    pub pot_after: u64,
+    pub shielded_after: u64,
+    pub body_cm: LimbDigest,
+}
+
+impl SeamHeaderWire {
+    fn from_seam(h: &SeamHeader) -> Self {
+        Self {
+            height: h.height,
+            prev_header_id: h.prev_header_id,
+            prev_root: to_l(&h.prev_root),
+            state_root: to_l(&h.state_root),
+            timestamp_ms: h.timestamp_ms,
+            sc_nbits: h.sc_nbits,
+            miner_owner: to_l(&h.miner_owner),
+            coinbase_amount: h.coinbase_amount,
+            coinbase_cm: to_l(&h.coinbase_cm),
+            coinbase_is_reward: h.coinbase_is_reward,
+            pot_after: h.pot_after,
+            shielded_after: h.shielded_after,
+            body_cm: to_l(&h.body_cm),
+        }
+    }
+
+    fn to_seam(&self) -> SeamHeader {
+        SeamHeader {
+            height: self.height,
+            prev_header_id: self.prev_header_id,
+            prev_root: to_d(&self.prev_root),
+            state_root: to_d(&self.state_root),
+            timestamp_ms: self.timestamp_ms,
+            sc_nbits: self.sc_nbits,
+            miner_owner: to_d(&self.miner_owner),
+            coinbase_amount: self.coinbase_amount,
+            coinbase_cm: to_d(&self.coinbase_cm),
+            coinbase_is_reward: self.coinbase_is_reward,
+            pot_after: self.pot_after,
+            shielded_after: self.shielded_after,
+            body_cm: to_d(&self.body_cm),
         }
     }
 }
@@ -170,9 +230,7 @@ pub struct EpochWitnessWire {
     pub blocks: Vec<SuffixBlockWire>,
     pub frontier_bytes: Vec<u8>,
     pub tip_id_prev: [u8; 32],
-    pub pot_before: u64,
-    pub shielded_before: u64,
-    pub seam_roots: Vec<LimbDigest>,
+    pub seam: Vec<SeamHeaderWire>,
     pub settled_root_in: LimbDigest,
     /// Flattened 248-sibling paths per peg-out (each `SETTLED_DEPTH` limb-digests).
     pub settled_paths: Vec<Vec<LimbDigest>>,
@@ -189,9 +247,7 @@ impl EpochWitnessWire {
             blocks: w.blocks.iter().map(SuffixBlockWire::from_block).collect(),
             frontier_bytes: w.frontier_bytes.clone(),
             tip_id_prev: w.tip_id_prev,
-            pot_before: w.pot_before,
-            shielded_before: w.shielded_before,
-            seam_roots: w.seam_roots.iter().map(to_l).collect(),
+            seam: w.seam.iter().map(SeamHeaderWire::from_seam).collect(),
             settled_root_in: to_l(&w.settled_root_in),
             settled_paths: w
                 .settled_paths
@@ -224,9 +280,7 @@ impl EpochWitnessWire {
             blocks: self.blocks.iter().map(SuffixBlockWire::to_block).collect(),
             frontier_bytes: self.frontier_bytes.clone(),
             tip_id_prev: self.tip_id_prev,
-            pot_before: self.pot_before,
-            shielded_before: self.shielded_before,
-            seam_roots: self.seam_roots.iter().map(to_d).collect(),
+            seam: self.seam.iter().map(SeamHeaderWire::to_seam).collect(),
             settled_root_in: to_d(&self.settled_root_in),
             settled_paths,
             spend_root_digest: to_d(&self.spend_root_digest),

@@ -30,8 +30,11 @@ use ergo_ser::difficulty::decode_compact_bits;
 use ergo_ser::extension::ExtensionField;
 use ergo_ser::header::{serialize_header_without_pow, Header as ErgoHeader};
 use num_bigint::BigUint;
+use std::collections::HashSet;
 
 use super::batch_merkle::verify_batch_merkle_proof;
+use super::header_id::header_id;
+use super::types::SuffixBlock;
 
 // The MM commitment constants (pinned; mirror `aegis-spec`) — the extension
 // field key/version/length the miner splices to carry the hn header id. Shared
@@ -77,6 +80,20 @@ pub enum ShareError {
     ZeroTarget { nbits: u32 },
     #[error("share Autolykos hit does not clear the block's sc_nbits target")]
     PowNotCleared,
+    #[error("suffix has {blocks} blocks but {shares} shares (one share per block)")]
+    ShareCountMismatch { blocks: usize, shares: usize },
+    #[error("two suffix shares carry the same PoW message (one solve, many blocks — F6b)")]
+    SharedPowMessage,
+}
+
+/// The Autolykos PoW message of a share: `blake2b256` over the header bytes
+/// WITHOUT the solution (it includes `extension_root`, binding the work to the
+/// hn-id commitment). Surfaced so the suffix verifier can enforce F6b —
+/// distinct message ⟺ distinct solve.
+pub(crate) fn share_pow_message(witness: &ShareWitness) -> Result<[u8; 32], ShareError> {
+    let header_bytes = serialize_header_without_pow(&witness.ergo_header)
+        .map_err(|e| ShareError::HeaderEncode(e.to_string()))?;
+    Ok(blake2b256(&header_bytes))
 }
 
 /// Extension-merkle leaf digest of a field: `blake2b256(0x00 ‖ kvToLeaf(field))`
@@ -110,9 +127,7 @@ pub fn verify_share(
 
     // Step 3 — PoW message = blake2b256 of the header bytes WITHOUT the solution
     // (includes extension_root, binding the work to the commitment).
-    let header_bytes = serialize_header_without_pow(&witness.ergo_header)
-        .map_err(|e| ShareError::HeaderEncode(e.to_string()))?;
-    let msg = blake2b256(&header_bytes);
+    let msg = share_pow_message(witness)?;
 
     // Step 4 — extension inclusion under the PoW-committed extension_root.
     if witness.proof.indices.len() != 1 {
@@ -161,6 +176,41 @@ pub fn verify_share(
     Ok(decode_compact_bits(sc_nbits))
 }
 
+/// Verify every suffix block's aux-PoW share **and** enforce F6b: all shares
+/// carry pairwise-distinct PoW messages, so one Autolykos solve cannot be
+/// amplified into `k` "blocks" (dropping the fabrication price from `k·D` to
+/// `D`). The node kills amplification with extension-key uniqueness (rule 405,
+/// `block.rs:642`); in-guest the equivalent is that distinct `msg` ⟺ distinct
+/// solve (re-binding a hit to a different message voids it), which needs only
+/// the already-computed message — no extension replay. Honest chains build one
+/// candidate per hn block, so their messages differ trivially.
+///
+/// The block-committed hn id is RECOMPUTED per block (`header_id`) and never
+/// trusted from the share. Returns each block's real-work weight on success.
+pub fn verify_suffix_shares(
+    chain_id: u32,
+    blocks: &[SuffixBlock],
+    shares: &[ShareWitness],
+) -> Result<Vec<BigUint>, ShareError> {
+    if blocks.len() != shares.len() {
+        return Err(ShareError::ShareCountMismatch {
+            blocks: blocks.len(),
+            shares: shares.len(),
+        });
+    }
+    let mut seen: HashSet<[u8; 32]> = HashSet::with_capacity(blocks.len());
+    let mut works = Vec::with_capacity(blocks.len());
+    for (block, share) in blocks.iter().zip(shares) {
+        let hid = header_id(chain_id, block);
+        let work = verify_share(share, &hid, block.sc_nbits)?;
+        if !seen.insert(share_pow_message(share)?) {
+            return Err(ShareError::SharedPowMessage);
+        }
+        works.push(work);
+    }
+    Ok(works)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -193,6 +243,7 @@ mod tests {
             coinbase_cm: digest(4),
             coinbase_is_reward: true,
             pot_after: 10,
+            shielded_after: 11,
         }
     }
 
@@ -311,6 +362,50 @@ mod tests {
             verify_share(&w, &hid, block.sc_nbits),
             Err(ShareError::PowNotCleared),
             "a hit that does not clear the target is priced out"
+        );
+    }
+
+    // ----- F6b: one solve cannot become many blocks -----
+
+    #[test]
+    fn amplified_shares_sharing_one_solve_are_rejected() {
+        // The amplification attack: one solved Ergo candidate presented as k
+        // "distinct" shares. Here the same solve backs two suffix entries — the
+        // second carries the identical PoW message, so the dedup fires.
+        let block = diff1_block();
+        let share = mine_share(&block, true);
+        let blocks = vec![block.clone(), block];
+        let shares = vec![share.clone(), share];
+        assert_eq!(
+            verify_suffix_shares(CHAIN_ID, &blocks, &shares),
+            Err(ShareError::SharedPowMessage),
+            "one Autolykos solve must not be amplified into k blocks"
+        );
+    }
+
+    #[test]
+    fn distinct_honest_shares_pass_the_dedup() {
+        // Two genuinely different hn blocks ⇒ different id commitments ⇒ different
+        // extension_roots ⇒ different PoW messages: honest suffixes are unaffected.
+        let b0 = diff1_block();
+        let mut b1 = diff1_block();
+        b1.state_root[0] += F::ONE;
+        let s0 = mine_share(&b0, true);
+        let s1 = mine_share(&b1, true);
+        let works =
+            verify_suffix_shares(CHAIN_ID, &[b0, b1], &[s0, s1]).expect("distinct solves verify");
+        assert_eq!(works.len(), 2);
+    }
+
+    #[test]
+    fn share_count_must_match_block_count() {
+        let block = diff1_block();
+        assert_eq!(
+            verify_suffix_shares(CHAIN_ID, &[block], &[]),
+            Err(ShareError::ShareCountMismatch {
+                blocks: 1,
+                shares: 0
+            }),
         );
     }
 

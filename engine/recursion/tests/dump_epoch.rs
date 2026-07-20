@@ -21,10 +21,11 @@ use aegis_engine::commit::{note_commitment, owner_key};
 use aegis_engine::config::recursion::make_recursion_hiding_config;
 use aegis_engine::epoch::aux_wire::{AnchorWitnessWire, ShareWitnessWire};
 use aegis_engine::epoch::digest::epoch_spend_root;
-use aegis_engine::epoch::header_id::{block_id, header_id};
+use aegis_engine::epoch::header_id::{block_id, header_id, header_id_from_fields, SeamHeader};
 use aegis_engine::epoch::testgen::{build_anchor_chain, diff1_nbits, mine_diff1_share};
 use aegis_engine::epoch::types::{
-    coinbase_amount, peg_fee, PegOut, SpendPublics, SuffixBlock, FLAT_FEE, PEGOUT_DELAY,
+    coinbase_amount, peg_fee, PegOut, SpendPublics, SuffixBlock, FLAT_FEE, GENESIS_HEADER_ID,
+    PEGOUT_DELAY,
 };
 use aegis_engine::epoch::verify::{verify_epoch, EpochError, EpochWitness};
 use aegis_engine::epoch::wire::EpochWitnessWire;
@@ -245,9 +246,30 @@ fn build_honest(params: &AggParams) -> HonestEpoch {
 
     // ---- build the suffix: block 0 (2 pegouts) + PEGOUT_DELAY empty blocks ----
     let mut blocks: Vec<SuffixBlock> = Vec::new();
+    // F1 seam tip `T_prev`: a length-1, genesis-terminated seam whose state root
+    // is the pre-suffix frontier (the weld) and whose pot/shielded are the
+    // pre-suffix totals the guest derives back.
+    let seam_tip = SeamHeader {
+        height: START_HEIGHT - 1,
+        prev_header_id: GENESIS_HEADER_ID,
+        prev_root: Frontier::new().root(),
+        state_root: pre_frontier.root(),
+        timestamp_ms: 1_760_000_000_000 + (START_HEIGHT - 1) * 15_000,
+        sc_nbits: diff1_nbits(),
+        miner_owner,
+        coinbase_amount: 0,
+        coinbase_cm: digest_arr(0),
+        coinbase_is_reward: true,
+        pot_after: pot_before,
+        shielded_after: shielded_before,
+        body_cm: digest_arr(0),
+    };
+    let tip_id_prev = header_id_from_fields(CHAIN_ID, &seam_tip);
+
     let mut running = pre_frontier.clone();
     let mut pot = pot_before;
-    let mut prev_header_id = [0u8; 32];
+    let mut shielded = shielded_before;
+    let mut prev_header_id = tip_id_prev;
     let mut height = START_HEIGHT;
 
     // block 0
@@ -274,6 +296,8 @@ fn build_honest(params: &AggParams) -> HonestEpoch {
         let _ = running.append(coinbase_cm);
         let state_root = running.root();
         let pot_after = pot + fees + pegout_fees - cb;
+        let burn_total: u64 = pegouts.iter().map(|p| p.amount + peg_fee(p.amount)).sum();
+        let shielded_after = shielded + cb - fees - burn_total;
         let block = SuffixBlock {
             height,
             prev_header_id,
@@ -289,10 +313,12 @@ fn build_honest(params: &AggParams) -> HonestEpoch {
             coinbase_cm,
             coinbase_is_reward: true,
             pot_after,
+            shielded_after,
         };
         prev_header_id = header_id(CHAIN_ID, &block);
         blocks.push(block);
         pot = pot_after;
+        shielded = shielded_after;
         height += 1;
     }
 
@@ -305,6 +331,7 @@ fn build_honest(params: &AggParams) -> HonestEpoch {
         let _ = running.append(coinbase_cm);
         let state_root = running.root();
         let pot_after = pot - cb;
+        let shielded_after = shielded + cb;
         let block = SuffixBlock {
             height,
             prev_header_id,
@@ -320,10 +347,12 @@ fn build_honest(params: &AggParams) -> HonestEpoch {
             coinbase_cm,
             coinbase_is_reward: true,
             pot_after,
+            shielded_after,
         };
         prev_header_id = header_id(CHAIN_ID, &block);
         blocks.push(block);
         pot = pot_after;
+        shielded = shielded_after;
         height += 1;
     }
 
@@ -346,10 +375,8 @@ fn build_honest(params: &AggParams) -> HonestEpoch {
         chain_id: CHAIN_ID,
         blocks: blocks.clone(),
         frontier_bytes: postcard::to_allocvec(&pre_frontier).unwrap(),
-        tip_id_prev: [0u8; 32],
-        pot_before,
-        shielded_before,
-        seam_roots: vec![],
+        tip_id_prev,
+        seam: vec![seam_tip],
         settled_root_in: empty_settled_root(),
         settled_paths,
         spend_root_digest: epoch_spend_root(&spends),

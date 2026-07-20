@@ -173,6 +173,11 @@ pub struct HnBlock {
     /// The pot balance AFTER this block (header-committed; validators recompute
     /// `pot_parent + fees − coinbase` and reject a mismatch).
     pub pot_after: u64,
+    /// The shielded-pool total AFTER this block (header-committed, D-F1 §1.3a).
+    /// Validators recompute it from the conservation replay and reject a
+    /// mismatch — so *every* authenticated header pins the full value state and
+    /// the settlement guest's F1 seam can derive `shielded_before` from it.
+    pub shielded_after: u64,
     /// The merge-mining devnet anchor (monotone across blocks).
     pub anchor: AuxAnchor,
     /// The aux-PoW witness ([`super::auxpow::HnAuxPow`] bytes) binding this
@@ -238,6 +243,8 @@ pub enum HnError {
     BadGenesis,
     #[error("conservation violated: shielded total + pot changed")]
     ConservationViolated,
+    #[error("committed shielded_after does not match the recomputed shielded total")]
+    ShieldedMismatch,
     #[error("peg-in claim reuses an already-minted deposit box id")]
     DuplicatePegIn,
     #[error("peg-in claim is malformed (amount, ciphertext, or commitment)")]
@@ -327,6 +334,12 @@ impl HnState {
     /// checking a child of this tip needs for the `sc_nbits` equality.
     pub fn daa_view(&self) -> Vec<(u64, u32)> {
         self.daa_view.iter().copied().collect()
+    }
+
+    /// The current anchor-acceptance window (oldest first) — the node oracle for
+    /// the F1 seam's derived `recent_roots` (Q-F1 node↔guest parity cut gate).
+    pub fn recent_roots(&self) -> Vec<Digest> {
+        self.recent_roots.iter().copied().collect()
     }
 
     /// The emission pot's current balance (public).
@@ -586,6 +599,14 @@ impl HnState {
             (self.pot, self.shielded_total + amount)
         };
 
+        // The shielded-pool total is header-committed (D-F1 §1.3a): the block's
+        // `shielded_after` must equal the recomputed post-block total, so an
+        // authenticated header pins the value state exactly (the settlement
+        // guest's F1 seam derives `shielded_before` from it).
+        if block.shielded_after != shielded_next {
+            return Err(HnError::ShieldedMismatch);
+        }
+
         // ---- the shielded coinbase note must carry the claimed value ----
         let id = block_id(self.height, &self.tree.root());
         let expected_cm = coinbase_cm_expected(
@@ -794,6 +815,7 @@ mod tests {
             coinbase_ct: mint.ciphertext,
             coinbase_is_reward: true,
             pot_after: st.pot() - amount,
+            shielded_after: st.shielded_total() + amount,
             anchor: AuxAnchor::genesis(),
             aux_pow: None,
         }
@@ -901,6 +923,7 @@ mod tests {
             coinbase_ct: mint.ciphertext,
             coinbase_is_reward: true,
             pot_after: st.pot() - amount,
+            shielded_after: 0, // over-claim fails at CoinbaseMismatch (before the shielded check)
             anchor: AuxAnchor::genesis(),
             aux_pow: None,
         };
@@ -935,6 +958,7 @@ mod tests {
             coinbase_ct: mint.ciphertext,
             coinbase_is_reward: true,
             pot_after: 0,
+            shielded_after: 0, // fails at CoinbaseMismatch (before the shielded check)
             anchor: AuxAnchor::genesis(),
             aux_pow: None,
         };
@@ -967,6 +991,7 @@ mod tests {
             coinbase_ct: mint.ciphertext,
             coinbase_is_reward: true,
             pot_after: st.pot(),
+            shielded_after: 0, // under-claim fails at CoinbaseMismatch (before the shielded check)
             anchor: AuxAnchor::genesis(),
             aux_pow: None,
         };
@@ -1076,6 +1101,7 @@ mod tests {
             coinbase_ct: m.ciphertext,
             coinbase_is_reward: false,
             pot_after: 50,
+            shielded_after: 100, // genesis grows the pool by the pinned allocation
             anchor: AuxAnchor::genesis(),
             aux_pow: None,
         };
@@ -1108,6 +1134,58 @@ mod tests {
         assert!(matches!(
             st.apply_block(&bad, &circuit),
             Err(HnError::PotMismatch)
+        ));
+    }
+
+    #[test]
+    fn node_recent_roots_match_engine_seam_window() {
+        // Q-F1 cut gate: the guest's `seam_anchor_window` (derived from the F1
+        // seam) equals the node's live `recent_roots` VecDeque in BOTH regimes —
+        // young (the pre-genesis empty-tree root is still a member) and mature (it
+        // has been evicted after ROOT_WINDOW blocks). The node is the oracle.
+        use aegis_engine::epoch::header_id::seam_header_of;
+        use aegis_engine::epoch::verify::seam_anchor_window;
+
+        for n_blocks in [5usize, 130] {
+            let miner = addr(b"parity-miner");
+            let mut st = HnState::new(params_pot(1_000_000));
+            let circuit = SpendCircuit::new();
+            let mut blocks: Vec<HnBlock> = Vec::new();
+            for _ in 0..n_blocks {
+                let block = reward_block(&st, &miner);
+                st.apply_block(&block, &circuit)
+                    .expect("empty reward applies");
+                blocks.push(block);
+            }
+            // Seam newest-first; its oldest link bottoms out at the genesis
+            // sentinel (reward_block sets prev_header_id = [0; 32]).
+            let seam: Vec<_> = blocks
+                .iter()
+                .rev()
+                .map(|b| seam_header_of(&crate::hn::header::to_engine_block(b)))
+                .collect();
+            assert_eq!(
+                seam_anchor_window(&seam),
+                st.recent_roots(),
+                "guest seam window must equal node recent_roots ({n_blocks} blocks)"
+            );
+        }
+    }
+
+    #[test]
+    fn wrong_shielded_after_is_rejected() {
+        // The shielded-pool total is header-committed (D-F1 §1.3a): a block whose
+        // `shielded_after` does not equal the recomputed post-block total is
+        // consensus-invalid, so no authenticated header can misstate the value
+        // state the settlement guest's F1 seam reads back.
+        let circuit = SpendCircuit::new();
+        let miner = addr(b"m");
+        let mut st = HnState::new(params_pot(1_000));
+        let mut bad = reward_block(&st, &miner);
+        bad.shielded_after += 1;
+        assert!(matches!(
+            st.apply_block(&bad, &circuit),
+            Err(HnError::ShieldedMismatch)
         ));
     }
 
@@ -1153,6 +1231,7 @@ mod tests {
             coinbase_ct: m1.ciphertext,
             coinbase_is_reward: false,
             pot_after: 50,
+            shielded_after: 0, // wrong destination fails at BadGenesis (before the shielded check)
             anchor: AuxAnchor::genesis(),
             aux_pow: None,
         };
@@ -1179,6 +1258,7 @@ mod tests {
             coinbase_ct: m2.ciphertext,
             coinbase_is_reward: false,
             pot_after: 50,
+            shielded_after: 0, // wrong amount fails at BadGenesis (before the shielded check)
             anchor: AuxAnchor::genesis(),
             aux_pow: None,
         };
@@ -1205,6 +1285,7 @@ mod tests {
             coinbase_ct: m3.ciphertext,
             coinbase_is_reward: false,
             pot_after: 50,
+            shielded_after: 100, // the pinned allocation applies and grows the pool by 100
             anchor: AuxAnchor::genesis(),
             aux_pow: None,
         };

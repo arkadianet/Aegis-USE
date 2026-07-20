@@ -7,8 +7,10 @@
 
 use aegis_engine::burn::burn_cm_expected;
 use aegis_engine::epoch::digest::epoch_spend_root;
-use aegis_engine::epoch::header_id::header_id;
-use aegis_engine::epoch::types::{coinbase_amount, peg_fee, FLAT_FEE, PEGOUT_DELAY};
+use aegis_engine::epoch::header_id::{header_id, header_id_from_fields, SeamHeader};
+use aegis_engine::epoch::types::{
+    coinbase_amount, peg_fee, FLAT_FEE, GENESIS_HEADER_ID, PEGOUT_DELAY,
+};
 use aegis_engine::epoch::verify::{verify_epoch, EpochError, EpochWitness};
 use aegis_engine::epoch::{epoch_journal, PegIn, PegOut, SpendPublics, SuffixBlock};
 use aegis_engine::merkle::Frontier;
@@ -18,6 +20,19 @@ use aegis_engine::settled::{empty_settled_root, SettledSet, SETTLED_DEPTH};
 use p3_field::PrimeCharacteristicRing;
 
 const CHAIN_ID: u32 = 0x484E_0005;
+
+/// The `sc_nbits` honest suffix blocks (and the seam tip) declare. Under
+/// `aux-pow` F2 is live and — with a short (< window+1) authenticated seam — the
+/// DAA expectation is the min-difficulty floor, so honest blocks must carry
+/// exactly it; without the feature F2 is compiled out and any value is fine.
+#[cfg(feature = "aux-pow")]
+fn suffix_nbits() -> u32 {
+    aegis_engine::epoch::testgen::diff1_nbits()
+}
+#[cfg(not(feature = "aux-pow"))]
+fn suffix_nbits() -> u32 {
+    0x2000_0100
+}
 
 fn digest(base: u32) -> Digest {
     core::array::from_fn(|i| F::from_u32(base.wrapping_mul(131) + i as u32 + 1))
@@ -29,6 +44,7 @@ struct Builder {
     chain_id: u32,
     frontier: Frontier,
     pot: u64,
+    shielded: u64,
     height: u64,
     prev_header_id: [u8; 32],
     miner_owner: Digest,
@@ -36,8 +52,12 @@ struct Builder {
     all_spends: Vec<SpendPublics>,
     counter: u32,
     tip_id_prev: [u8; 32],
-    pot_before: u64,
-    shielded_before: u64,
+    /// A real 2-header, genesis-terminated authenticated seam (newest first):
+    /// `seam[0]` = `T_prev` (state_root == the pre-suffix frontier root, the
+    /// weld), `seam[1]` = its parent, whose parent is the genesis sentinel. Two
+    /// headers so every honest test exercises the multi-hop hash-link walk (the
+    /// core of the F1 induction), not just the tip check.
+    seam: Vec<SeamHeader>,
 }
 
 /// A peg-out to add: (amount, recipient).
@@ -48,20 +68,57 @@ struct PegSpec {
 
 impl Builder {
     fn new(pot: u64, shielded: u64, start_height: u64) -> Self {
-        let frontier = Frontier::new();
+        // seam[1] = T_prev's parent: bottoms out at the genesis sentinel. Its
+        // fields below the tip are unconstrained by the guest (only seam[0]
+        // provides pot/shielded_before), but its id must hash-link from seam[0].
+        let seam_prev = SeamHeader {
+            height: start_height - 2,
+            prev_header_id: GENESIS_HEADER_ID,
+            prev_root: Frontier::new().root(),
+            state_root: digest(0x5EA1),
+            timestamp_ms: 1_760_000_000_000 + (start_height - 2) * 15_000,
+            sc_nbits: suffix_nbits(),
+            miner_owner: digest(7),
+            coinbase_amount: 0,
+            coinbase_cm: digest(0),
+            coinbase_is_reward: true,
+            pot_after: pot,
+            shielded_after: shielded,
+            body_cm: digest(0),
+        };
+        let seam_prev_id = header_id_from_fields(CHAIN_ID, &seam_prev);
+        // seam[0] = T_prev: state_root == the pre-suffix (empty) frontier root
+        // (the weld); parent == seam[1]'s id (the hash link); pot/shielded ==
+        // the pre-suffix totals the guest derives back.
+        let seam_tip = SeamHeader {
+            height: start_height - 1,
+            prev_header_id: seam_prev_id,
+            prev_root: Frontier::new().root(),
+            state_root: Frontier::new().root(),
+            timestamp_ms: 1_760_000_000_000 + (start_height - 1) * 15_000,
+            sc_nbits: suffix_nbits(),
+            miner_owner: digest(7),
+            coinbase_amount: 0,
+            coinbase_cm: digest(0),
+            coinbase_is_reward: true,
+            pot_after: pot,
+            shielded_after: shielded,
+            body_cm: digest(0),
+        };
+        let tip_id = header_id_from_fields(CHAIN_ID, &seam_tip);
         Self {
             chain_id: CHAIN_ID,
-            frontier,
+            frontier: Frontier::new(),
             pot,
+            shielded,
             height: start_height,
-            prev_header_id: [0u8; 32],
+            prev_header_id: tip_id,
             miner_owner: digest(7),
             blocks: Vec::new(),
             all_spends: Vec::new(),
             counter: 1000,
-            tip_id_prev: [0u8; 32],
-            pot_before: pot,
-            shielded_before: shielded,
+            tip_id_prev: tip_id,
+            seam: vec![seam_tip, seam_prev],
         }
     }
 
@@ -126,10 +183,19 @@ impl Builder {
             pegout_fees += peg_fee(p.amount);
         }
         let mut pegin_fees = 0u64;
+        let mut pegin_inflow = 0u64;
         for pi in &pins {
             pegin_fees += peg_fee(pi.amount);
+            pegin_inflow += pi.amount;
+        }
+        let mut burn_total = 0u64;
+        for p in &pos {
+            burn_total += p.amount + peg_fee(p.amount);
         }
         let pot_after = self.pot + fees + pegout_fees + pegin_fees - cb;
+        // Conservation replay (mirror of `verify_epoch`): shielded pool grows by
+        // the coinbase + net peg-in, shrinks by fees + burned value.
+        let shielded_after = self.shielded + cb + (pegin_inflow - pegin_fees) - fees - burn_total;
 
         let bid = aegis_engine::epoch::header_id::block_id(self.height, &prev_root);
         let coinbase_cm = coinbase_cm_expected(&self.miner_owner, cb, &bid);
@@ -157,7 +223,7 @@ impl Builder {
             prev_root,
             state_root,
             timestamp_ms: 1_760_000_000_000 + self.height * 15_000,
-            sc_nbits: 0x2000_0100,
+            sc_nbits: suffix_nbits(),
             txs,
             pegouts: pos,
             pegins: pins,
@@ -166,11 +232,12 @@ impl Builder {
             coinbase_cm,
             coinbase_is_reward: true,
             pot_after,
+            shielded_after,
         };
         self.prev_header_id = header_id(self.chain_id, &block);
         self.blocks.push(block);
         self.pot = pot_after;
-        // shielded tracked loosely (conservation is algebraic); keep it large.
+        self.shielded = shielded_after;
         self.height += 1;
     }
 
@@ -190,9 +257,7 @@ impl Builder {
             blocks: self.blocks.clone(),
             frontier_bytes: postcard::to_allocvec(&Frontier::new()).unwrap(),
             tip_id_prev: self.tip_id_prev,
-            pot_before: self.pot_before,
-            shielded_before: self.shielded_before,
-            seam_roots: vec![],
+            seam: self.seam.clone(),
             settled_root_in: empty_settled_root(),
             settled_paths: paths,
             spend_root_digest: epoch_spend_root(&self.all_spends),
@@ -334,12 +399,94 @@ fn broken_header_chain_dies() {
 
 #[test]
 fn wrong_sealed_tip_dies() {
+    // Tampering R7 breaks the seam's very first check: seam[0]'s recomputed id no
+    // longer equals the sealed tip the vault pinned.
     let b = honest_builder();
     let mut w = b.finish(1);
     w.tip_id_prev[0] ^= 1;
+    assert_eq!(verify_epoch(&w), Err(EpochError::SeamTipMismatch));
+}
+
+// ----- F1: the authenticated seam cannot be forged -----
+
+#[test]
+fn private_seam_state_root_dies_at_the_seam_tip() {
+    // THE F1 headline: a fabricator wants a private-tree root in the anchor
+    // window, so they doctor seam[0].state_root to a value that would admit their
+    // fake spends. But seam[0] is authenticated — its id must equal R7 — so any
+    // change to a seam field makes header_id_from_fields(seam[0]) != tip_id_prev.
+    // Unbounded value injection via a private anchor is closed at its root.
+    let b = honest_builder();
+    let mut w = b.finish(1);
+    w.seam[0].state_root[0] += F::ONE;
     assert_eq!(
         verify_epoch(&w),
-        Err(EpochError::HeaderChainBroken { i: 0 })
+        Err(EpochError::SeamTipMismatch),
+        "a private-tree seam root cannot chain to the vault's sealed tip (R7)"
+    );
+}
+
+#[test]
+fn broken_seam_link_dies() {
+    // Tamper a DEEPER seam header (seam[1]): its id changes, so seam[0]'s
+    // prev_header_id no longer hash-links to it. seam[0]'s own id is untouched, so
+    // the tip check passes and the multi-hop walk is what catches the forgery —
+    // exercising the F1 induction beyond the first header.
+    let b = honest_builder();
+    let mut w = b.finish(1);
+    assert!(w.seam.len() >= 2, "honest seam walks at least one link");
+    w.seam[1].state_root[0] += F::ONE;
+    assert_eq!(
+        verify_epoch(&w),
+        Err(EpochError::SeamLinkBroken { i: 0 }),
+        "every seam header's id must hash-link from its successor, back to R7"
+    );
+}
+
+#[test]
+fn seam_not_welded_to_the_frontier_dies() {
+    // The seam authenticates the window; the weld ties its newest root to the
+    // suffix's starting frontier. Break the weld (block[0].prev_root moved off the
+    // tip's state root, seam kept consistent) and it dies at the weld — but here
+    // the frontier binding fires first since prev_root is checked against the
+    // frontier root too; either way an unwelded seam cannot settle.
+    let b = honest_builder();
+    let mut w = b.finish(1);
+    w.blocks[0].prev_root[0] += F::ONE;
+    assert!(matches!(
+        verify_epoch(&w),
+        Err(EpochError::PrevRootMismatch) | Err(EpochError::SeamWeldBroken)
+    ));
+}
+
+// ----- F6a: suffix heights must be continuous with the settled chain -----
+
+#[test]
+fn height_jump_dies_at_height_discontinuity() {
+    // A fabricator claims a low height (e.g. to hit the DAA bootstrap floor) or
+    // any discontinuous height. F6a anchors block[0] to seam[0].height + 1.
+    let b = honest_builder();
+    let mut w = b.finish(1);
+    w.blocks[0].height += 7;
+    assert_eq!(
+        verify_epoch(&w),
+        Err(EpochError::HeightDiscontinuity { i: 0 }),
+        "suffix heights must be continuous with the authenticated seam tip"
+    );
+}
+
+// ----- F6f: timestamps must be monotone across the seam and suffix -----
+
+#[test]
+fn regressing_timestamp_dies() {
+    let b = honest_builder();
+    let mut w = b.finish(1);
+    // Block 1's stamp regresses below block 0's.
+    w.blocks[1].timestamp_ms = w.blocks[0].timestamp_ms - 1;
+    assert_eq!(
+        verify_epoch(&w),
+        Err(EpochError::TimestampRegressed { i: 1 }),
+        "suffix timestamps must be non-decreasing (the only in-guest clock rule)"
     );
 }
 
@@ -437,4 +584,34 @@ fn re_settling_a_burn_dies_at_the_settled_set() {
         Err(EpochError::AlreadySettled { .. }) => {}
         other => panic!("expected AlreadySettled, got {other:?}"),
     }
+}
+
+// ----- F2: a difficulty-1 fake block at the wrong DAA target dies -----
+
+/// The honest suffix already declares exactly the DAA expectation (the
+/// min-difficulty floor for a young chain), so it settles under F2. A fabricator
+/// who "mines" a block at a self-chosen difficulty — here anything other than the
+/// authenticated DAA expectation — is rejected at NbitsMismatch, which is what
+/// forces real, un-discountable Autolykos work in every fake block.
+#[cfg(feature = "aux-pow")]
+#[test]
+fn self_declared_nbits_dies_at_nbits_mismatch() {
+    let b = honest_builder();
+    let honest = b.finish(1);
+    verify_epoch(&honest).expect("honest suffix declares the DAA expectation and settles");
+
+    // Re-declare block 0's difficulty away from the DAA floor, rebuilding the
+    // header chain so the header-id links still hold and F2 is what fires.
+    let mut w = b.finish(1);
+    w.blocks[0].sc_nbits = w.blocks[0].sc_nbits.wrapping_add(1);
+    let mut prev = w.tip_id_prev;
+    for blk in w.blocks.iter_mut() {
+        blk.prev_header_id = prev;
+        prev = header_id(CHAIN_ID, blk);
+    }
+    assert_eq!(
+        verify_epoch(&w),
+        Err(EpochError::NbitsMismatch { i: 0 }),
+        "a block's sc_nbits must equal the authenticated LWMA/DAA expectation"
+    );
 }

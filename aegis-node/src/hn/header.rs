@@ -75,7 +75,7 @@ fn engine_spend(public_values: &[u32]) -> EngineSpend {
 
 /// Map a node [`HnBlock`] to the engine's guest-visible [`EngineSuffixBlock`] —
 /// the exact view the epoch-validity guest re-derives the header id from.
-fn to_engine_block(block: &HnBlock) -> EngineSuffixBlock {
+pub(crate) fn to_engine_block(block: &HnBlock) -> EngineSuffixBlock {
     EngineSuffixBlock {
         height: block.height,
         prev_header_id: block.prev_header_id,
@@ -111,6 +111,7 @@ fn to_engine_block(block: &HnBlock) -> EngineSuffixBlock {
         coinbase_cm: limbs_to_digest(&block.coinbase_cm),
         coinbase_is_reward: block.coinbase_is_reward,
         pot_after: block.pot_after,
+        shielded_after: block.shielded_after,
     }
 }
 
@@ -152,6 +153,7 @@ mod tests {
             coinbase_ct: vec![],
             coinbase_is_reward: true,
             pot_after: 999,
+            shielded_after: 1234,
             anchor: AuxAnchor::genesis(),
             aux_pow: None,
         }
@@ -342,6 +344,7 @@ mod tests {
             coinbase_cm: edigest_from(&hn.coinbase_cm),
             coinbase_is_reward: hn.coinbase_is_reward,
             pot_after: hn.pot_after,
+            shielded_after: hn.shielded_after,
         };
 
         assert_eq!(
@@ -353,5 +356,45 @@ mod tests {
 
     fn edigest_from(limbs: &[u32; 8]) -> aegis_engine::poseidon::Digest {
         core::array::from_fn(|i| aegis_engine::poseidon::F::from_u32(limbs[i]))
+    }
+
+    /// D-F2 cut gate: the guest's LWMA port (`aegis_engine::epoch::daa`) is
+    /// byte-identical to the node's `crate::daa` for the same view, and its
+    /// pinned image params equal `HnChainParams::testnet().daa()`. A drift here
+    /// would make the settlement guest reject honest blocks (or accept
+    /// difficulty-1 fakes), so this is the F2 oracle-parity guard.
+    #[test]
+    fn node_matches_engine_daa() {
+        use crate::daa::next_nbits as node_next_nbits;
+        use crate::hn::params::HnChainParams;
+        use aegis_engine::epoch::daa::{next_nbits as engine_next_nbits, pinned_daa_params};
+
+        let node_params = HnChainParams::testnet().daa();
+        let engine_params = pinned_daa_params();
+        assert_eq!(engine_params.target_secs, node_params.target_secs);
+        assert_eq!(engine_params.window, node_params.window);
+        assert_eq!(
+            engine_params.min_difficulty_nbits, node_params.min_difficulty_nbits,
+            "pinned image min-difficulty must equal the node's genesis difficulty"
+        );
+
+        // Node view → engine view conversion is identity (both take the pinned
+        // params). Compare across bootstrap, steady, fast, and slow regimes.
+        let min = node_params.min_difficulty_nbits;
+        let t = node_params.target_secs * 1_000;
+        let views: Vec<Vec<(u64, u32)>> = vec![
+            (0..30u64).map(|i| (1_000_000 + i * t, min)).collect(), // < window+1: bootstrap
+            (0..91u64).map(|i| (1_000_000 + i * t, min)).collect(), // steady
+            (0..91u64).map(|i| (1_000_000 + i * (t / 2), min)).collect(), // fast
+            (0..91u64).map(|i| (1_000_000 + i * (t * 3), min)).collect(), // slow
+        ];
+        for v in &views {
+            assert_eq!(
+                node_next_nbits(&node_params, v),
+                engine_next_nbits(&engine_params, v),
+                "node and guest DAA must agree on {} entries",
+                v.len()
+            );
+        }
     }
 }

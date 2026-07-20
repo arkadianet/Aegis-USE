@@ -31,6 +31,23 @@ pub const PEGOUT_DELAY: u64 = 10;
 /// Anchor-window: a spend's `PUB_ROOT` must be one of the last `ROOT_WINDOW`
 /// state-roots along the chain (`engine/wallet/src/chain.rs`).
 pub const ROOT_WINDOW: usize = 100;
+/// LWMA difficulty window (mirror `hn/params.rs::HN_DAA_WINDOW`). The DAA
+/// consults the last `DAA_WINDOW + 1` `(timestamp, nbits)` pairs.
+pub const DAA_WINDOW: usize = 90;
+/// F1 authenticated-seam length: the guest walks header-id preimages back this
+/// many blocks (enough to serve BOTH the anchor window and the DAA history) or
+/// until it reaches [`GENESIS_HEADER_ID`]. `max(ROOT_WINDOW, DAA_WINDOW + 1)`.
+pub const SEAM_LEN: usize = if ROOT_WINDOW > DAA_WINDOW + 1 {
+    ROOT_WINDOW
+} else {
+    DAA_WINDOW + 1
+};
+/// The pinned base case of the seam induction (`epoch-validity-design.md` §1.2):
+/// the parent-id sentinel below the genesis block. A Poseidon2 header id is
+/// never all-zero, so no real header collides with it; a seam link whose
+/// `prev_header_id` equals this — and whose own id chains to R7 — is genuinely
+/// the genesis block, terminating the walk on a young chain.
+pub const GENESIS_HEADER_ID: [u8; 32] = [0u8; 32];
 
 /// Peg fee for `amount`: `PEG_FEE_PERCENT`% of it, at least 1 base unit.
 pub fn peg_fee(amount: u64) -> u64 {
@@ -103,6 +120,12 @@ pub struct SuffixBlock {
     /// allocation block is never inside a settled suffix.
     pub coinbase_is_reward: bool,
     pub pot_after: u64,
+    /// The shielded-pool total AFTER this block (header-committed, D-F1 §1.3a).
+    /// A NEW header field: `pot_after` already pinned the pot; this pins the
+    /// other half of the conservation invariant so that *any* authenticated
+    /// header fixes the full value state. F1's seam derives `shielded_before`
+    /// from `seam[0].shielded_after`, making the injected-value bound exact.
+    pub shielded_after: u64,
 }
 
 impl SuffixBlock {
